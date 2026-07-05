@@ -1,0 +1,31 @@
+{
+  "name": "aerie-server",
+  "version": "1.0.0",
+  "description": "Aerie — self-hosted private cloud server",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Eyonic/aerie.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mime-types": "^2.1.35",
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.33.5",
+    "tsx": "^4.19.2"
+  }
+}

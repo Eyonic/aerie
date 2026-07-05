@@ -1,0 +1,74 @@
+# Aerie deploy configuration
+# ------------------------------------------------------------------
+# Copy this file to deploy/deploy.conf and fill in YOUR values.
+# deploy/deploy.conf is gitignored — it stays on your server and never
+# enters the repo. All three deploy scripts (gen-env.sh, run.sh,
+# npm-proxy.sh) source it automatically when present.
+#
+# This is a plain shell file: KEY=value, no spaces around '='.
+
+# --- Host -----------------------------------------------------------
+# LAN IP of the Docker host that runs Aerie and its backend services.
+# REQUIRED by gen-env.sh and npm-proxy.sh.
+HOST_IP=192.168.0.10
+
+# Where Aerie keeps its runtime state on the host (env file, data,
+# user files, downloads). Existing installs from when the app was named
+# CloudBox should keep their old path (e.g. /mnt/user/appdata/cloudbox)
+# so data and settings carry over.
+APPDIR=/mnt/user/appdata/aerie
+
+# Where the Aerie source tree is checked out on the host (run.sh
+# builds the image from here).
+SRC_DIR=/root/aerie-src
+
+# Host path of your shared media library (mounted read-mostly at /media).
+MEDIA_DIR=/mnt/user/Media
+
+# Optional: public HTTPS address of this Aerie (shown in UI hints for
+# casting / mic / PWA install, which need a secure context). Leave empty
+# if you only use it on the LAN.
+PUBLIC_URL=
+
+# Optional: LAN address of this server (default http://HOST_IP:8200) — the
+# native apps learn it from /api/health for automatic LAN/cloud failover.
+LAN_URL=
+
+# Optional: second language for the AI "Translate" action (English <-> this).
+TRANSLATE_LANG=
+
+# --- Reverse proxy (npm-proxy.sh only) -------------------------------
+# Public domain to serve Aerie on via Nginx Proxy Manager.
+DOMAIN=cloud.example.com
+# NPM appdata directory on the host (contains data/database.sqlite and
+# data/nginx/proxy_host/).
+NPM_DATA_DIR=/path/to/appdata/nginx-proxy-manager
+# Name of the running NPM container (used for `nginx -s reload`).
+NPM_CONTAINER=nginx-proxy-manager
+
+# --- PhotoPrism instances (gen-env.sh) --------------------------------
+# One PhotoPrism instance per household member, as comma-separated
+# name=containerName:port pairs. gen-env.sh emits PP_<NAME>_URL for each
+# (pointing at http://$HOST_IP:port) and harvests the admin user/password
+# from the default instance's container env via `docker inspect`.
+PP_INSTANCES_CONF='alice=PhotoPrism_alice:2342,bob=PhotoPrism_bob:2343'
+# Which instance name is the default (falls back to the first one).
+PP_DEFAULT=alice
+
+# --- AI models --------------------------------------------------------
+# Ollama model tag for local AI chat.
+OLLAMA_MODEL=llama3.2:latest
+# DeepSeek model name for cloud AI chat.
+DEEPSEEK_MODEL=deepseek-chat
+# File holding your DeepSeek API key (kept on the server only, one line).
+# Defaults to $APPDIR/deepseek.key when unset.
+DEEPSEEK_KEY_FILE=
+
+# --- Service appdata paths (gen-env.sh key harvesting) -----------------
+# gen-env.sh reads API keys straight out of these services' config/DB
+# files so you never have to copy keys by hand. Leave one empty (or point
+# it at a non-existent path) to skip that integration.
+JELLYFIN_APPDATA=/path/to/appdata/jellyfin
+ABS_APPDATA=/path/to/appdata/audiobookshelf
+JELLYSEERR_APPDATA=/path/to/appdata/jellyseerr
+LIDARR_APPDATA=/path/to/appdata/lidarr

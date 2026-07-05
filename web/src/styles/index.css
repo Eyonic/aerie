@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  body {
+    @apply bg-ink-950 text-slate-200 font-sans antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2f2f42; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #3d3d54; background-clip: content-box; }
+  ::selection { background: rgba(99,102,241,0.35); }
+}
+
+@layer components {
+  /* Frosted glass surfaces — the Aerie signature look */
+  .glass {
+    @apply bg-ink-850/70 backdrop-blur-xl border border-white/[0.06];
+  }
+  .glass-strong {
+    @apply bg-ink-800/90 backdrop-blur-2xl border border-white/[0.08];
+  }
+  .card {
+    @apply glass rounded-2xl shadow-card;
+  }
+  .card-hover {
+    @apply transition-all duration-200 hover:border-white/[0.12] hover:bg-ink-800/80 hover:-translate-y-0.5;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium
+      transition-all duration-150 disabled:opacity-40 disabled:pointer-events-none select-none;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-500 active:scale-[0.98] shadow-[0_4px_16px_-4px_rgba(99,102,241,0.6)];
+  }
+  .btn-ghost {
+    @apply btn text-slate-300 hover:bg-white/[0.06] hover:text-white;
+  }
+  .btn-secondary {
+    @apply btn bg-white/[0.06] text-slate-200 hover:bg-white/[0.1] border border-white/[0.06];
+  }
+  .btn-danger {
+    @apply btn bg-accent-red/90 text-white hover:bg-accent-red;
+  }
+  .icon-btn {
+    @apply grid place-items-center rounded-lg w-9 h-9 text-slate-400 hover:text-white hover:bg-white/[0.07] transition-colors;
+  }
+
+  .input {
+    @apply w-full rounded-xl bg-ink-900/80 border border-white/[0.08] px-3.5 py-2.5 text-sm text-slate-100
+      placeholder:text-slate-500 outline-none transition
+      focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium
+      bg-white/[0.06] text-slate-300 border border-white/[0.06];
+  }
+
+  .section-title { @apply text-lg font-semibold text-white tracking-tight; }
+  .muted { @apply text-slate-400; }
+
+  .skeleton {
+    @apply relative overflow-hidden bg-ink-800 rounded-xl;
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 -translate-x-full;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04), transparent);
+    animation: shimmer 1.5s infinite;
+  }
+
+  /* Sidebar nav item */
+  .nav-item {
+    @apply flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium text-slate-400
+      transition-all duration-150 hover:text-white hover:bg-white/[0.05] cursor-pointer;
+  }
+  .nav-item-active {
+    @apply text-white bg-gradient-to-r from-brand-600/25 to-brand-500/5 border border-brand-500/20
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.05)];
+  }
+}
+
+@keyframes shimmer { 100% { transform: translateX(100%); } }
+
+/* Range sliders (players) */
+input[type="range"].cb-range {
+  -webkit-appearance: none; appearance: none;
+  height: 4px; border-radius: 999px;
+  background: rgba(255,255,255,0.12);
+  cursor: pointer;
+}
+input[type="range"].cb-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 3px rgba(99,102,241,0.5);
+}

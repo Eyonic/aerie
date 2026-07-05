@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Aerie</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:grid; place-items:center; font-family: 'Segoe UI', -apple-system, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #1a1a2e, #0a0a0f); color:#e2e8f0; }
+  .card { width: 420px; max-width: 90vw; text-align:center; }
+  .logo { width:72px;height:72px;border-radius:22px;margin:0 auto 18px;
+    background:#0b0b10; border:1px solid rgba(255,255,255,.12); display:grid;place-items:center;
+    box-shadow: 0 18px 50px -12px rgba(0,0,0,.8); }
+  h1 { font-size:24px; margin:0 0 6px; font-weight:700; }
+  p { color:#94a3b8; font-size:14px; margin:0 0 22px; }
+  input { width:100%; padding:13px 15px; border-radius:12px; border:1px solid rgba(255,255,255,.1);
+    background:#0f0f16; color:#fff; font-size:15px; outline:none; }
+  input:focus { border-color:#6366f1; box-shadow:0 0 0 3px rgba(99,102,241,.2); }
+  button { width:100%; margin-top:14px; padding:13px; border:0; border-radius:12px; cursor:pointer;
+    background:#4f46e5; color:#fff; font-size:15px; font-weight:600; }
+  button:hover { background:#6366f1; }
+  .hint { margin-top:14px; font-size:12px; color:#64748b; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 20 L8.5 9 L12 14 L15.5 8 L22 20 Z"/><path d="M12 2.5 V17.5"/><path d="M9.4 14 H14.6"/><circle cx="12" cy="19" r="1.1"/>
+      </svg>
+    </div>
+    <h1>Connect to Aerie</h1>
+    <p>Enter the address of your Aerie server.</p>
+    <input id="url" placeholder="https://aerie.example.com" />
+    <button id="go">Connect</button>
+    <div class="hint">On your home network a LAN address like http://SERVER-IP:8200 also works</div>
+  </div>
+  <script>
+    (async () => {
+      const input = document.getElementById('url');
+      // Pre-fills the saved server, or the build's bundled default, if any.
+      try { input.value = (await window.cloudbox.getUrl()) || ''; } catch { input.value = ''; }
+      const go = () => window.cloudbox.setUrl(input.value);
+      document.getElementById('go').addEventListener('click', go);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+      input.focus(); input.select();
+    })();
+  </script>
+</body>
+</html>

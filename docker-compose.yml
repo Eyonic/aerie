@@ -1,0 +1,23 @@
+# Generic Aerie compose file.
+#
+#   cp aerie.env.example aerie.env   # then fill in your values
+#   docker compose up -d --build
+#
+# JWT_SECRET is auto-generated (and persisted under /data) if unset, but
+# setting one explicitly in aerie.env is recommended.
+services:
+  aerie:
+    build: .
+    image: aerie:latest
+    container_name: aerie
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    env_file:
+      - aerie.env
+    volumes:
+      - ./appdata/data:/data
+      - ./appdata/files:/files
+      - ./appdata/downloads:/downloads
+      # Point at your media library (read-only) to enable the media features:
+      # - /path/to/media:/media:ro

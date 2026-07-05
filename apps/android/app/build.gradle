@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Optional baked-in server defaults. Resolution order:
+//   1. Gradle project property   (-PaerieDefaultUrl=… / -PaerieLanUrl=…)
+//   2. Environment variable      (AERIE_DEFAULT_URL / AERIE_LAN_URL)
+//   3. Empty string              (generic build — app prompts for the server)
+def aerieUrl = { String prop, String envKey ->
+    def v = project.findProperty(prop) ?: System.getenv(envKey) ?: ''
+    return '"' + v.toString().replace('\\', '\\\\').replace('"', '\\"') + '"'
+}
+
+android {
+    namespace 'org.aerie.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "org.aerie.app"
+        minSdk 24
+        targetSdk 34
+        versionCode 3
+        versionName "1.2.0"
+
+        buildConfigField 'String', 'DEFAULT_URL', aerieUrl('aerieDefaultUrl', 'AERIE_DEFAULT_URL')
+        buildConfigField 'String', 'LAN_URL', aerieUrl('aerieLanUrl', 'AERIE_LAN_URL')
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
