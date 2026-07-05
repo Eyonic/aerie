@@ -23,6 +23,12 @@
 |---|---|---|
 | ![Movies](docs/screenshots/movies.png) | ![Player with 2K upscaling](docs/screenshots/player-2k.png) | ![Music](docs/screenshots/music.png) |
 
+Request new titles right from the app — movies & TV through Jellyseerr, and music (whole artist discographies) through your own Lidarr:
+
+| | |
+|---|---|
+| ![Request movies & TV](docs/screenshots/requests.png) | ![Request music](docs/screenshots/requests-music.png) |
+
 ## How it works
 
 Aerie is a single Docker container (Node/Express API + React web app). It doesn't replace your media stack — it **federates** it. Every integration is optional: leave its URL unset in the env and that feature simply reports "not configured" while everything else keeps working.
