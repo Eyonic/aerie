@@ -319,6 +319,10 @@ export const api = {
   settings: {
     get: () => req<{ user: User; preferences: any }>('GET', '/api/settings'),
     profile: (params: any) => req<User>('PATCH', '/api/settings/profile', params),
+    avatar: {
+      upload: (file: File) => { const form = new FormData(); form.append('file', file); return req<User>('POST', '/api/settings/avatar', undefined, { form }); },
+      remove: () => req<User>('DELETE', '/api/settings/avatar'),
+    },
     password: (current: string, next: string) => req('POST', '/api/settings/password', { current, next }),
     preferences: (params: any) => req<{ preferences: any }>('PATCH', '/api/settings/preferences', params),
     twoFa: {

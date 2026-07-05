@@ -19,6 +19,7 @@ export function rowToUser(r: any): User {
     email: r.email,
     role: r.role,
     avatarColor: r.avatar_color,
+    avatarUrl: r.avatar_version ? `/api/settings/avatar/${r.id}?v=${r.avatar_version}` : null,
     storageQuotaBytes: r.storage_quota_bytes,
     aiMode: r.ai_mode,
     createdAt: r.created_at,

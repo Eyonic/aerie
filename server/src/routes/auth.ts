@@ -48,8 +48,9 @@ r.get('/me', authMiddleware, (req: AuthedRequest, res) => {
 
 r.get('/users', authMiddleware, (_req, res) => {
   // public-ish directory for share targets (no secrets)
-  const rows = db.prepare('SELECT id, username, display_name, avatar_color FROM users').all() as any[];
-  res.json(rows.map(u => ({ id: u.id, username: u.username, displayName: u.display_name, avatarColor: u.avatar_color })));
+  const rows = db.prepare('SELECT id, username, display_name, avatar_color, avatar_version FROM users').all() as any[];
+  res.json(rows.map(u => ({ id: u.id, username: u.username, displayName: u.display_name, avatarColor: u.avatar_color,
+    avatarUrl: u.avatar_version ? `/api/settings/avatar/${u.id}?v=${u.avatar_version}` : null })));
 });
 
 export default r;

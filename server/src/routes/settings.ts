@@ -1,10 +1,19 @@
 // Per-user settings (profile, AI mode, preferences).
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import multer from 'multer';
+import sharp from 'sharp';
 import { rowToUser, type AuthedRequest } from '../lib/auth.js';
 import { db, audit } from '../lib/db.js';
+import { config } from '../config.js';
 
 const r = Router();
+
+const avatarsDir = path.join(config.dataDir, 'avatars');
+const avatarFile = (id: number) => path.join(avatarsDir, `${id}.webp`);
+const avatarUpload = multer({ dest: path.join(config.dataDir, 'tmp'), limits: { fileSize: 12 * 1024 * 1024 } });
 
 r.get('/', (req: AuthedRequest, res) => {
   const row = db.prepare('SELECT settings FROM users WHERE id=?').get(req.user!.id) as any;
@@ -21,6 +30,43 @@ r.patch('/profile', (req: AuthedRequest, res) => {
   if (aiMode !== undefined) { fields.push('ai_mode=?'); vals.push(aiMode); }
   if (fields.length) db.prepare(`UPDATE users SET ${fields.join(',')} WHERE id=?`).run(...vals, req.user!.id);
   res.json(rowToUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user!.id)));
+});
+
+// Upload a profile picture: re-encoded through sharp (256×256 webp, centre-cropped)
+// which also strips EXIF and neutralizes anything that isn't a real image.
+r.post('/avatar', avatarUpload.single('file'), async (req: AuthedRequest, res) => {
+  const f = req.file;
+  if (!f) return res.status(400).json({ error: 'no_file' });
+  try {
+    fs.mkdirSync(avatarsDir, { recursive: true });
+    await sharp(f.path).rotate().resize(256, 256, { fit: 'cover' }).webp({ quality: 88 }).toFile(avatarFile(req.user!.id));
+    const version = Date.now();
+    db.prepare('UPDATE users SET avatar_version=? WHERE id=?').run(version, req.user!.id);
+    audit(req.user!.id, req.user!.username, 'avatar_updated');
+    res.json(rowToUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user!.id)));
+  } catch {
+    res.status(400).json({ error: 'invalid_image' });
+  } finally {
+    fs.promises.unlink(f.path).catch(() => {});
+  }
+});
+
+r.delete('/avatar', (req: AuthedRequest, res) => {
+  try { fs.unlinkSync(avatarFile(req.user!.id)); } catch { /* already gone */ }
+  db.prepare('UPDATE users SET avatar_version=0 WHERE id=?').run(req.user!.id);
+  res.json(rowToUser(db.prepare('SELECT * FROM users WHERE id=?').get(req.user!.id)));
+});
+
+// Serve any user's avatar (authed context: topbar, admin list, shares). The ?v=
+// stamp in the URL makes it safely long-cacheable.
+r.get('/avatar/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).end();
+  const file = avatarFile(id);
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.setHeader('Content-Type', 'image/webp');
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  fs.createReadStream(file).pipe(res);
 });
 
 r.post('/password', (req: AuthedRequest, res) => {

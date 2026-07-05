@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { api } from '../lib/api';
@@ -47,7 +47,11 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-function Avatar({ name, color, size = 72 }: { name: string; color: string; size?: number }) {
+function Avatar({ name, color, size = 72, src }: { name: string; color: string; size?: number; src?: string | null }) {
+  if (src) {
+    return <img src={src} alt={name} className="rounded-2xl object-cover shadow-glow shrink-0 bg-ink-800"
+      style={{ width: size, height: size }} />;
+  }
   return (
     <div className="rounded-2xl grid place-items-center font-bold text-white shadow-glow shrink-0"
       style={{ width: size, height: size, background: `linear-gradient(135deg, ${color}, ${color}bb)`, fontSize: size * 0.36 }}>
@@ -62,7 +66,30 @@ function ProfileTab({ user }: { user: User }) {
   const [email, setEmail] = useState(user.email || '');
   const [color, setColor] = useState(user.avatarColor || '#6366f1');
   const [saving, setSaving] = useState(false);
+  const [uploadingPic, setUploadingPic] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const setUser = useAuth.getState().setUser;
+
+  const pickPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking the same file
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { toast('Choose an image file', 'warning'); return; }
+    if (file.size > 12 * 1024 * 1024) { toast('Image is too large', 'warning', 'Max 12 MB.'); return; }
+    setUploadingPic(true);
+    try {
+      setUser(await api.settings.avatar.upload(file));
+      toast('Profile picture updated', 'success');
+    } catch (e: any) {
+      toast('Could not upload picture', 'error', e?.message === 'invalid_image' ? 'That file is not a valid image.' : e?.message);
+    } finally { setUploadingPic(false); }
+  };
+  const removePhoto = async () => {
+    setUploadingPic(true);
+    try { setUser(await api.settings.avatar.remove()); toast('Profile picture removed', 'info'); }
+    catch (e: any) { toast('Could not remove picture', 'error', e?.message); }
+    finally { setUploadingPic(false); }
+  };
 
   const dirty = displayName !== user.displayName || (email || '') !== (user.email || '') || color !== user.avatarColor;
   const emailInvalid = !!email.trim() && !isValidEmail(email.trim());
@@ -88,10 +115,24 @@ function ProfileTab({ user }: { user: User }) {
       </>}>
       <div className="flex flex-col sm:flex-row gap-6">
         <div className="flex sm:flex-col items-center gap-4 sm:w-40">
-          <Avatar name={displayName} color={color} size={84} />
+          <div className="relative group shrink-0">
+            <Avatar name={displayName} color={color} size={84} src={user.avatarUrl ? api.url(user.avatarUrl) : undefined} />
+            <button type="button" onClick={() => fileRef.current?.click()} disabled={uploadingPic}
+              aria-label="Change profile picture"
+              className="absolute inset-0 rounded-2xl bg-black/55 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity grid place-items-center text-white">
+              {uploadingPic ? <Spinner size={20} /> : <Icon.Upload size={22} />}
+            </button>
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={pickPhoto} />
           <div className="text-center hidden sm:block">
             <p className="text-sm font-medium text-white truncate max-w-[9rem]">{displayName || 'Unnamed'}</p>
             <p className="text-xs muted">@{user.username}</p>
+            <div className="flex items-center justify-center gap-2 mt-2">
+              <button type="button" className="text-xs text-brand-400 hover:underline disabled:opacity-50" disabled={uploadingPic} onClick={() => fileRef.current?.click()}>
+                {user.avatarUrl ? 'Change' : 'Upload photo'}
+              </button>
+              {user.avatarUrl && <button type="button" className="text-xs text-slate-500 hover:text-accent-red disabled:opacity-50" disabled={uploadingPic} onClick={removePhoto}>Remove</button>}
+            </div>
           </div>
         </div>
         <div className="flex-1 space-y-5">

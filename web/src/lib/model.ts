@@ -10,6 +10,7 @@ export interface User {
   email: string | null;
   role: Role;
   avatarColor: string;
+  avatarUrl?: string | null;
   storageQuotaBytes: number | null; // null = unlimited
   aiMode: AiMode;
   createdAt: string;

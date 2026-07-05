@@ -131,9 +131,11 @@ function Topbar() {
       <Menu
         trigger={
           <button className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-xl hover:bg-white/[0.06] transition">
-            <div className="w-8 h-8 rounded-full grid place-items-center text-xs font-semibold text-white" style={{ background: user?.avatarColor || '#6366f1' }}>
-              {initials(user?.displayName || 'U')}
-            </div>
+            {user?.avatarUrl
+              ? <img src={api.url(user.avatarUrl)} alt={user.displayName} className="w-8 h-8 rounded-full object-cover bg-ink-800" />
+              : <div className="w-8 h-8 rounded-full grid place-items-center text-xs font-semibold text-white" style={{ background: user?.avatarColor || '#6366f1' }}>
+                  {initials(user?.displayName || 'U')}
+                </div>}
             <div className="hidden sm:block text-left">
               <p className="text-sm font-medium text-white leading-none">{user?.displayName}</p>
               <p className="text-[10px] text-slate-500 mt-0.5 capitalize">{user?.role}</p>
