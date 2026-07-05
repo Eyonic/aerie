@@ -1,5 +1,6 @@
 // Movies / TV / Music / Videos — proxied through Aerie so playback stays in-app.
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import { type AuthedRequest } from '../lib/auth.js';
 import * as jf from '../services/jellyfin.js';
 
@@ -126,9 +127,15 @@ r.get('/stream/:id', async (req: AuthedRequest, res, next) => {
     // BreakOnNonKeyFrames suits hls.js only; Safari's native HLS player wants
     // keyframe-aligned segments (the client says which engine it uses).
     const nativeHls = String(req.query.native) === '1';
+    // Fresh PlaySessionId per master request (like jellyfin-web): without it
+    // Jellyfin matches the request to an existing transcode session and keeps
+    // serving its OLD audio — an AudioStreamIndex change was silently ignored
+    // (verified: byte-identical segments for different tracks).
+    const playSessionId = crypto.randomBytes(8).toString('hex');
     const masterUrl = `${base}/Videos/${id}/master.m3u8?api_key=${key}&MediaSourceId=${id}`
       + `&VideoCodec=h264&AudioCodec=aac,mp3&TranscodingMaxAudioChannels=2&SegmentContainer=ts&MinSegments=1`
       + `&MaxStreamingBitrate=120000000&VideoBitrate=119808000&AudioBitrate=192000`
+      + `&PlaySessionId=${playSessionId}`
       + (nativeHls ? '' : `&BreakOnNonKeyFrames=True`)
       + (audioStream != null ? `&AudioStreamIndex=${audioStream}` : '');
     const upstream = await fetch(masterUrl);
