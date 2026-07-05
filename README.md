@@ -78,7 +78,7 @@ Files, Docs, Sheets, Shares, Backups and Automations are fully built-in and need
 
 It's also where you set your server's **public and LAN addresses** — the native apps learn both from the server and switch between them automatically (home Wi-Fi ↔ mobile data) without rebuilding or reconfiguring anything on the devices.
 
-## do you want to help this project? be actief and send me feedback or send me a coffee  
+## Want to help this project? Get involved by sharing your feedback or supporting me with a coffee.
 
 <a href="https://www.buymeacoffee.com/Eyonic" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
