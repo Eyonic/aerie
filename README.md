@@ -2,7 +2,7 @@
 
 **Your entire digital life, self-hosted, in one app.** Aerie is a private-cloud hub that unifies your files, photos, movies, TV, music, audiobooks, documents and AI tools behind a single beautiful interface — powered by the self-hosted services you already run.
 
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](docs/screenshots/dashboard.png?v=2)
 
 ## What you get
 
@@ -21,13 +21,37 @@
 
 | | | |
 |---|---|---|
-| ![Movies](docs/screenshots/movies.png) | ![Player with 2K upscaling](docs/screenshots/player-2k.png) | ![Music](docs/screenshots/music.png) |
+| ![Movies](docs/screenshots/movies.png?v=2) | ![Player with 2K upscaling](docs/screenshots/player-2k.png?v=2) | ![Music](docs/screenshots/music.png?v=2) |
 
 Request new titles right from the app — movies & TV through Jellyseerr, and music (whole artist discographies) through your own Lidarr:
 
 | | |
 |---|---|
-| ![Request movies & TV](docs/screenshots/requests.png) | ![Request music](docs/screenshots/requests-music.png) |
+| ![Request movies & TV](docs/screenshots/requests.png?v=2) | ![Request music](docs/screenshots/requests-music.png?v=2) |
+
+### Create — documents, spreadsheets & image editing
+
+| | | |
+|---|---|---|
+| ![Documents](docs/screenshots/documents.png?v=2) | ![Spreadsheets with live formulas](docs/screenshots/spreadsheets.png?v=2) | ![Image editor with layers](docs/screenshots/image-editor.png?v=2) |
+
+### AI, on your own hardware
+
+| | | |
+|---|---|---|
+| ![AI Image Studio](docs/screenshots/ai-image-studio.png?v=2) | ![AI Music Studio](docs/screenshots/music-studio.png?v=2) | ![AI Assistant](docs/screenshots/assistant.png?v=2) |
+
+### Your library & files
+
+| | | |
+|---|---|---|
+| ![Files](docs/screenshots/files.png?v=2) | ![Audiobooks](docs/screenshots/audiobooks.png?v=2) | ![TV Shows](docs/screenshots/tv-shows.png?v=2) |
+
+### Runs like an appliance
+
+| | | |
+|---|---|---|
+| ![Automations](docs/screenshots/automations.png?v=2) | ![Live monitoring](docs/screenshots/monitoring.png?v=2) | ![Nightly backups](docs/screenshots/backups.png?v=2) |
 
 ## How it works
 
@@ -49,7 +73,7 @@ Files, Docs, Sheets, Shares, Backups and Automations are fully built-in and need
 
 **You don't need to touch a config file for any of this.** The admin **Integrations** page (sidebar → System → Integrations) lets you enter every service URL and API key from the browser, with one-click connection tests — values save to the database, apply instantly without a restart, and override the environment. Env vars remain fully supported as defaults/automation (see [`aerie.env.example`](aerie.env.example)); secrets saved in the app are write-only and never shown again.
 
-![Integrations](docs/screenshots/integrations.png)
+![Integrations](docs/screenshots/integrations.png?v=2)
 
 It's also where you set your server's **public and LAN addresses** — the native apps learn both from the server and switch between them automatically (home Wi-Fi ↔ mobile data) without rebuilding or reconfiguring anything on the devices.
 
