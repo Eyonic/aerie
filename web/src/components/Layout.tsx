@@ -58,8 +58,8 @@ function Sidebar() {
         'fixed lg:static inset-y-0 left-0 z-50 w-[248px] shrink-0 flex flex-col glass border-r border-white/[0.06] transition-transform',
         sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0')}>
         <div className="h-16 flex items-center gap-2.5 px-5 shrink-0">
-          <div className="w-9 h-9 rounded-xl bg-ink-950 border border-white/10 grid place-items-center shadow-card">
-            <Icon.Logo size={20} className="text-white" />
+          <div className="w-9 h-9 rounded-xl bg-ink-950 border border-white/10 overflow-hidden grid place-items-center shadow-card">
+            <img src="/logo.png" alt="Aerie" className="w-full h-full object-contain" />
           </div>
           <div>
             <p className="font-bold text-white tracking-tight leading-none">Aerie</p>
