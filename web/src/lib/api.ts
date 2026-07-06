@@ -4,6 +4,7 @@ import type {
   MediaItem, Photo, PhotoAlbum, Book, Chapter, DocMeta, AiJob, GeneratedImage,
   Share, ServiceStatus, SystemHealth, BackupStatus, AuditEvent, Device,
   Automation, Notification, SearchResponse, MusicResult, MusicRequest,
+  HistoryKind, HistoryEntry, HistoryStats,
 } from './model';
 
 let TOKEN: string | null = localStorage.getItem('cb_token');
@@ -64,6 +65,14 @@ export const api = {
   // ---- dashboard ----
   dashboard: () => req<DashboardData>('GET', '/api/dashboard')
     .then(d => d ? { ...d, continueWatching: tokMediaList(d.continueWatching) } : d),
+
+  // ---- history ----
+  history: {
+    beat: (params: { kind: HistoryKind; itemId: string; title: string; subtitle?: string; imageUrl?: string; positionSec?: number; durationSec?: number }) =>
+      req<{ ok: boolean }>('POST', '/api/history/beat', params),
+    list: (kind?: string) => req<{ entries: HistoryEntry[] }>('GET', `/api/history${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
+    stats: () => req<HistoryStats>('GET', '/api/history/stats'),
+  },
 
   // ---- files ----
   files: {

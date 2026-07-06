@@ -89,6 +89,27 @@ export interface StreamInfo {
   positionTicks?: number;
 }
 
+export type HistoryKind = 'movie' | 'episode' | 'video' | 'music' | 'audiobook' | 'podcast';
+export interface HistoryEntry {
+  kind: HistoryKind;
+  itemId: string;
+  day: string;
+  title: string;
+  subtitle?: string | null;
+  imageUrl?: string | null;
+  seconds: number;
+  positionSec: number;
+  durationSec: number;
+  lastTs: string;
+}
+export interface HistoryStats {
+  watchSec: number;
+  musicSec: number;
+  bookSec: number;
+  weekSec: number;
+  topItems: (Pick<HistoryEntry, 'kind' | 'itemId' | 'title' | 'subtitle' | 'imageUrl' | 'lastTs'> & { totalSec: number })[];
+}
+
 // ---------- Photos (PhotoPrism-backed) ----------
 export interface Photo {
   id: string;

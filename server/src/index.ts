@@ -35,6 +35,7 @@ import requestsRouter from './routes/requests.js';
 import musicGenRouter from './routes/musicgen.js';
 import castRouter, { castStreamRouter } from './routes/cast.js';
 import tilesRouter from './routes/tiles.js';
+import historyRouter from './routes/history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -91,6 +92,7 @@ loadIntegrationOverrides();
 app.use('/api/requests', requestsRouter);
 app.use('/api/music-gen', musicGenRouter);
 app.use('/api/cast', castRouter);
+app.use('/api/history', historyRouter);
 
 // Serve built web app (SPA)
 const webDist = path.resolve(__dirname, '../../web/dist');

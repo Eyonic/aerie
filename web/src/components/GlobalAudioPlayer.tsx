@@ -37,6 +37,26 @@ export function GlobalAudioPlayer() {
     return () => { clearInterval(t); report(); };
   }, [p.current]);
 
+  useEffect(() => {
+    const cur = p.current;
+    const a = audioRef.current;
+    if (!cur || !a) return;
+    const beat = () => {
+      const st = usePlayer.getState();
+      if (!st.playing || a.paused) return;
+      const d = a.duration && isFinite(a.duration) && a.duration > 0 ? a.duration : (cur.durationSec || st.duration || 0);
+      api.history.beat({
+        kind: cur.kind === 'audiobook' || cur.kind === 'podcast' ? cur.kind : 'music',
+        itemId: cur.id, title: cur.title, subtitle: cur.subtitle, imageUrl: cur.artUrl,
+        positionSec: a.currentTime || st.currentTime || 0, durationSec: d,
+      }).catch(() => {});
+    };
+    a.addEventListener('play', beat);
+    const t = p.playing ? setInterval(beat, 20000) : null;
+    if (p.playing) beat();
+    return () => { if (t) clearInterval(t); a.removeEventListener('play', beat); };
+  }, [p.current, p.playing]);
+
   // OS media controls (lock screen / notification badge on phones).
   useEffect(() => {
     if (!('mediaSession' in navigator) || !p.current) return;

@@ -17,6 +17,7 @@ const TVShows = lazy(() => import('./pages/TVShows'));
 const Music = lazy(() => import('./pages/Music'));
 const Audiobooks = lazy(() => import('./pages/Audiobooks'));
 const Podcasts = lazy(() => import('./pages/Podcasts'));
+const History = lazy(() => import('./pages/History'));
 const Documents = lazy(() => import('./pages/Documents'));
 const Spreadsheets = lazy(() => import('./pages/Spreadsheets'));
 const ImageEditor = lazy(() => import('./pages/ImageEditor'));
@@ -56,6 +57,7 @@ export default function App() {
           <Route path="/music" element={<Music />} />
           <Route path="/audiobooks" element={<Audiobooks />} />
           <Route path="/podcasts" element={<Podcasts />} />
+          <Route path="/history" element={<History />} />
           <Route path="/documents" element={<Documents />} />
           <Route path="/documents/:id" element={<Documents />} />
           <Route path="/spreadsheets" element={<Spreadsheets />} />

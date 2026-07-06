@@ -155,6 +155,22 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS play_history (
+  user_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  day TEXT NOT NULL,
+  title TEXT NOT NULL,
+  subtitle TEXT,
+  image_url TEXT,
+  seconds INTEGER NOT NULL DEFAULT 0,
+  position_sec REAL NOT NULL DEFAULT 0,
+  duration_sec REAL NOT NULL DEFAULT 0,
+  first_ts TEXT NOT NULL DEFAULT (datetime('now')),
+  last_ts TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, kind, item_id, day)
+);
 `);
 
 // ---------- Migrations (add columns to existing DBs) ----------

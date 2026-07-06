@@ -23,6 +23,7 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
     { to: '/audiobooks', label: 'Audiobooks', icon: <Icon.Book size={19} /> },
     { to: '/requests', label: 'Request Movies', icon: <Icon.Plus size={19} /> },
     { to: '/downloads', label: 'Downloads', icon: <Icon.Download size={19} /> },
+    { to: '/history', label: 'History', icon: <Icon.Clock size={19} /> },
   ] },
   { section: 'Create', items: [
     { to: '/documents', label: 'Documents', icon: <Icon.Doc size={19} /> },

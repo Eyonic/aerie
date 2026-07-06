@@ -366,6 +366,24 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     };
   }, [item.id]);
 
+  useEffect(() => {
+    if (audio) return;
+    const v = videoRef.current; if (!v) return;
+    const beat = () => {
+      if (v.paused) return;
+      const kind = item.type === 'Movie' ? 'movie' : item.type === 'Episode' ? 'episode' : 'video';
+      const d = v.duration && isFinite(v.duration) && v.duration > 0 ? v.duration : ((item.runtimeTicks || 0) / 1e7);
+      api.history.beat({
+        kind, itemId: item.id, title: item.name, subtitle: item.seriesName,
+        imageUrl: item.posterUrl || item.thumbUrl,
+        positionSec: v.currentTime || 0, durationSec: d || 0,
+      }).catch(() => {});
+    };
+    const t = setInterval(beat, 20000);
+    v.addEventListener('play', beat);
+    return () => { clearInterval(t); v.removeEventListener('play', beat); };
+  }, [audio, item.id]);
+
   const chooseSub = (index: number | null) => {
     subIdxRef.current = index; setSubIdx(index); setCcOpen(false); applySubtitle();
   };
