@@ -4,6 +4,7 @@
 const { app, BrowserWindow, Menu, Tray, shell, ipcMain, dialog } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { createSyncEngine } = require('./sync');
 
 // Optional baked-in server default. Self-hosters can ship a build that points
 // at their own server by writing {"url":"https://…"} to default-server.json
@@ -26,6 +27,7 @@ function saveConfig(c) {
 
 let win = null;
 let tray = null;
+let syncEngine = null;
 
 function createWindow() {
   win = new BrowserWindow({
@@ -66,6 +68,14 @@ function connectTo(url) {
 
 ipcMain.handle('cloudbox:setUrl', (_e, url) => { connectTo(url); return true; });
 ipcMain.handle('cloudbox:getUrl', () => loadConfig().url || DEFAULT_URL || '');
+ipcMain.handle('sync:list', () => syncEngine.list());
+ipcMain.handle('sync:add', () => syncEngine.add());
+ipcMain.handle('sync:addFromServer', (_e, base) => syncEngine.addFromServer(base));
+ipcMain.handle('sync:remove', (_e, id) => syncEngine.remove(id));
+ipcMain.handle('sync:toggle', (_e, id, enabled) => syncEngine.toggle(id, enabled));
+ipcMain.handle('sync:now', () => { syncEngine.syncNow(); return true; });
+ipcMain.handle('sync:status', () => syncEngine.status());
+ipcMain.handle('sync:setAuth', (_e, token) => syncEngine.setAuth(token, loadConfig().url || DEFAULT_URL || ''));
 
 function buildMenu() {
   const template = [
@@ -102,7 +112,7 @@ const single = app.requestSingleInstanceLock();
 if (!single) { app.quit(); }
 else {
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
-  app.whenReady().then(() => { createWindow(); buildMenu(); buildTray(); });
+  app.whenReady().then(() => { syncEngine = createSyncEngine(); createWindow(); buildMenu(); buildTray(); });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }

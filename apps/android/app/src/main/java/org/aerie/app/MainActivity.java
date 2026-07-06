@@ -15,6 +15,7 @@ import android.net.Network;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.DocumentsContract;
 import android.text.InputType;
 import android.util.Base64;
 import android.view.KeyEvent;
@@ -45,6 +46,7 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> filePathCallback;
     private static final int FILECHOOSER_RESULT = 1;
+    private static final int SYNC_TREE_RESULT = 2;
     private SharedPreferences prefs;
     // Optional baked-in endpoints, set at build time (see apps/build-android.sh):
     // a public/cloud address and a LAN address. On home WiFi often only the LAN
@@ -229,6 +231,7 @@ public class MainActivity extends Activity {
                 if (chosen != null) {
                     if (urlDialog != null) { try { urlDialog.dismiss(); } catch (Exception ignored) { } urlDialog = null; }
                     activeBase = chosen;
+                    prefs.edit().putString("active_base", chosen).apply();
                     // Carry the last-known session token so a cold start on an
                     // origin the user never logged into doesn't show Login.
                     String tok = prefs.getString("token", null);
@@ -314,6 +317,7 @@ public class MainActivity extends Activity {
                             Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
                 }
                 activeBase = base;
+                prefs.edit().putString("active_base", base).apply();
                 // NOTE: deliberately NOT persisted to prefs "url" — that slot is
                 // for user-entered custom servers only; persisting the auto-pick
                 // would invert LAN-first probing on the next cold start.
@@ -437,6 +441,7 @@ public class MainActivity extends Activity {
                     u = u.replaceAll("/+$", "");
                     prefs.edit().putString("url", u).apply();
                     activeBase = u;
+                    prefs.edit().putString("active_base", u).apply();
                     web.loadUrl(u + "/");
                 })
                 .setNeutralButton("Reset", (dialog, which) -> {
@@ -454,6 +459,14 @@ public class MainActivity extends Activity {
             if (filePathCallback != null) {
                 filePathCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(resultCode, data));
                 filePathCallback = null;
+            }
+        } else if (requestCode == SYNC_TREE_RESULT) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri uri = data.getData();
+                int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                try { getContentResolver().takePersistableUriPermission(uri, flags); } catch (Exception ignored) { }
+                SyncEngine.addTree(this, uri, labelForTree(uri));
+                SyncEngine.schedule(this);
             }
         } else {
             super.onActivityResult(requestCode, resultCode, data);
@@ -560,5 +573,62 @@ public class MainActivity extends Activity {
             if (t == null || t.isEmpty()) prefs.edit().remove("token").apply();
             else prefs.edit().putString("token", t).apply();
         }
+
+        @JavascriptInterface
+        public String syncList() {
+            if (!trusted()) return "{\"folders\":[]}";
+            return SyncEngine.listJson(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void syncAdd() {
+            if (!trusted()) return;
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                    startActivityForResult(i, SYNC_TREE_RESULT);
+                } catch (Exception ignored) { }
+            });
+        }
+
+        @JavascriptInterface
+        public void syncRemove(String uri) {
+            if (!trusted()) return;
+            SyncEngine.remove(MainActivity.this, uri);
+            SyncEngine.schedule(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void syncNow() {
+            if (!trusted()) return;
+            final String base = activeBase;
+            new Thread(() -> new SyncEngine(MainActivity.this).runOnce(base), "aerie-sync-now").start();
+        }
+
+        @JavascriptInterface
+        public String syncStatus() {
+            if (!trusted()) return "{\"running\":false,\"folders\":[]}";
+            return SyncEngine.statusJson(MainActivity.this);
+        }
+    }
+
+    private String labelForTree(Uri uri) {
+        android.database.Cursor c = null;
+        try {
+            Uri doc = DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri));
+            c = getContentResolver().query(doc, new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                String name = c.getString(0);
+                if (name != null && !name.trim().isEmpty()) return name;
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        return "Folder";
     }
 }

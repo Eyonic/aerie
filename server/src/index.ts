@@ -37,6 +37,7 @@ import castRouter, { castStreamRouter } from './routes/cast.js';
 import tilesRouter from './routes/tiles.js';
 import historyRouter from './routes/history.js';
 import subtitlesRouter from './routes/subtitles.js';
+import syncRouter from './routes/sync.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +96,7 @@ app.use('/api/music-gen', musicGenRouter);
 app.use('/api/cast', castRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/subtitles', subtitlesRouter);
+app.use('/api/sync', syncRouter);
 
 // Serve built web app (SPA)
 const webDist = path.resolve(__dirname, '../../web/dist');

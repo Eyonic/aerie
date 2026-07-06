@@ -20,6 +20,7 @@ async function boot() {
   // A hop delivered the token via #cbho= but this origin has no session cookie
   // yet — set it before first paint so cookie-authed <img> requests don't 401.
   if (hopped) await syncSessionCookie();
+  try { (window as any).aerieSync?.setAuth?.(localStorage.getItem('cb_token') || ''); } catch { /* not in desktop */ }
   createRoot(document.getElementById('root')!).render(<Root />);
 }
 void boot();

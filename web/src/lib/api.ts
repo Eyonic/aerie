@@ -11,6 +11,7 @@ let TOKEN: string | null = localStorage.getItem('cb_token');
 export function setToken(t: string | null) {
   // Mirror to the native app so it can restore the session across an origin hop.
   try { (window as any).CloudBoxNative?.authToken?.(t || ''); } catch { /* not in app */ }
+  try { (window as any).aerieSync?.setAuth?.(t || ''); } catch { /* not in desktop */ }
   TOKEN = t;
   if (t) localStorage.setItem('cb_token', t); else localStorage.removeItem('cb_token');
 }
@@ -55,6 +56,10 @@ const tokMediaList = (arr: MediaItem[]) => (arr || []).map(tokMedia);
 export const api = {
   // token-appended URL for <img>/<video>/<audio> src that hit protected routes
   url: (path: string) => TOKEN ? `${path}${path.includes('?') ? '&' : '?'}token=${TOKEN}` : path,
+
+  sync: {
+    bases: () => req<{ bases: { base: string; files: number; bytes: number; lastChange: number }[] }>('GET', '/api/sync/bases'),
+  },
 
   // ---- auth ----
   login: (username: string, password: string, code?: string) => req<AuthResponse | { needs2fa: true }>('POST', '/api/auth/login', { username, password, code }),
