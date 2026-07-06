@@ -36,6 +36,7 @@ import musicGenRouter from './routes/musicgen.js';
 import castRouter, { castStreamRouter } from './routes/cast.js';
 import tilesRouter from './routes/tiles.js';
 import historyRouter from './routes/history.js';
+import subtitlesRouter from './routes/subtitles.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -54,7 +55,7 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // and the native apps merge both into their failover origin list.
 app.get('/api/health', (_req, res) => res.json({
   ok: true, name: 'Aerie', compat: 'CloudBox', version: '1.0.0',
-  publicUrl: config.publicUrl, lanUrl: config.lanUrl,
+  publicUrl: config.publicUrl, lanUrl: config.lanUrl, translateLang: config.translateLang,
 }));
 app.use('/api/auth', authRouter);
 app.use('/api/shares', sharesRouter); // has both public (link view) + authed subroutes
@@ -93,6 +94,7 @@ app.use('/api/requests', requestsRouter);
 app.use('/api/music-gen', musicGenRouter);
 app.use('/api/cast', castRouter);
 app.use('/api/history', historyRouter);
+app.use('/api/subtitles', subtitlesRouter);
 
 // Serve built web app (SPA)
 const webDist = path.resolve(__dirname, '../../web/dist');

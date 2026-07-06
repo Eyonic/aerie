@@ -4,6 +4,7 @@
 // /api/health needs no auth and this must work before the API client boots.
 
 let cached = '';
+let translateLang = '';
 
 const pending: Promise<string> = (async () => {
   try {
@@ -11,6 +12,7 @@ const pending: Promise<string> = (async () => {
     if (!res.ok) return '';
     const j = await res.json();
     cached = typeof j?.publicUrl === 'string' ? j.publicUrl : '';
+    translateLang = typeof j?.translateLang === 'string' ? j.translateLang : '';
   } catch { /* offline or server down — keep '' */ }
   return cached;
 })();
@@ -23,4 +25,8 @@ export async function getPublicUrl(): Promise<string> {
 /** Cached PUBLIC_URL — '' until the health fetch (kicked off at module load) resolves. */
 export function publicUrlSync(): string {
   return cached;
+}
+
+export function translateLangSync(): string {
+  return translateLang;
 }

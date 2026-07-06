@@ -137,6 +137,18 @@ export const api = {
     similar: (id: string) => req<MediaItem[]>('GET', `/api/media/similar/${id}`).then(tokMediaList),
   },
 
+  // ---- subtitles ----
+  subtitles: {
+    list: (itemId: string) => req<{ subtitles: { id: string; lang: string; label: string; origin: string; createdAt: string }[] }>('GET', `/api/subtitles/item/${itemId}`),
+    generate: (itemId: string) => req<{ jobId: string }>('POST', '/api/subtitles/generate', { itemId }),
+    translate: (itemId: string, source: any, lang?: string) => req<{ jobId: string }>('POST', '/api/subtitles/translate', { itemId, source, lang }),
+    sync: (itemId: string, source: any) => req<{ jobId: string }>('POST', '/api/subtitles/sync', { itemId, source }),
+    cleanup: (itemId: string, source: any) => req<{ subtitle: any }>('POST', '/api/subtitles/cleanup', { itemId, source }),
+    job: (id: string) => req<{ status: string; progress: number; error?: string; subtitleId?: string }>('GET', `/api/subtitles/job/${id}`),
+    fileUrl: (id: string) => api.url(`/api/subtitles/file/${id}`),
+    remove: (id: string) => req('DELETE', `/api/subtitles/${id}`),
+  },
+
   // ---- photos (photoprism) ----
   photos: {
     status: () => req<{ configured: boolean }>('GET', '/api/photos/status'),

@@ -8,7 +8,7 @@ import type { MediaItem } from '../lib/model';
 import { toast } from '../lib/store';
 import { Spinner } from './ui';
 import { VideoUpscaler, upscaleSupported } from '../lib/upscaler';
-import { publicUrlSync } from '../lib/serverinfo';
+import { publicUrlSync, translateLangSync } from '../lib/serverinfo';
 
 // 2K GPU upscaling is desktop-only (Windows/Linux): phone GPUs and Android's
 // WebView can't sustain per-frame FSR at 1440p, and macOS stays on AirPlay.
@@ -75,10 +75,13 @@ const AudioTrackIcon = () => <Svg><path d="M3 10v4" /><path d="M7.5 6v12" /><pat
 
 // Dropdown used by the CC / audio-track pickers in the player top bar. Anchored
 // under the top control cluster; a full-screen scrim closes it on outside tap.
-function TrackMenu({ open, onClose, heading, options, current, onPick }: {
+type SubSel = number | string | null;
+
+function TrackMenu({ open, onClose, heading, options, current, onPick, tools }: {
   open: boolean; onClose: () => void; heading: string;
-  options: { key: string; label: string; value: number | null }[];
-  current: number | null; onPick: (v: number | null) => void;
+  options: { key: string; label: string; value: SubSel }[];
+  current: SubSel; onPick: (v: SubSel) => void;
+  tools?: { key: string; label: string; disabled?: boolean; onClick: () => void }[];
 }) {
   if (!open) return null;
   return (
@@ -95,6 +98,18 @@ function TrackMenu({ open, onClose, heading, options, current, onPick }: {
               <span className="truncate">{o.label}</span>
             </button>
           ))}
+          {tools && (
+            <div className="mt-1 pt-1 border-t border-white/10">
+              <p className="px-3 py-2 text-[11px] uppercase tracking-wide text-slate-400">AI tools</p>
+              {tools.map(t => (
+                <button key={t.key} type="button" disabled={t.disabled} onClick={t.onClick}
+                  className={cx('w-full text-left px-3 py-2.5 text-sm flex items-center gap-2 hover:bg-white/10 active:bg-white/15 text-white disabled:text-slate-500 disabled:hover:bg-transparent')}>
+                  <span className="w-4 shrink-0" />
+                  <span className="truncate">{t.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </>
@@ -148,11 +163,12 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
   const [audioTracks, setAudioTracks] = useState<any[]>([]);
   const [subTracks, setSubTracks] = useState<any[]>([]);
   const [audioIdx, setAudioIdx] = useState<number | null>(null);
-  const [subIdx, setSubIdx] = useState<number | null>(null); // null = Off
+  const [subIdx, setSubIdx] = useState<SubSel>(null); // null = Off
+  const [subJob, setSubJob] = useState<{ id: string; action: string; progress: number } | null>(null);
   const [ccOpen, setCcOpen] = useState(false);
   const [audioOpen, setAudioOpen] = useState(false);
   // Refs so the (re)load path can re-apply the chosen subtitle after an audio swap
-  const subIdxRef = useRef<number | null>(null);
+  const subIdxRef = useRef<SubSel>(null);
   const subTracksRef = useRef<any[]>([]);
   subTracksRef.current = subTracks;
 
@@ -272,7 +288,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     if (!sub || !sub.url) return;
     const el = document.createElement('track');
     el.kind = 'subtitles';
-    el.src = api.media.subtitleUrl(sub.url);
+    el.src = sub.custom ? api.subtitles.fileUrl(sub.id) : api.media.subtitleUrl(sub.url);
     el.label = sub.name || sub.lang || 'Subtitles';
     if (sub.lang) el.srclang = sub.lang;
     el.default = true;
@@ -334,13 +350,19 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     const startAt = (resumeSec > 5 && (!runtimeSec || resumeSec < runtimeSec - 15)) ? resumeSec : 0;
     loadStream(null, startAt);
     // Fetch selectable audio/subtitle tracks for this item (best-effort)
-    api.media.streams(item.id).then(s => {
+    const loadSubs = async () => {
+      const [s, custom] = await Promise.all([
+        api.media.streams(item.id),
+        api.subtitles.list(item.id).catch(() => ({ subtitles: [] as any[] })),
+      ]);
       const at = Array.isArray(s?.audio) ? s.audio : [];
       const st = Array.isArray(s?.subtitles) ? s.subtitles : [];
-      setAudioTracks(at); setSubTracks(st);
+      const ct = (custom.subtitles || []).map((c: any) => ({ ...c, id: c.id, custom: true, index: `c:${c.id}`, name: c.label, url: `/api/subtitles/file/${c.id}` }));
+      setAudioTracks(at); setSubTracks([...st, ...ct]);
       const da = at.find((a: any) => a.default);
       if (da) setAudioIdx(da.index);
-    }).catch(() => {});
+    };
+    loadSubs().catch(() => {});
     // Only save a position once playback has meaningfully advanced (>5s) so we never
     // clobber a real saved position with a near-zero value before the seek lands.
     // While casting, the local video is paused/detached — its stale position must
@@ -384,9 +406,52 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     return () => { clearInterval(t); v.removeEventListener('play', beat); };
   }, [audio, item.id]);
 
-  const chooseSub = (index: number | null) => {
+  const refreshCustomSubs = async (selectId?: string) => {
+    const custom = await api.subtitles.list(item.id).catch(() => ({ subtitles: [] as any[] }));
+    const base = subTracksRef.current.filter((s: any) => !s.custom);
+    const ct = (custom.subtitles || []).map((c: any) => ({ ...c, id: c.id, custom: true, index: `c:${c.id}`, name: c.label, url: `/api/subtitles/file/${c.id}` }));
+    const next = [...base, ...ct];
+    subTracksRef.current = next;
+    setSubTracks(next);
+    if (selectId) chooseSub(`c:${selectId}`);
+  };
+  const chooseSub = (index: SubSel) => {
     subIdxRef.current = index; setSubIdx(index); setCcOpen(false); applySubtitle();
   };
+  const currentSource = () => {
+    const s = subTracksRef.current.find((x: any) => x.index === subIdxRef.current);
+    if (!s) return null;
+    const mediaSourceId = s.mediaSourceId || String(s.url || '').split('/')[5];
+    return s.custom ? { type: 'custom', id: s.id } : { type: 'jf', mediaSourceId, index: s.index };
+  };
+  const startSubJob = async (action: string, fn: () => Promise<{ jobId: string }>) => {
+    try { const r = await fn(); setSubJob({ id: r.jobId, action, progress: 0 }); setCcOpen(false); }
+    catch (e: any) { toast(`${action} failed`, 'error', String(e?.message || 'Could not start subtitle job.')); }
+  };
+  const cleanCurrent = async () => {
+    const source = currentSource(); if (!source) return;
+    try {
+      const r = await api.subtitles.cleanup(item.id, source);
+      await refreshCustomSubs(r.subtitle?.id);
+      toast('Subtitles cleaned', 'success', r.subtitle?.label || item.name);
+    } catch (e: any) { toast('Cleanup failed', 'error', String(e?.message || 'Could not clean subtitles.')); }
+  };
+  useEffect(() => {
+    if (!subJob) return;
+    const t = setInterval(() => {
+      api.subtitles.job(subJob.id).then(async j => {
+        if (j.status === 'done') {
+          clearInterval(t); setSubJob(null);
+          await refreshCustomSubs(j.subtitleId);
+          toast(`${subJob.action} complete`, 'success', item.name);
+        } else if (j.status === 'error') {
+          clearInterval(t); setSubJob(null);
+          toast(`${subJob.action} failed`, 'error', j.error || 'Subtitle job failed.');
+        } else setSubJob(s => s ? { ...s, progress: j.progress || 0 } : s);
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [subJob?.id]);
   const chooseAudio = (index: number | null) => {
     setAudioIdx(index); setAudioOpen(false);
     if (index == null) return;
@@ -564,7 +629,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
               <TwoKIcon />
             </CtrlBtn>
           )}
-          {!audio && subTracks.length > 0 && (
+          {!audio && (
             <CtrlBtn onClick={() => { setAudioOpen(false); setCcOpen(o => !o); }} title="Subtitles" active={subIdx != null}><CcIcon /></CtrlBtn>
           )}
           {!audio && audioTracks.length > 1 && (
@@ -579,7 +644,13 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           <CtrlBtn onClick={toggleFs} title={isFs ? 'Exit fullscreen' : 'Fullscreen'}>{isFs ? <ShrinkIcon /> : <ExpandIcon />}</CtrlBtn>
         </div>
         <TrackMenu open={ccOpen} onClose={() => setCcOpen(false)} heading="Subtitles" current={subIdx} onPick={chooseSub}
-          options={[{ key: 'off', label: 'Off', value: null }, ...subTracks.map((s, i) => ({ key: `s${s.index ?? i}`, label: s.name || s.lang || `Subtitle ${i + 1}`, value: s.index }))]} />
+          options={[{ key: 'off', label: 'Off', value: null }, ...subTracks.map((s, i) => ({ key: `s${s.index ?? i}`, label: s.name || s.lang || `Subtitle ${i + 1}`, value: s.index }))]}
+          tools={[
+            { key: 'gen', label: subJob?.action === 'Generating' ? `Generating… ${Math.round(subJob.progress * 100)}%` : 'Generate English (AI)', disabled: !!subJob, onClick: () => startSubJob('Generating', () => api.subtitles.generate(item.id)) },
+            { key: 'tr', label: subJob?.action === 'Translating' ? `Translating… ${Math.round(subJob.progress * 100)}%` : `Translate current${translateLangSync() ? ` to ${translateLangSync()}` : ''}`, disabled: !!subJob || subIdx == null, onClick: () => { const s = currentSource(); if (s) startSubJob('Translating', () => api.subtitles.translate(item.id, s)); } },
+            { key: 'sync', label: subJob?.action === 'Syncing' ? `Syncing… ${Math.round(subJob.progress * 100)}%` : 'Sync current to audio', disabled: !!subJob || subIdx == null, onClick: () => { const s = currentSource(); if (s) startSubJob('Syncing', () => api.subtitles.sync(item.id, s)); } },
+            { key: 'clean', label: 'Clean up current', disabled: !!subJob || subIdx == null, onClick: () => { setCcOpen(false); cleanCurrent(); } },
+          ]} />
         <TrackMenu open={audioOpen} onClose={() => setAudioOpen(false)} heading="Audio" current={audioIdx} onPick={chooseAudio}
           options={audioTracks.map((a, i) => ({ key: `a${a.index ?? i}`, label: a.name || a.lang || `Audio ${i + 1}`, value: a.index }))} />
         {/* Cast device picker */}

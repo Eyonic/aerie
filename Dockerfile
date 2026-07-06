@@ -13,7 +13,7 @@ RUN npm run build
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
 # build tools in case a native prebuild is unavailable (better-sqlite3 / sharp)
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/server
 COPY server/package.json server/package-lock.json* ./

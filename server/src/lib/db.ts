@@ -10,6 +10,7 @@ import { config } from '../config.js';
 fs.mkdirSync(config.dataDir, { recursive: true });
 fs.mkdirSync(config.versionsDir, { recursive: true });
 fs.mkdirSync(config.generatedDir, { recursive: true });
+fs.mkdirSync(config.subtitlesDir, { recursive: true });
 fs.mkdirSync(config.thumbsDir, { recursive: true });
 
 export const db = new Database(config.dbPath);
@@ -96,6 +97,18 @@ CREATE TABLE IF NOT EXISTS generated_images (
   workflow TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS subtitles (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  lang TEXT NOT NULL,
+  label TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  created_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_subtitles_item ON subtitles(item_id);
 
 CREATE TABLE IF NOT EXISTS generated_music (
   id TEXT PRIMARY KEY,

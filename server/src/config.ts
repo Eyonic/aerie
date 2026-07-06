@@ -68,6 +68,7 @@ export const config = {
   get dbPath() { return path.join(this.dataDir, 'cloudbox.db'); },
   get versionsDir() { return path.join(this.dataDir, 'versions'); },
   get generatedDir() { return path.join(this.dataDir, 'generated'); },
+  get subtitlesDir() { return path.join(this.dataDir, 'subtitles'); },
   get thumbsDir() { return path.join(this.dataDir, 'thumbs'); },
   get downloadsDir() { return env.DOWNLOADS_DIR || path.join(this.dataDir, 'downloads'); },
 
@@ -119,6 +120,9 @@ export const config = {
   whisper: {
     get url() { return cfgVal('WHISPER_URL'); },
   },
+  get translateLang() { return cfgVal('TRANSLATE_LANG', 'nl'); },
+  // Optional "jellyfinPrefix=ourPrefix,..." map for finding Jellyfin's files on our mount.
+  get mediaPathMap() { return cfgVal('MEDIA_PATH_MAP', ''); },
   server: {
     // Host address used for on-box stats via a lightweight agent (optional)
     get host() { return cfgVal('SERVER_HOST') || cfgVal('TOWER_HOST'); },

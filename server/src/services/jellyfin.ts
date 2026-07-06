@@ -101,6 +101,12 @@ export async function itemDetail(id: string): Promise<MediaItem & { children?: M
   return base;
 }
 
+export async function itemPath(id: string): Promise<string> {
+  const uid = await jellyUserId();
+  const it = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Path' });
+  return String(it?.Path || '');
+}
+
 export async function children(parentId: string): Promise<MediaItem[]> {
   const uid = await jellyUserId();
   const data = await jf(`/Users/${uid}/Items`, {
@@ -125,13 +131,17 @@ export async function mediaStreams(id: string): Promise<{ audio: any[]; subtitle
   }));
   const subtitles = streams.filter((s: any) => s.Type === 'Subtitle').map((s: any) => ({
     index: s.Index, name: s.DisplayTitle || s.Language || `Subtitle ${s.Index}`, lang: s.Language, codec: s.Codec, default: s.IsDefault,
-    url: `/api/media/subtitle/${id}/${src?.Id || id}/${s.Index}`,
+    mediaSourceId: src?.Id || id, url: `/api/media/subtitle/${id}/${src?.Id || id}/${s.Index}`,
   }));
   return { audio, subtitles };
 }
 
 export function directSubtitleUrl(id: string, mediaSourceId: string, index: number): string {
   return `${base()}/Videos/${id}/${mediaSourceId}/Subtitles/${index}/0/Stream.vtt?api_key=${key()}`;
+}
+
+export function directVideoStreamUrl(id: string): string {
+  return `${base()}/Videos/${id}/stream?static=true&api_key=${key()}`;
 }
 
 // Progressive MP4 for Google Cast (no CORS requirements, unlike HLS). Direct-play
