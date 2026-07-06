@@ -467,6 +467,7 @@ public class MainActivity extends Activity {
                 try { getContentResolver().takePersistableUriPermission(uri, flags); } catch (Exception ignored) { }
                 SyncEngine.addTree(this, uri, labelForTree(uri));
                 SyncEngine.schedule(this);
+                SyncForegroundService.start(this, activeBase);
             }
         } else {
             super.onActivityResult(requestCode, resultCode, data);
@@ -605,8 +606,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void syncNow() {
             if (!trusted()) return;
-            final String base = activeBase;
-            new Thread(() -> new SyncEngine(MainActivity.this).runOnce(base), "aerie-sync-now").start();
+            SyncForegroundService.start(MainActivity.this, activeBase);
         }
 
         @JavascriptInterface

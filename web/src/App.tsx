@@ -26,6 +26,7 @@ const MusicStudio = lazy(() => import('./pages/MusicStudio'));
 const Assistant = lazy(() => import('./pages/Assistant'));
 const Automations = lazy(() => import('./pages/Automations'));
 const Backups = lazy(() => import('./pages/Backups'));
+const FolderSync = lazy(() => import('./pages/FolderSync'));
 const Monitoring = lazy(() => import('./pages/Monitoring'));
 const Admin = lazy(() => import('./pages/Admin'));
 const Integrations = lazy(() => import('./pages/Integrations'));
@@ -68,6 +69,7 @@ export default function App() {
           <Route path="/assistant" element={<Assistant />} />
           <Route path="/automations" element={<Automations />} />
           <Route path="/backups" element={<Backups />} />
+          <Route path="/sync" element={<FolderSync />} />
           <Route path="/monitoring" element={<Monitoring />} />
           <Route path="/admin" element={<Admin />} />
           <Route path="/integrations" element={<Integrations />} />

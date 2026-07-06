@@ -30,10 +30,29 @@ public class SyncEngine {
     private static final long MAX_FILE = 2L * 1024L * 1024L * 1024L;
     private final Context context;
     private final SharedPreferences prefs;
+    private volatile boolean cancelled;
+    private long deadlineMs;
+    private ProgressListener progressListener;
+
+    interface ProgressListener {
+        void onProgress(String folder, int done, int total);
+    }
 
     SyncEngine(Context context) {
         this.context = context.getApplicationContext();
         this.prefs = context.getSharedPreferences("aerie", Context.MODE_PRIVATE);
+    }
+
+    void cancel() {
+        cancelled = true;
+    }
+
+    void setDeadlineMs(long deadlineMs) {
+        this.deadlineMs = deadlineMs;
+    }
+
+    void setProgressListener(ProgressListener progressListener) {
+        this.progressListener = progressListener;
     }
 
     static void schedule(Context context) {
@@ -75,6 +94,8 @@ public class SyncEngine {
             o.put("running", p.getBoolean("sync_running", false));
             o.put("lastRun", p.getLong("sync_last_run", 0));
             o.put("lastResult", p.getString("sync_last_result", ""));
+            String progress = p.getString("sync_progress", null);
+            if (progress != null && !progress.isEmpty()) o.put("progress", new JSONObject(progress));
             o.put("folders", folders(context));
             return o.toString();
         } catch (Exception e) { return "{\"running\":false,\"folders\":[]}"; }
@@ -113,18 +134,22 @@ public class SyncEngine {
         } catch (Exception ignored) { }
     }
 
-    String runOnce(String activeBase) {
-        prefs.edit().putBoolean("sync_running", true).apply();
+    boolean runOnce(String activeBase) {
+        prefs.edit().putBoolean("sync_running", true).remove("sync_progress").apply();
         int uploaded = 0;
         try {
             String server = normalize(activeBase);
             if (server == null) server = normalize(prefs.getString("active_base", null));
             if (server == null) server = normalize(prefs.getString("url", null));
             String token = prefs.getString("token", null);
-            if (server == null || token == null || token.isEmpty()) return finish("not_configured");
+            if (server == null || token == null || token.isEmpty()) return finish("not_configured", false);
             JSONArray dirs = folders(context);
+            ArrayList<WorkFolder> work = new ArrayList<>();
+            int total = 0;
             for (int i = 0; i < dirs.length(); i++) {
+                throwIfStopped();
                 JSONObject f = dirs.getJSONObject(i);
+                String label = f.optString("label", "Phone");
                 ArrayList<FileItem> files = new ArrayList<>();
                 walk(Uri.parse(f.optString("uri")), "", files);
                 JSONArray payload = new JSONArray();
@@ -135,30 +160,59 @@ public class SyncEngine {
                     o.put("mtimeMs", item.mtimeMs);
                     payload.put(o);
                 }
-                String base = "Sync/" + sanitize(Build.MODEL) + " " + sanitize(f.optString("label", "Phone"));
+                String base = "Sync/" + sanitize(Build.MODEL) + " " + sanitize(label);
                 HashSet<String> needed = check(server, token, base, payload);
+                WorkFolder wf = new WorkFolder(label, base);
                 for (FileItem item : files) {
-                    if (needed.contains(item.rel)) {
-                        upload(server, token, base, item);
-                        uploaded++;
-                    }
+                    if (needed.contains(item.rel)) wf.files.add(item);
+                }
+                total += wf.files.size();
+                work.add(wf);
+            }
+            updateProgress("", 0, total);
+            for (WorkFolder wf : work) {
+                for (FileItem item : wf.files) {
+                    throwIfStopped();
+                    updateProgress(wf.label, uploaded, total);
+                    upload(server, token, wf.base, item);
+                    uploaded++;
+                    updateProgress(wf.label, uploaded, total);
                 }
             }
-            return finish("uploaded " + uploaded);
+            return finish("uploaded " + uploaded, false);
         } catch (Unauthorized e) {
-            return finish("unauthorized");
+            return finish("unauthorized", false);
+        } catch (Stopped e) {
+            return finish(cancelled ? "cancelled" : "deadline", true);
         } catch (Exception e) {
-            return finish(e.getMessage() == null ? "sync_failed" : e.getMessage());
+            return finish(e.getMessage() == null ? "sync_failed" : e.getMessage(), true);
         }
     }
 
-    private String finish(String result) {
+    private boolean finish(String result, boolean needsMore) {
         prefs.edit()
                 .putBoolean("sync_running", false)
                 .putLong("sync_last_run", System.currentTimeMillis())
                 .putString("sync_last_result", result)
+                .remove("sync_progress")
                 .apply();
-        return result;
+        return needsMore;
+    }
+
+    private void throwIfStopped() throws Stopped {
+        if (cancelled || (deadlineMs > 0 && System.currentTimeMillis() > deadlineMs)) throw new Stopped();
+    }
+
+    private void updateProgress(String folder, int done, int total) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("folder", folder == null ? "" : folder);
+            o.put("done", done);
+            o.put("total", total);
+            prefs.edit().putString("sync_progress", o.toString()).apply();
+            ProgressListener l = progressListener;
+            if (l != null) l.onProgress(folder, done, total);
+        } catch (Exception ignored) { }
     }
 
     private static String normalize(String u) {
@@ -259,26 +313,38 @@ public class SyncEngine {
         c.setChunkedStreamingMode(64 * 1024);
         c.setRequestProperty("Authorization", "Bearer " + token);
         c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        OutputStream raw = new BufferedOutputStream(c.getOutputStream());
-        field(raw, boundary, "base", base);
-        field(raw, boundary, "rel", item.rel);
-        field(raw, boundary, "mtimeMs", String.valueOf(item.mtimeMs));
-        write(raw, "--" + boundary + "\r\n");
-        String type = item.mime == null || item.mime.isEmpty() ? guess(item.rel) : item.mime;
-        write(raw, "Content-Disposition: form-data; name=\"file\"; filename=\"" + item.rel.replace("\"", "_") + "\"\r\n");
-        write(raw, "Content-Type: " + type + "\r\n\r\n");
-        BufferedInputStream in = new BufferedInputStream(context.getContentResolver().openInputStream(item.uri));
-        byte[] buf = new byte[64 * 1024];
-        int n;
-        while ((n = in.read(buf)) > 0) raw.write(buf, 0, n);
-        in.close();
-        write(raw, "\r\n--" + boundary + "--\r\n");
-        raw.flush();
-        raw.close();
-        int code = c.getResponseCode();
-        if (code == 401) throw new Unauthorized();
-        if (code >= 300) throw new Exception("upload_" + code);
-        c.disconnect();
+        OutputStream raw = null;
+        BufferedInputStream in = null;
+        try {
+            raw = new BufferedOutputStream(c.getOutputStream());
+            field(raw, boundary, "base", base);
+            field(raw, boundary, "rel", item.rel);
+            field(raw, boundary, "mtimeMs", String.valueOf(item.mtimeMs));
+            write(raw, "--" + boundary + "\r\n");
+            String type = item.mime == null || item.mime.isEmpty() ? guess(item.rel) : item.mime;
+            write(raw, "Content-Disposition: form-data; name=\"file\"; filename=\"" + item.rel.replace("\"", "_") + "\"\r\n");
+            write(raw, "Content-Type: " + type + "\r\n\r\n");
+            in = new BufferedInputStream(context.getContentResolver().openInputStream(item.uri));
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                throwIfStopped();
+                raw.write(buf, 0, n);
+            }
+            in.close();
+            in = null;
+            write(raw, "\r\n--" + boundary + "--\r\n");
+            raw.flush();
+            raw.close();
+            raw = null;
+            int code = c.getResponseCode();
+            if (code == 401) throw new Unauthorized();
+            if (code >= 300) throw new Exception("upload_" + code);
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) { }
+            try { if (raw != null) raw.close(); } catch (Exception ignored) { }
+            c.disconnect();
+        }
     }
 
     private static void field(OutputStream out, String boundary, String name, String value) throws Exception {
@@ -319,5 +385,15 @@ public class SyncEngine {
         }
     }
 
+    private static class WorkFolder {
+        final String label;
+        final String base;
+        final ArrayList<FileItem> files = new ArrayList<>();
+        WorkFolder(String label, String base) {
+            this.label = label; this.base = base;
+        }
+    }
+
+    private static class Stopped extends Exception { }
     private static class Unauthorized extends Exception { }
 }
