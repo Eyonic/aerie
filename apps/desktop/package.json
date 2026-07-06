@@ -18,7 +18,7 @@
     "appId": "app.aerie.desktop",
     "productName": "Aerie",
     "directories": { "output": "release" },
-    "files": ["main.js", "preload.js", "config.html", "default-server.json", "build/icon.png"],
+    "files": ["main.js", "preload.js", "sync.js", "config.html", "default-server.json", "build/icon.png"],
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Network",
