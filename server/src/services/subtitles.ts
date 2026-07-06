@@ -226,7 +226,9 @@ export function parseSubs(text: string): Cue[] {
     const ti = lines.findIndex(l => l.includes('-->'));
     if (ti < 0) continue;
     const [a, b] = lines[ti].split('-->');
-    const start = parseTime(a), end = parseTime((b || '').split(/\s+/)[0]);
+    // The end half may carry cue settings ("... region:x line:90%") and starts
+    // with a space after split('-->') — trim first or [0] is the empty string.
+    const start = parseTime(a), end = parseTime((b || '').trim().split(/\s+/)[0]);
     if (start == null || end == null || end <= start) continue;
     cues.push({ start, end, text: lines.slice(ti + 1).join('\n').trim() });
   }
@@ -309,22 +311,37 @@ function subEnvelope(cues: Cue[], len: number) {
   return bits;
 }
 
-function correlate(a: number[], s: number[], from = 0, to = Math.max(a.length, s.length)) {
-  const landscapes: number[] = [];
-  const activeA = a.slice(from, to).reduce((n, x) => n + x, 0);
-  const activeS = s.reduce((n, x) => n + x, 0);
-  let best = { off: 0, score: 0, median: 0 };
-  for (let off = -1200; off <= 1200; off++) {
-    let hit = 0;
+// Pearson-style correlation of mean-centered activity signals. Plain overlap
+// counting saturates when music keeps the audio envelope dense; centering
+// still yields a distinct peak at the true speech/subtitle alignment.
+function correlate(a: number[], s: number[], from = 0, to = a.length) {
+  const n = to - from;
+  const am = a.slice(from, to).reduce((x, y) => x + y, 0) / Math.max(1, n);
+  const sm = s.reduce((x, y) => x + y, 0) / Math.max(1, s.length);
+  const va = Math.sqrt(a.slice(from, to).reduce((x, y) => x + (y - am) ** 2, 0) / Math.max(1, n));
+  const vs = Math.sqrt(s.reduce((x, y) => x + (y - sm) ** 2, 0) / Math.max(1, s.length));
+  if (!va || !vs) return { off: 0, score: 0, median: 1 };
+  const r = (off: number) => {
+    let dot = 0, cnt = 0;
     for (let i = 0; i < s.length; i++) {
       const j = i + off;
-      if (j >= from && j < to && a[j] && s[i]) hit++;
+      if (j >= from && j < to) { dot += (a[j] - am) * (s[i] - sm); cnt++; }
     }
-    const score = hit / Math.max(1, Math.min(activeA, activeS));
-    landscapes.push(score);
+    return cnt ? dot / (cnt * va * vs) : 0;
+  };
+  // Coarse (0.5s) sweep over ±120s for the landscape, then fine (100ms) refine.
+  const landscape: number[] = [];
+  let best = { off: 0, score: -Infinity, median: 0 };
+  for (let off = -1200; off <= 1200; off += 5) {
+    const score = r(off);
+    landscape.push(score);
     if (score > best.score) best = { off, score, median: 0 };
   }
-  best.median = [...landscapes].sort((x, y) => x - y)[Math.floor(landscapes.length / 2)] || 0;
+  for (let off = best.off - 5; off <= best.off + 5; off++) {
+    const score = r(off);
+    if (score > best.score) best = { off, score, median: 0 };
+  }
+  best.median = [...landscape].sort((x, y) => x - y)[Math.floor(landscape.length / 2)] || 0;
   return best;
 }
 
@@ -334,7 +351,8 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
   const a = await audioEnvelope(itemId, jobId);
   const s = subEnvelope(cues, Math.max(a.length, Math.ceil(Math.max(...cues.map(c => c.end), 0) * 10) + 1));
   const whole = correlate(a, s);
-  if (whole.score < 0.55 || whole.score < whole.median * 1.15) throw new Error('could not find alignment');
+  // Pearson r: require a real (if modest) peak that clearly beats the landscape.
+  if (whole.score < 0.08 || whole.score - whole.median < 0.03) throw new Error('could not find alignment');
   const third = Math.floor(a.length / 3);
   const first = correlate(a, s, 0, third), last = correlate(a, s, third * 2, a.length);
   const shifted = cues.map(c => ({ ...c }));

@@ -74,6 +74,10 @@ r.post('/native/upload', upload.array('files', 50), async (req: AuthedRequest, r
       const real = storage.resolve(u(req).username, rel);
       await fsp.mkdir(path.dirname(real), { recursive: true });
       await storage.safeMove(f.path, real);
+      // No-EXIF photos fall back to file mtime for takenAt — make that the
+      // client's original date rather than the upload moment.
+      const lm = Number(lastModified[i]);
+      if (Number.isFinite(lm) && lm > 0) await fsp.utimes(real, new Date(lm), new Date(lm)).catch(() => {});
       const item = await photolib.indexFile(u(req), rel);
       if (item) created.push(item);
     }
