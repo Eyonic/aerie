@@ -9,8 +9,11 @@
 
 - **Drive** — per-user file storage with uploads, sharing links, trash, versioning and full-text search
 - **Docs & Sheets** — built-in document (WYSIWYG) and spreadsheet editors with a safe formula engine and charts
-- **Photos** — albums, places map, object explorer and people, backed by [PhotoPrism](https://photoprism.app) (one instance per family member)
+- **Photos** — a built-in photo library for every member (timeline, EXIF dates & camera info, drag-drop upload, lightbox) with **zero extra containers** — or plug in [PhotoPrism](https://photoprism.app) per member for albums, places maps and face recognition
+- **Auto-sync folders** — pick folders on your PC to back up or two-way mirror; your phone uploads chosen folders **every night while it charges on Wi-Fi**, and those files flow down to your PC the next time it's on
 - **Movies, TV & Videos** — Netflix-style browsing, resume, subtitles and audio tracks, backed by [Jellyfin](https://jellyfin.org)
+- **AI subtitles** — generate English subtitles from the audio itself (local Whisper), translate any track with an LLM, fix out-of-sync timing with one click, and clean up broken/garbled subtitle files instantly
+- **Watch & listening history** — per-member history for movies, TV, music, audiobooks and podcasts, with real hours spent and weekly totals
 - **2K GPU upscaling** — a WebGL2 port of AMD FidelityFX Super Resolution 1.0 upscales 1080p to 1440p *on the viewer's own GPU* (Windows/Linux desktops)
 - **TV casting** — server-side Google Cast: send any movie to a Chromecast straight from the web app, with pause/seek controls
 - **Music** — albums, artists, AI "made for you" mixes, and a phone-friendly player with media-session controls
@@ -62,15 +65,15 @@ Aerie is a single Docker container (Node/Express API + React web app). It doesn'
 |---|---|---|
 | Jellyfin | Movies, TV, Videos, Music | `JELLYFIN_URL`, `JELLYFIN_API_KEY` |
 | Audiobookshelf | Audiobooks, Podcasts | `ABS_URL`, `ABS_API_KEY` |
-| PhotoPrism | Photos (per user) | `PP_INSTANCES` or `PP_<NAME>_URL`, `PP_USER`, `PP_PASSWORD` |
+| PhotoPrism | Photos (optional — the native library needs nothing) | `PP_INSTANCES` or `PP_<NAME>_URL`, `PP_USER`, `PP_PASSWORD` |
 | Jellyseerr | Movie/TV requests | `JELLYSEERR_URL`, `JELLYSEERR_API_KEY` |
 | Lidarr | Music requests | `LIDARR_URL`, `LIDARR_API_KEY` |
-| DeepSeek (cloud) or Ollama (local) | AI assistant, doc/sheet AI | `DEEPSEEK_API_KEY` / `OLLAMA_URL` |
+| DeepSeek (cloud) or Ollama (local) | AI assistant, doc/sheet AI, subtitle translation | `DEEPSEEK_API_KEY` / `OLLAMA_URL` |
 | ComfyUI | AI image generation | `SD_URL` |
 | ACE-Step | AI music generation | `ACESTEP_URL` |
-| Wyoming Whisper | Voice input | `WHISPER_URL` |
+| Wyoming Whisper | Voice input, AI subtitle generation | `WHISPER_URL` |
 
-Files, Docs, Sheets, Shares, Backups and Automations are fully built-in and need nothing external.
+Files, Photos, Docs, Sheets, Shares, History, Folder sync, Backups and Automations are fully built-in and need nothing external. If Jellyfin's paths differ from Aerie's `/media` mount (renamed bind mounts), set `MEDIA_PATH_MAP` (e.g. `/data/movies=/media/Films`) so subtitle generation can read the files directly — without it Aerie falls back to streaming them from Jellyfin.
 
 **You don't need to touch a config file for any of this.** The admin **Integrations** page (sidebar → System → Integrations) lets you enter every service URL and API key from the browser, with one-click connection tests — values save to the database, apply instantly without a restart, and override the environment. Env vars remain fully supported as defaults/automation (see [`aerie.env.example`](aerie.env.example)); secrets saved in the app are write-only and never shown again.
 
@@ -134,7 +137,20 @@ export AERIE_LAN_URL=http://192.168.0.10:8200        # optional (Android failove
 ./apps/build-android.sh    # Android APK (Docker)
 ```
 
-Copy the artifacts into `<appdata>/aerie/downloads/`. Details, signing notes and caveats: [`apps/README.md`](apps/README.md). The Android app adds OS media controls and automatic LAN↔cloud switching with session handoff; the desktop app is a slim wrapper around your server's web UI, so it updates itself whenever you redeploy the server.
+Copy the artifacts into `<appdata>/aerie/downloads/`. Details, signing notes and caveats: [`apps/README.md`](apps/README.md). The Android app adds OS media controls, automatic LAN↔cloud switching with session handoff, and **nightly folder sync** — pick folders (camera roll, downloads, …) in Settings and they upload while the phone charges on Wi-Fi. The desktop app is a slim wrapper around your server's web UI that adds **folder sync** (backup or two-way mirror, managed from the same Settings page), so it updates itself whenever you redeploy the server.
+
+## AI subtitles
+
+Every video's CC menu has an **AI tools** section:
+
+- **Generate English (AI)** — the server extracts the audio, cuts it at natural silences and transcribes it chunk-by-chunk through your local Whisper — subtitles from nothing, fully on your own hardware.
+- **Translate current** — any subtitle track, translated cue-by-cue by the LLM into your configured language (`TRANSLATE_LANG`), preserving all timing.
+- **Sync current to audio** — one click fixes out-of-sync subtitles by correlating speech activity in the audio with the cue timing (handles constant offsets *and* drift).
+- **Clean up current** — instantly repairs broken encodings (mojibake, wrong charset), strips stray tags and formatting codes, and fixes overlapping cues.
+
+Generation and translation run as background jobs with live progress in the menu — keep watching, you'll get a notification when the new track is ready. Generated tracks are stored server-side and appear for the whole family.
+
+![AI subtitle tools](docs/screenshots/subtitles-ai.png)
 
 ## The 2K GPU upscaler
 
