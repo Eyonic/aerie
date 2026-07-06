@@ -136,6 +136,17 @@ export interface PhotoAlbum {
   type: string;
 }
 
+export interface NativePhoto {
+  path: string;
+  takenAt: string | null;
+  width: number | null;
+  height: number | null;
+  size: number;
+  camera: string | null;
+  lat: number | null;
+  lon: number | null;
+}
+
 // ---------- Audiobooks / Podcasts (Audiobookshelf-backed) ----------
 export interface MusicResult {
   foreignArtistId: string;

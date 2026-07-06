@@ -135,6 +135,19 @@ export async function safeMove(src: string, dest: string): Promise<void> {
   }
 }
 
+export async function trash(username: string, userId: number, vpath: string): Promise<void> {
+  const trashRoot = path.join(config.dataDir, 'trash', username);
+  fs.mkdirSync(trashRoot, { recursive: true });
+  let real: string, stat: fs.Stats;
+  try { ({ real, stat } = statReal(username, vpath)); }
+  catch (e: any) { if (e?.code === 'ENOENT') return; throw e; }
+  const id = 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const trashedPath = path.join(trashRoot, id + '__' + path.basename(vpath));
+  await safeMove(real, trashedPath);
+  db.prepare('INSERT INTO trash (id,user_id,original_path,trashed_path,name,is_folder,size) VALUES (?,?,?,?,?,?,?)')
+    .run(id, userId, vpath, trashedPath, path.basename(vpath), stat.isDirectory() ? 1 : 0, stat.isDirectory() ? 0 : stat.size);
+}
+
 export async function mkdir(username: string, vpath: string): Promise<void> {
   await fsp.mkdir(resolve(username, vpath), { recursive: true });
 }

@@ -184,6 +184,19 @@ CREATE TABLE IF NOT EXISTS play_history (
   last_ts TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (user_id, kind, item_id, day)
 );
+
+CREATE TABLE IF NOT EXISTS photo_index (
+  user_id INTEGER NOT NULL,
+  rel_path TEXT NOT NULL,
+  taken_at TEXT,
+  width INTEGER, height INTEGER,
+  size INTEGER NOT NULL DEFAULT 0,
+  camera TEXT,
+  lat REAL, lon REAL,
+  mtime INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_taken ON photo_index(user_id, taken_at DESC);
 `);
 
 // ---------- Migrations (add columns to existing DBs) ----------

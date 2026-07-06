@@ -90,6 +90,9 @@ export const config = {
   photoprism: {
     get users() { return photoprismUsers(); },
     get defaultUser() { return cfgVal('PP_DEFAULT') || Object.keys(photoprismUsers())[0] || ''; },
+    // Explicit PP_DEFAULT = "unmapped users share this instance" (legacy setups).
+    // Without it, unmapped users get the native photo library instead.
+    get explicitDefault() { return !!cfgVal('PP_DEFAULT'); },
     get user() { return cfgVal('PP_USER', 'admin'); },
     get password() { return cfgVal('PP_PASSWORD'); },
   },

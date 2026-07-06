@@ -13,6 +13,7 @@ import { cx, formatDate, debounce } from '../lib/utils';
 import { toast } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Spinner, Badge, ConfirmModal } from '../components/ui';
 import type { Photo, PhotoAlbum } from '../lib/model';
+import NativePhotos from './NativePhotos';
 
 type Tab = 'timeline' | 'albums' | 'favorites' | 'places' | 'explore' | 'people';
 
@@ -868,6 +869,7 @@ export default function Photos() {
 
   // ---- render ----
   if (configured === null) return <PageLoader />;
+  if (!configured) return <NativePhotos />;
 
   // hide empty albums (PhotoPrism keeps 0-item albums around)
   const visibleAlbums = albums?.filter(a => a.count > 0) ?? null;
@@ -919,14 +921,7 @@ export default function Photos() {
         }
       />
 
-      {!configured ? (
-        <EmptyState
-          icon={<Icon.Photos size={30} />}
-          title="No photo library connected"
-          subtitle="Connect phone backup to see photos here."
-        />
-      ) : (
-        <>
+      <>
           {/* tabs + select toggle */}
           <div className="mb-6 flex flex-wrap items-center gap-2">
             {tabs.map(t => (
@@ -1149,8 +1144,7 @@ export default function Photos() {
               />
             )
           )}
-        </>
-      )}
+      </>
 
       {/* bulk action bar */}
       {selectMode && (

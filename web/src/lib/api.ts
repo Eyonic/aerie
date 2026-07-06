@@ -1,7 +1,7 @@
 // Central typed API client. Every page uses this — no raw fetch in pages.
 import type {
   AuthResponse, User, FileListing, FileEntry, StorageUsage, DashboardData,
-  MediaItem, Photo, PhotoAlbum, Book, Chapter, DocMeta, AiJob, GeneratedImage,
+  MediaItem, Photo, PhotoAlbum, NativePhoto, Book, Chapter, DocMeta, AiJob, GeneratedImage,
   Share, ServiceStatus, SystemHealth, BackupStatus, AuditEvent, Device,
   Automation, Notification, SearchResponse, MusicResult, MusicRequest,
   HistoryKind, HistoryEntry, HistoryStats,
@@ -162,6 +162,33 @@ export const api = {
     people: () => req<{ people: { uid: string; name: string; count: number; thumbUrl?: string }[]; faceClusters: number }>('GET', '/api/photos/people'),
     person: (uid: string) => req<Photo[]>('GET', `/api/photos/person/${uid}`),
     thumbUrl: (url: string) => api.url(url),
+    native: {
+      status: () => req<{ enabled: true; count: number; lastScan: string | null }>('GET', '/api/photos/native/status'),
+      scan: () => req<{ count: number }>('POST', '/api/photos/native/scan'),
+      timeline: (cursor?: string, limit = 200) => req<{ items: NativePhoto[]; nextCursor: string | null }>('GET', `/api/photos/native/timeline?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
+      months: () => req<{ month: string; count: number }[]>('GET', '/api/photos/native/months'),
+      upload: (files: File[], onProgress?: (done: number, total: number, pct: number) => void) => {
+        return new Promise<{ items: NativePhoto[] }>((resolve, reject) => {
+          const form = new FormData();
+          files.forEach(f => { form.append('files', f); form.append('lastModified', String(f.lastModified || Date.now())); });
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/api/photos/native/upload');
+          if (TOKEN) xhr.setRequestHeader('Authorization', `Bearer ${TOKEN}`);
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable && onProgress) onProgress(0, files.length, Math.round((e.loaded / e.total) * 100));
+          };
+          xhr.onload = () => {
+            if (xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+            else reject(new Error(xhr.responseText || 'upload_failed'));
+          };
+          xhr.onerror = () => reject(new Error('upload_failed'));
+          xhr.send(form);
+        });
+      },
+      thumbUrl: (path: string) => api.url(`/api/photos/native/thumb?path=${encodeURIComponent(path)}`),
+      fileUrl: (path: string) => api.url(`/api/photos/native/file?path=${encodeURIComponent(path)}`),
+      remove: (paths: string[]) => req<{ ok: true }>('DELETE', '/api/photos/native', { paths }),
+    },
   },
 
   // ---- books (audiobookshelf) ----

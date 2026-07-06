@@ -14,6 +14,15 @@ export function configured(): boolean {
   return !!config.photoprism.password && Object.keys(config.photoprism.users).length > 0;
 }
 
+export function configuredFor(username: string): boolean {
+  if (!configured()) return false;
+  const users = config.photoprism.users;
+  if (users[username.toLowerCase()]) return true;
+  // instanceFor() falls back to the default instance; only treat that as
+  // "configured" when PP_DEFAULT was set on purpose (pre-native-photos setups).
+  return config.photoprism.explicitDefault && !!users[config.photoprism.defaultUser];
+}
+
 async function auth(username: string): Promise<Session> {
   const cached = sessions[username];
   if (cached && cached.expires > Date.now()) return cached;

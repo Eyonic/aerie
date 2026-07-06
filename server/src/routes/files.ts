@@ -119,19 +119,8 @@ r.post('/copy', async (req: AuthedRequest, res, next) => {
 r.post('/delete', async (req: AuthedRequest, res, next) => {
   try {
     const { paths } = req.body || {};
-    const trashRoot = path.join(config.dataDir, 'trash', u(req).username);
-    fs.mkdirSync(trashRoot, { recursive: true });
     for (const p of paths || []) {
-      // Already gone (deleted from another device, or an earlier partial batch)
-      // counts as deleted — don't abort the rest of a bulk delete over it.
-      let real: string, stat: fs.Stats;
-      try { ({ real, stat } = storage.statReal(u(req).username, p)); }
-      catch (e: any) { if (e?.code === 'ENOENT') continue; throw e; }
-      const id = 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-      const trashedPath = path.join(trashRoot, id + '__' + path.basename(p));
-      await storage.safeMove(real, trashedPath);
-      db.prepare('INSERT INTO trash (id,user_id,original_path,trashed_path,name,is_folder,size) VALUES (?,?,?,?,?,?,?)')
-        .run(id, u(req).id, p, trashedPath, path.basename(p), stat.isDirectory() ? 1 : 0, stat.isDirectory() ? 0 : stat.size);
+      await storage.trash(u(req).username, u(req).id, p);
     }
     audit(u(req).id, u(req).username, 'delete', `${(paths || []).length} items`);
     res.json({ ok: true });
