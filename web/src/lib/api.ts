@@ -1,7 +1,7 @@
 // Central typed API client. Every page uses this — no raw fetch in pages.
 import type {
   AuthResponse, User, FileListing, FileEntry, StorageUsage, DashboardData,
-  MediaItem, Photo, PhotoAlbum, NativePhoto, Book, Chapter, DocMeta, AiJob, GeneratedImage,
+  MediaItem, NativePhoto, Book, Chapter, DocMeta, AiJob, GeneratedImage,
   Share, ServiceStatus, SystemHealth, BackupStatus, AuditEvent, Device,
   Automation, Notification, SearchResponse, MusicResult, MusicRequest,
   HistoryKind, HistoryEntry, HistoryStats,
@@ -154,19 +154,9 @@ export const api = {
     remove: (id: string) => req('DELETE', `/api/subtitles/${id}`),
   },
 
-  // ---- photos (photoprism) ----
+  // ---- photos ----
   photos: {
-    status: () => req<{ configured: boolean }>('GET', '/api/photos/status'),
-    timeline: (offset = 0, count = 120, q = '') => req<Photo[]>('GET', `/api/photos/timeline?offset=${offset}&count=${count}${q ? `&q=${encodeURIComponent(q)}` : ''}`),
-    favorites: () => req<Photo[]>('GET', '/api/photos/favorites'),
-    albums: () => req<PhotoAlbum[]>('GET', '/api/photos/albums'),
-    album: (uid: string) => req<Photo[]>('GET', `/api/photos/album/${uid}`),
-    geo: () => req<{ id: string; uid: string; lat: number; lng: number; thumbUrl: string; previewUrl: string; title: string; takenAt: string; type: string }[]>('GET', '/api/photos/geo'),
-    labels: () => req<{ name: string; slug: string; count: number; thumbUrl?: string }[]>('GET', '/api/photos/labels'),
-    label: (slug: string) => req<Photo[]>('GET', `/api/photos/label/${encodeURIComponent(slug)}`),
-    people: () => req<{ people: { uid: string; name: string; count: number; thumbUrl?: string }[]; faceClusters: number }>('GET', '/api/photos/people'),
-    person: (uid: string) => req<Photo[]>('GET', `/api/photos/person/${uid}`),
-    thumbUrl: (url: string) => api.url(url),
+    status: () => req<{ configured: boolean; native: boolean }>('GET', '/api/photos/status'),
     native: {
       status: () => req<{ enabled: true; count: number; lastScan: string | null }>('GET', '/api/photos/native/status'),
       scan: () => req<{ count: number }>('POST', '/api/photos/native/scan'),

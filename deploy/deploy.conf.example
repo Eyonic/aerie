@@ -46,15 +46,6 @@ NPM_DATA_DIR=/path/to/appdata/nginx-proxy-manager
 # Name of the running NPM container (used for `nginx -s reload`).
 NPM_CONTAINER=nginx-proxy-manager
 
-# --- PhotoPrism instances (gen-env.sh) --------------------------------
-# One PhotoPrism instance per household member, as comma-separated
-# name=containerName:port pairs. gen-env.sh emits PP_<NAME>_URL for each
-# (pointing at http://$HOST_IP:port) and harvests the admin user/password
-# from the default instance's container env via `docker inspect`.
-PP_INSTANCES_CONF='alice=PhotoPrism_alice:2342,bob=PhotoPrism_bob:2343'
-# Which instance name is the default (falls back to the first one).
-PP_DEFAULT=alice
-
 # --- AI models --------------------------------------------------------
 # Ollama model tag for local AI chat.
 OLLAMA_MODEL=llama3.2:latest

@@ -41,38 +41,6 @@ fi
 DEEPSEEK_KEY_FILE="${DEEPSEEK_KEY_FILE:-$APPDIR/deepseek.key}"
 DS_KEY="$(cat "$DEEPSEEK_KEY_FILE" 2>/dev/null | tr -d '\n' || true)"
 
-# ---- PhotoPrism instances: name=containerName:port,... -----------------
-# Emits PP_<NAME>_URL per instance; harvests PP_USER/PP_PASSWORD from the
-# default instance's container env.
-PP_LINES=""
-PP_FIRST=""
-PP_DEFAULT_CONTAINER=""
-IFS=',' read -r -a _pp_parts <<< "${PP_INSTANCES_CONF:-}"
-for part in "${_pp_parts[@]:-}"; do
-  part="${part// /}"
-  [ -n "$part" ] || continue
-  case "$part" in *=*:*) ;; *) die "PP_INSTANCES_CONF entry '$part' is not name=containerName:port";; esac
-  name="${part%%=*}"
-  rest="${part#*=}"
-  container="${rest%%:*}"
-  port="${rest##*:}"
-  { [ -n "$name" ] && [ -n "$container" ] && [ -n "$port" ]; } \
-    || die "PP_INSTANCES_CONF entry '$part' is not name=containerName:port"
-  name_uc="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
-  PP_LINES="${PP_LINES}PP_${name_uc}_URL=http://$HOST_IP:$port"$'\n'
-  [ -n "$PP_FIRST" ] || { PP_FIRST="$name"; PP_DEFAULT_CONTAINER="$container"; }
-  [ "$name" = "${PP_DEFAULT:-}" ] && PP_DEFAULT_CONTAINER="$container"
-done
-PP_DEFAULT="${PP_DEFAULT:-$PP_FIRST}"
-
-PP_PASS=""
-PP_USER=""
-if [ -n "$PP_DEFAULT_CONTAINER" ]; then
-  PP_PASS="$(docker inspect "$PP_DEFAULT_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^PHOTOPRISM_ADMIN_PASSWORD=//p' | head -1 || true)"
-  PP_USER="$(docker inspect "$PP_DEFAULT_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^PHOTOPRISM_ADMIN_USER=//p' | head -1 || true)"
-fi
-PP_USER="${PP_USER:-admin}"
-
 # Preserve an existing JWT secret across redeploys so sessions survive.
 # Falls back to the legacy CloudBox-era env file (the app's former name) so
 # upgrades from CloudBox keep everyone logged in.
@@ -105,9 +73,6 @@ JELLYFIN_URL=http://$HOST_IP:8096
 JELLYFIN_API_KEY=$JELLY_KEY
 ABS_URL=http://$HOST_IP:13378
 ABS_API_KEY=$ABS_TOKEN
-${PP_LINES}PP_DEFAULT=${PP_DEFAULT:-}
-PP_USER=$PP_USER
-PP_PASSWORD=$PP_PASS
 OLLAMA_URL=http://$HOST_IP:11434
 OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.2:latest}
 SD_URL=http://$HOST_IP:9000
@@ -129,5 +94,3 @@ echo "abs_token:      $([ -n "$ABS_TOKEN" ] && echo present || echo MISSING)"
 echo "jellyseerr_key: $([ -n "$JS_KEY" ] && echo present || echo MISSING)"
 echo "lidarr_key:     $([ -n "$LIDARR_KEY" ] && echo present || echo MISSING)"
 echo "deepseek_key:   $([ -n "$DS_KEY" ] && echo present || echo MISSING)"
-echo "pp_password:    $([ -n "$PP_PASS" ] && echo present || echo MISSING)"
-echo "pp_user:        $PP_USER"

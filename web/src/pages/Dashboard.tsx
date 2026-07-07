@@ -250,8 +250,8 @@ export default function Dashboard() {
           {data.recentPhotos.length ? (
             <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5">
               {data.recentPhotos.slice(0, 12).map(p => (
-                <button key={p.id} onClick={() => nav('/photos')} className="aspect-square rounded-lg overflow-hidden bg-ink-800 card-hover">
-                  <img src={api.photos.thumbUrl(p.thumbUrl)} loading="lazy" className="w-full h-full object-cover" />
+                <button key={p.path} onClick={() => nav('/photos')} className="aspect-square rounded-lg overflow-hidden bg-ink-800 card-hover">
+                  <img src={api.photos.native.thumbUrl(p.path)} loading="lazy" className="w-full h-full object-cover" />
                 </button>
               ))}
             </div>

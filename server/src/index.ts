@@ -34,7 +34,6 @@ import appsRouter from './routes/apps.js';
 import requestsRouter from './routes/requests.js';
 import musicGenRouter from './routes/musicgen.js';
 import castRouter, { castStreamRouter } from './routes/cast.js';
-import tilesRouter from './routes/tiles.js';
 import historyRouter from './routes/history.js';
 import subtitlesRouter from './routes/subtitles.js';
 import syncRouter from './routes/sync.js';
@@ -61,7 +60,6 @@ app.get('/api/health', (_req, res) => res.json({
 app.use('/api/auth', authRouter);
 app.use('/api/shares', sharesRouter); // has both public (link view) + authed subroutes
 app.use('/api/apps', appsRouter);     // public downloads catalog
-app.use('/tiles', tilesRouter);       // public map-tile proxy (Photos map)
 app.use('/api/cast-stream', castStreamRouter); // token-authed media proxy for cast TVs
 
 // Native app installers — public static (a browser download can't send auth headers).

@@ -9,7 +9,7 @@
 
 - **Drive** — per-user file storage with uploads, sharing links, trash, versioning and full-text search
 - **Docs & Sheets** — built-in document (WYSIWYG) and spreadsheet editors with a safe formula engine and charts
-- **Photos** — a built-in photo library for every member (timeline, EXIF dates & camera info, drag-drop upload, lightbox) with **zero extra containers** — or plug in [PhotoPrism](https://photoprism.app) per member for albums, places maps and face recognition
+- **Photos** — a built-in photo library for every member (timeline, EXIF dates & camera info, drag-drop upload, lightbox) with **zero extra containers**
 - **Auto-sync folders** — pick folders on your PC to back up or two-way mirror; your phone uploads chosen folders **every night while it charges on Wi-Fi**, and those files flow down to your PC the next time it's on
 - **Movies, TV & Videos** — Netflix-style browsing, resume, subtitles and audio tracks, backed by [Jellyfin](https://jellyfin.org)
 - **AI subtitles** — generate English subtitles from the audio itself (local Whisper), translate any track with an LLM, fix out-of-sync timing with one click, and clean up broken/garbled subtitle files instantly
@@ -65,7 +65,6 @@ Aerie is a single Docker container (Node/Express API + React web app). It doesn'
 |---|---|---|
 | Jellyfin | Movies, TV, Videos, Music | `JELLYFIN_URL`, `JELLYFIN_API_KEY` |
 | Audiobookshelf | Audiobooks, Podcasts | `ABS_URL`, `ABS_API_KEY` |
-| PhotoPrism | Photos (optional — the native library needs nothing) | `PP_INSTANCES` or `PP_<NAME>_URL`, `PP_USER`, `PP_PASSWORD` |
 | Jellyseerr | Movie/TV requests | `JELLYSEERR_URL`, `JELLYSEERR_API_KEY` |
 | Lidarr | Music requests | `LIDARR_URL`, `LIDARR_API_KEY` |
 | DeepSeek (cloud) or Ollama (local) | AI assistant, doc/sheet AI, subtitle translation | `DEEPSEEK_API_KEY` / `OLLAMA_URL` |
@@ -116,7 +115,7 @@ Aerie was built on and for an Unraid home server. The `deploy/` scripts automate
    cp deploy/deploy.conf.example deploy/deploy.conf
    nano deploy/deploy.conf
    ```
-   Set at minimum `HOST_IP` (your server's LAN IP). Point the `*_APPDATA` paths at your existing service appdata folders and list your PhotoPrism instances if you have them — `gen-env.sh` reads the API keys straight out of those services' own config files/databases.
+   Set at minimum `HOST_IP` (your server's LAN IP). Point the `*_APPDATA` paths at your existing service appdata folders — `gen-env.sh` reads the API keys straight out of those services' own config files/databases.
 3. **Deploy:**
    ```bash
    bash deploy/run.sh
@@ -167,6 +166,5 @@ Movies stored in 1080p can be rendered at 2560×1440 by the *viewing* machine: t
 ## License
 
 MIT — see [LICENSE](LICENSE). Includes a port of AMD FidelityFX Super Resolution 1.0 and OpenStreetMap-based maps; attributions in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
 
 

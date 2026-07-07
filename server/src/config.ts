@@ -36,21 +36,6 @@ function jwtSecret(dataDir: string): string {
   }
 }
 
-// Per-user PhotoPrism instances: PP_INSTANCES="alice=http://host:2342,bob=http://host:2343"
-// (legacy PP_<NAME>_URL variables are also honored for existing deployments).
-function photoprismUsers(): Record<string, string> {
-  const users: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    const m = /^PP_([A-Z0-9]+)_URL$/.exec(key);
-    if (m && value) users[m[1].toLowerCase()] = value;
-  }
-  for (const part of cfgVal('PP_INSTANCES').split(',')) {
-    const [name, url] = part.split('=').map(s => s?.trim());
-    if (name && url) users[name.toLowerCase()] = url;
-  }
-  return users;
-}
-
 const dataDir = env.DATA_DIR || '/data';
 
 export const config = {
@@ -86,15 +71,6 @@ export const config = {
   audiobookshelf: {
     get url() { return cfgVal('ABS_URL'); },
     get apiKey() { return cfgVal('ABS_API_KEY'); },
-  },
-  photoprism: {
-    get users() { return photoprismUsers(); },
-    get defaultUser() { return cfgVal('PP_DEFAULT') || Object.keys(photoprismUsers())[0] || ''; },
-    // Explicit PP_DEFAULT = "unmapped users share this instance" (legacy setups).
-    // Without it, unmapped users get the native photo library instead.
-    get explicitDefault() { return !!cfgVal('PP_DEFAULT'); },
-    get user() { return cfgVal('PP_USER', 'admin'); },
-    get password() { return cfgVal('PP_PASSWORD'); },
   },
   jellyseerr: {
     get url() { return cfgVal('JELLYSEERR_URL'); },

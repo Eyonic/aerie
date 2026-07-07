@@ -6,11 +6,18 @@ import path from 'node:path';
 import * as storage from '../services/storage.js';
 import * as jf from '../services/jellyfin.js';
 import * as abs from '../services/audiobookshelf.js';
-import * as pp from '../services/photoprism.js';
+import { db } from '../lib/db.js';
 
 const r = Router();
 
 async function safe<T>(p: Promise<T>, f: T): Promise<T> { try { return await p; } catch { return f; } }
+
+function nativePhotoSearch(userId: number, q: string) {
+  return db.prepare(`SELECT rel_path path, taken_at takenAt
+    FROM photo_index
+    WHERE user_id=? AND lower(rel_path) LIKE ?
+    ORDER BY taken_at DESC, rel_path ASC LIMIT 12`).all(userId, `%${q.toLowerCase()}%`) as any[];
+}
 
 r.get('/', async (req: AuthedRequest, res) => {
   const q = String(req.query.q || '').trim();
@@ -44,7 +51,7 @@ r.get('/', async (req: AuthedRequest, res) => {
   const [media, books, photos] = await Promise.all([
     safe(jf.search(q), [] as any[]),
     safe(abs.allBooks('book').then(bs => bs.filter(b => b.title.toLowerCase().includes(ql)).slice(0, 12)), [] as any[]),
-    safe(pp.listPhotos(user.username, { q, count: 12 }), [] as any[]),
+    safe(Promise.resolve(nativePhotoSearch(user.id, q)), [] as any[]),
   ]);
 
   const groups: any[] = [];
@@ -55,7 +62,8 @@ r.get('/', async (req: AuthedRequest, res) => {
   if (books.length) groups.push({ kind: 'book', label: 'Audiobooks', results: books.map(b => ({
     id: b.id, kind: 'book', title: b.title, subtitle: b.author, thumbUrl: b.coverUrl, link: '/audiobooks' })) });
   if (photos.length) groups.push({ kind: 'photo', label: 'Photos', results: photos.map(p => ({
-    id: p.id, kind: 'photo', title: p.title, subtitle: new Date(p.takenAt).toLocaleDateString(), thumbUrl: p.thumbUrl, link: '/photos' })) });
+    id: p.path, kind: 'photo', title: path.posix.basename(p.path), subtitle: p.takenAt ? new Date(p.takenAt).toLocaleDateString() : '',
+    thumbUrl: `/api/photos/native/thumb?path=${encodeURIComponent(p.path)}`, link: '/photos' })) });
 
   res.json({ query: q, groups });
 });

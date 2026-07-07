@@ -31,7 +31,7 @@ interface CardDef {
   wide?: boolean;        // span both grid columns
 }
 
-const GROUPS: { title: string; pp?: boolean; cards: CardDef[] }[] = [
+const GROUPS: { title: string; cards: CardDef[] }[] = [
   { title: 'Media', cards: [
     { id: 'jellyfin', icon: 'Movie', title: 'Jellyfin', subtitle: 'Movies, TV shows, music and videos.', service: 'jellyfin',
       specs: [
@@ -56,7 +56,6 @@ const GROUPS: { title: string; pp?: boolean; cards: CardDef[] }[] = [
         { key: 'LIDARR_API_KEY', label: 'API key', secret: true },
       ] },
   ] },
-  { title: 'Photos', pp: true, cards: [] },
   { title: 'AI', cards: [
     { id: 'deepseek', icon: 'Sparkles', title: 'DeepSeek', subtitle: 'Cloud LLM for chat, agents and document actions.', service: 'deepseek',
       specs: [
@@ -91,30 +90,6 @@ const GROUPS: { title: string; pp?: boolean; cards: CardDef[] }[] = [
       ] },
   ] },
 ];
-
-// PhotoPrism has a custom editor (dynamic instance list), so it isn't in GROUPS.
-const PP_SPECS: FieldSpec[] = [
-  { key: 'PP_INSTANCES', label: 'Instances' },
-  { key: 'PP_DEFAULT', label: 'Default instance' },
-  { key: 'PP_USER', label: 'Username', placeholder: 'admin' },
-  { key: 'PP_PASSWORD', label: 'Password', secret: true },
-];
-const PP_CARD: CardDef = {
-  id: 'photoprism', icon: 'Photos', title: 'PhotoPrism', subtitle: 'Photo library — faces, places and albums.',
-  service: 'photoprism', specs: PP_SPECS, wide: true,
-};
-
-// PP_INSTANCES wire format: "name=url,name2=url2"
-function parseInstances(v: string): { name: string; url: string }[] {
-  if (!v.trim()) return [];
-  return v.split(',').map(p => {
-    const i = p.indexOf('=');
-    return i === -1 ? { name: p.trim(), url: '' } : { name: p.slice(0, i).trim(), url: p.slice(i + 1).trim() };
-  }).filter(r => r.name || r.url);
-}
-function serializeInstances(rows: { name: string; url: string }[]): string {
-  return rows.filter(r => r.name.trim() && r.url.trim()).map(r => `${r.name.trim()}=${r.url.trim()}`).join(',');
-}
 
 // Everything the field/card components need, wired up once in the root.
 interface Ctx {
@@ -243,81 +218,6 @@ function Card({ ctx, def }: { ctx: Ctx; def: CardDef }) {
   );
 }
 
-// PhotoPrism: PP_INSTANCES edited as name+URL rows, serialized on every edit.
-function PhotoPrismCard({ ctx }: { ctx: Ctx }) {
-  const instMeta = ctx.fields['PP_INSTANCES'];
-  const serverInstances = instMeta?.value ?? '';
-  const [rows, setRows] = useState<{ name: string; url: string }[]>(() => parseInstances(serverInstances));
-  // Re-init from the server after a save/clear reload (the draft key is gone by then).
-  useEffect(() => { setRows(parseInstances(serverInstances)); }, [serverInstances]);
-
-  const commit = (next: { name: string; url: string }[]) => {
-    setRows(next);
-    ctx.stage('PP_INSTANCES', serializeInstances(next));
-  };
-
-  const names = rows.map(r => r.name.trim()).filter(Boolean);
-  const defMeta = ctx.fields['PP_DEFAULT'];
-  const defValue = ctx.draft['PP_DEFAULT'] ?? defMeta?.value ?? '';
-  const options = !defValue || names.includes(defValue) ? names : [defValue, ...names];
-
-  return (
-    <div className="card !p-0 overflow-hidden flex flex-col md:col-span-2">
-      <CardHeader def={PP_CARD} />
-      <div className="p-5 space-y-4">
-        <div>
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="text-sm font-medium text-slate-300">Instances</span>
-            <SourceBadge meta={instMeta} />
-            {instMeta?.source === 'app' && <ClearBtn ctx={ctx} k="PP_INSTANCES" />}
-          </div>
-          <div className="space-y-2">
-            {rows.map((r, i) => (
-              <div key={i} className="flex gap-2">
-                <input className="input !w-32 sm:!w-40 shrink-0" placeholder="name" value={r.name}
-                  autoComplete="off" spellCheck={false}
-                  onChange={e => commit(rows.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} />
-                <input className="input flex-1 min-w-0" placeholder="http://192.168.0.10:2342" value={r.url}
-                  autoComplete="off" spellCheck={false}
-                  onChange={e => commit(rows.map((x, j) => j === i ? { ...x, url: e.target.value } : x))} />
-                <button className="icon-btn shrink-0 text-slate-500 hover:text-accent-red" title="Remove instance"
-                  onClick={() => commit(rows.filter((_, j) => j !== i))}>
-                  <Icon.Trash size={15} />
-                </button>
-              </div>
-            ))}
-            <button className="btn-ghost !py-1.5 !px-2.5 text-xs" onClick={() => setRows([...rows, { name: '', url: '' }])}>
-              <Icon.Plus size={14} /> Add instance
-            </button>
-          </div>
-          <p className="text-xs text-slate-500 mt-1.5">One PhotoPrism per family member or library. Rows need both a name and a URL to be saved.</p>
-        </div>
-
-        <div className="grid sm:grid-cols-3 gap-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="text-sm font-medium text-slate-300">Default instance</span>
-              <SourceBadge meta={defMeta} />
-              {defMeta?.source === 'app' && <ClearBtn ctx={ctx} k="PP_DEFAULT" />}
-            </div>
-            <div className="relative">
-              <select className="input appearance-none pr-9 cursor-pointer" value={defValue}
-                onChange={e => ctx.stage('PP_DEFAULT', e.target.value)}>
-                <option value="" className="bg-ink-900 text-white">Not set</option>
-                {options.map(n => <option key={n} value={n} className="bg-ink-900 text-white">{n}</option>)}
-              </select>
-              <Icon.ChevronDown size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
-            </div>
-          </div>
-          <FieldRow ctx={ctx} spec={PP_SPECS[2]} />
-          <FieldRow ctx={ctx} spec={PP_SPECS[3]} />
-        </div>
-      </div>
-      <CardFooter ctx={ctx} def={PP_CARD} allSpecs={PP_SPECS} />
-    </div>
-  );
-}
-
 export default function Integrations() {
   const { user } = useAuth();
   const isAdmin = !!user && user.role === 'admin';
@@ -425,7 +325,6 @@ export default function Integrations() {
         <section key={g.title} className="mb-8">
           <h2 className="section-title mb-3">{g.title}</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {g.pp && <PhotoPrismCard ctx={ctx} />}
             {g.cards.map(def => <Card key={def.id} ctx={ctx} def={def} />)}
           </div>
         </section>

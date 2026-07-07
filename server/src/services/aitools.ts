@@ -8,7 +8,6 @@ import path from 'node:path';
 import * as storage from './storage.js';
 import * as jf from './jellyfin.js';
 import * as abs from './audiobookshelf.js';
-import * as pp from './photoprism.js';
 import * as ai from './ai.js';
 import { db } from '../lib/db.js';
 
@@ -79,11 +78,16 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
       } catch { return { error: 'could not read file' }; }
     }
     case 'find_duplicate_photos': {
-      const photos = await safe(pp.listPhotos(username, { count: 1000 }), [] as any[]);
-      const byKey = new Map<string, any[]>();
-      for (const p of photos) { const k = `${p.title}|${p.width}x${p.height}`; (byKey.get(k) || byKey.set(k, []).get(k))!.push(p); }
-      const dups = [...byKey.values()].filter(g => g.length > 1);
-      return { duplicateGroups: dups.length, totalDuplicates: dups.reduce((s, g) => s + g.length - 1, 0), examples: dups.slice(0, 5).map(g => g[0].title) };
+      const rows = db.prepare(`SELECT size,width,height,COUNT(*) count,GROUP_CONCAT(rel_path, char(10)) paths
+        FROM photo_index
+        WHERE user_id=? AND size > 0 AND width IS NOT NULL AND height IS NOT NULL
+        GROUP BY size,width,height HAVING COUNT(*) > 1
+        ORDER BY count DESC LIMIT 50`).all(userId) as any[];
+      return {
+        duplicateGroups: rows.length,
+        totalDuplicates: rows.reduce((s, g) => s + Number(g.count || 0) - 1, 0),
+        examples: rows.slice(0, 5).map(g => String(g.paths || '').split('\n')[0]).filter(Boolean),
+      };
     }
     case 'list_media': {
       const limit = args.limit || 15;

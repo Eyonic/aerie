@@ -11,7 +11,6 @@ const SERVICES = (): { key: string; name: string; url: string; probe: string; tc
   { key: 'aerie', name: 'Aerie Web', url: `http://127.0.0.1:${config.port}`, probe: '/api/health' },
   { key: 'jellyfin', name: 'Media Engine (Jellyfin)', url: config.jellyfin.url, probe: '/System/Info/Public' },
   { key: 'abs', name: 'Audiobook Engine', url: config.audiobookshelf.url, probe: '/healthcheck' },
-  { key: 'photoprism', name: 'Photo Engine', url: config.photoprism.users[config.photoprism.defaultUser], probe: '/api/v1/status' },
   { key: 'ai', name: 'AI Engine (DeepSeek V4)', url: config.deepseek.apiKey ? config.deepseek.url : config.ollama.url, probe: config.deepseek.apiKey ? '/models' : '/api/tags' },
   { key: 'comfyui', name: 'AI Image (ComfyUI)', url: config.sd.url, probe: '/system_stats' },
   { key: 'acestep', name: 'AI Music (ACE-Step)', url: config.acestep.url, probe: '/health' },

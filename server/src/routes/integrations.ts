@@ -1,6 +1,6 @@
 // In-app integration setup (admin only) — lets the operator configure every
-// backend service (Jellyfin, Jellyseerr, Lidarr, ABS, PhotoPrism, AI engines,
-// server addresses) from the UI instead of env vars. Values persist in the
+// backend service (Jellyfin, Jellyseerr, Lidarr, ABS, AI engines, server
+// addresses) from the UI instead of env vars. Values persist in the
 // settings table and take effect IMMEDIATELY (config resolves overrides on
 // every read). Env vars remain the fallback, so env-managed installs (e.g.
 // the Unraid gen-env flow) keep working with nothing saved here.
@@ -23,7 +23,6 @@ const FIELDS: { key: string; secret?: boolean }[] = [
   { key: 'ABS_URL' }, { key: 'ABS_API_KEY', secret: true },
   { key: 'JELLYSEERR_URL' }, { key: 'JELLYSEERR_API_KEY', secret: true },
   { key: 'LIDARR_URL' }, { key: 'LIDARR_API_KEY', secret: true },
-  { key: 'PP_INSTANCES' }, { key: 'PP_DEFAULT' }, { key: 'PP_USER' }, { key: 'PP_PASSWORD', secret: true },
   { key: 'OLLAMA_URL' }, { key: 'OLLAMA_MODEL' },
   { key: 'DEEPSEEK_URL' }, { key: 'DEEPSEEK_API_KEY', secret: true }, { key: 'DEEPSEEK_MODEL' },
   { key: 'SD_URL' }, { key: 'ACESTEP_URL' }, { key: 'WHISPER_URL' },
@@ -40,13 +39,6 @@ function validValue(key: string, value: string): boolean {
   if (/_URL$/.test(key)) {
     try { const u = new URL(value); return u.protocol === 'http:' || u.protocol === 'https:'; }
     catch { return false; }
-  }
-  if (key === 'PP_INSTANCES') {
-    return value.split(',').every(p => {
-      const [name, url] = p.split('=').map(s => s?.trim());
-      if (!name || !url) return false;
-      try { return ['http:', 'https:'].includes(new URL(url).protocol); } catch { return false; }
-    });
   }
   return !/[\r\n]/.test(value);
 }
@@ -97,8 +89,6 @@ const TESTS: Record<string, () => Promise<{ ok: boolean; detail: string }>> = {
     d => `Jellyseerr ${d.version || 'ok'}`, { 'X-Api-Key': config.jellyseerr.apiKey }),
   lidarr: () => probeJson(`${config.lidarr.url}/api/v1/system/status`,
     d => `Lidarr ${d.version || 'ok'}`, { 'X-Api-Key': config.lidarr.apiKey }),
-  photoprism: () => probeJson(`${config.photoprism.users[config.photoprism.defaultUser] || ''}/api/v1/status`,
-    () => `instance "${config.photoprism.defaultUser}" reachable`),
   ollama: () => probeJson(`${config.ollama.url}/api/tags`,
     d => `${(d.models || []).length} models available`),
   deepseek: () => probeJson(`${config.deepseek.url}/models`,

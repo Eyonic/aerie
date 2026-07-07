@@ -110,32 +110,7 @@ export interface HistoryStats {
   topItems: (Pick<HistoryEntry, 'kind' | 'itemId' | 'title' | 'subtitle' | 'imageUrl' | 'lastTs'> & { totalSec: number })[];
 }
 
-// ---------- Photos (PhotoPrism-backed) ----------
-export interface Photo {
-  id: string;
-  uid: string;
-  title: string;
-  takenAt: string;
-  thumbUrl: string;
-  previewUrl: string;
-  downloadUrl: string;
-  width: number;
-  height: number;
-  type: 'image' | 'video' | 'live' | 'raw';
-  favorite: boolean;
-  camera?: string;
-  lat?: number;
-  lng?: number;
-}
-
-export interface PhotoAlbum {
-  uid: string;
-  title: string;
-  count: number;
-  coverUrl?: string;
-  type: string;
-}
-
+// ---------- Photos ----------
 export interface NativePhoto {
   path: string;
   takenAt: string | null;
@@ -331,7 +306,7 @@ export interface Notification {
 export interface DashboardData {
   storage: StorageUsage;
   recentFiles: FileEntry[];
-  recentPhotos: Photo[];
+  recentPhotos: NativePhoto[];
   continueWatching: MediaItem[];
   continueListening: Book[];
   aiJobs: AiJob[];

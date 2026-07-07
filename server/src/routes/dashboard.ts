@@ -7,7 +7,6 @@ import path from 'node:path';
 import * as storage from '../services/storage.js';
 import * as jf from '../services/jellyfin.js';
 import * as abs from '../services/audiobookshelf.js';
-import * as pp from '../services/photoprism.js';
 import { serviceStatuses, systemHealth } from '../services/monitoring.js';
 import { backupStatuses } from './backups.js';
 
@@ -15,6 +14,11 @@ const r = Router();
 
 async function safe<T>(p: Promise<T>, fallback: T): Promise<T> {
   try { return await p; } catch { return fallback; }
+}
+
+function recentNativePhotos(userId: number, limit: number) {
+  return db.prepare(`SELECT rel_path path, taken_at takenAt, width, height, size, camera, lat, lon
+    FROM photo_index WHERE user_id=? ORDER BY taken_at DESC, rel_path ASC LIMIT ?`).all(userId, limit) as any[];
 }
 
 r.get('/', async (req: AuthedRequest, res) => {
@@ -44,7 +48,7 @@ r.get('/', async (req: AuthedRequest, res) => {
 
   const [storageUsage, recentPhotos, continueWatching, continueListening, services, health, backups] = await Promise.all([
     safe(storage.computeUsage(user.username, user.id), { usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }),
-    safe(pp.listPhotos(user.username, { count: 12 }), [] as any[]),
+    safe(Promise.resolve(recentNativePhotos(user.id, 12)), [] as any[]),
     safe(jf.resumeItems('Video'), [] as any[]),
     safe(abs.allBooks('book').then(b => b.filter(x => (x.progressPct || 0) > 0 && (x.progressPct || 0) < 100).slice(0, 8)), [] as any[]),
     safe(serviceStatuses(), [] as any[]),

@@ -1,4 +1,4 @@
-// Photos — PhotoPrism-backed, proxied through Aerie (per-user instances).
+// Photos — native Aerie photo library.
 import { Router } from 'express';
 import multer from 'multer';
 import fs from 'node:fs';
@@ -8,7 +8,6 @@ import mime from 'mime-types';
 import { type AuthedRequest } from '../lib/auth.js';
 import { db } from '../lib/db.js';
 import { config } from '../config.js';
-import * as pp from '../services/photoprism.js';
 import * as photolib from '../services/photolib.js';
 import * as storage from '../services/storage.js';
 
@@ -16,11 +15,6 @@ const r = Router();
 const uploadTmp = path.join(config.filesRoot, '.photo-uploads-tmp');
 fs.mkdirSync(uploadTmp, { recursive: true });
 const upload = multer({ dest: uploadTmp, limits: { files: 50, fileSize: 1024 * 1024 * 1024 } });
-
-function ppUser(req: AuthedRequest): string {
-  // map Aerie user -> photoprism instance; fall back to default
-  return (req.query.lib as string) || req.user!.username;
-}
 
 function u(req: AuthedRequest) { return req.user!; }
 
@@ -42,7 +36,7 @@ async function uniquePhotoPath(username: string, dir: string, filename: string):
   }
 }
 
-r.get('/status', (req: AuthedRequest, res) => res.json({ configured: pp.configuredFor(u(req).username) }));
+r.get('/status', (_req: AuthedRequest, res) => res.json({ configured: true, native: true }));
 
 r.get('/native/status', (req: AuthedRequest, res) => {
   res.json(photolib.status(u(req).id));
@@ -116,82 +110,6 @@ r.delete('/native', async (req: AuthedRequest, res, next) => {
       db.prepare('DELETE FROM photo_index WHERE user_id=? AND rel_path=?').run(u(req).id, p);
     }
     res.json({ ok: true });
-  } catch (e) { next(e); }
-});
-
-r.get('/timeline', async (req: AuthedRequest, res, next) => {
-  try {
-    res.json(await pp.listPhotos(ppUser(req), {
-      count: Number(req.query.count) || 120,
-      offset: Number(req.query.offset) || 0,
-      q: req.query.q as string,
-    }));
-  } catch (e) { if (!pp.configured()) return res.json([]); next(e); }
-});
-
-r.get('/favorites', async (req: AuthedRequest, res, next) => {
-  try { res.json(await pp.listPhotos(ppUser(req), { favorite: true, count: 200 })); }
-  catch (e) { if (!pp.configured()) return res.json([]); next(e); }
-});
-
-// Explore by objects/scenes (labels) + People (named faces).
-r.get('/labels', async (req: AuthedRequest, res, next) => {
-  try { res.json(await pp.listLabels(ppUser(req))); } catch (e) { if (!pp.configured()) return res.json([]); next(e); }
-});
-r.get('/label/:slug', async (req: AuthedRequest, res, next) => {
-  try { res.json(await pp.photosByLabel(ppUser(req), String(req.params.slug))); } catch (e) { next(e); }
-});
-r.get('/people', async (req: AuthedRequest, res, next) => {
-  try { res.json({ people: await pp.listPeople(ppUser(req)), faceClusters: await pp.faceClusterCount(ppUser(req)) }); }
-  catch (e) { if (!pp.configured()) return res.json({ people: [], faceClusters: 0 }); next(e); }
-});
-r.get('/person/:uid', async (req: AuthedRequest, res, next) => {
-  try { res.json(await pp.photosByPerson(ppUser(req), String(req.params.uid))); } catch (e) { next(e); }
-});
-
-// Geotagged photos for the Places map view (Google/Apple Photos style).
-r.get('/geo', async (req: AuthedRequest, res, next) => {
-  try {
-    const photos = await pp.listPhotos(ppUser(req), { count: 2000 });
-    res.json(photos.filter(p => p.lat && p.lng).map(p => ({
-      id: p.id, uid: p.uid, lat: p.lat, lng: p.lng,
-      thumbUrl: p.thumbUrl, previewUrl: p.previewUrl, title: p.title, takenAt: p.takenAt, type: p.type,
-    })));
-  } catch (e) { if (!pp.configured()) return res.json([]); next(e); }
-});
-
-r.get('/albums', async (req: AuthedRequest, res, next) => {
-  try { res.json(await pp.listAlbums(ppUser(req))); }
-  catch (e) { if (!pp.configured()) return res.json([]); next(e); }
-});
-
-r.get('/album/:uid', async (req: AuthedRequest, res, next) => {
-  try { res.json(await pp.listPhotos(ppUser(req), { album: String(req.params.uid), count: 500 })); }
-  catch (e) { next(e); }
-});
-
-// Thumb proxy: /thumb/:lib/:hash/:size
-r.get('/thumb/:lib/:hash/:size', async (req, res, next) => {
-  try {
-    const token = await pp.thumbToken(req.params.lib);
-    const url = `${pp.instanceFor(req.params.lib)}/api/v1/t/${req.params.hash}/${token}/${req.params.size}`;
-    const upstream = await fetch(url);
-    if (!upstream.ok) return res.status(404).end();
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.end(Buffer.from(await upstream.arrayBuffer()));
-  } catch (e) { next(e); }
-});
-
-// Full download proxy
-r.get('/download/:lib/:uid', async (req, res, next) => {
-  try {
-    const token = await pp.downloadTokenFor(req.params.lib);
-    const url = `${pp.instanceFor(req.params.lib)}/api/v1/photos/${req.params.uid}/dl?t=${token}`;
-    const upstream = await fetch(url);
-    if (!upstream.ok) return res.status(404).end();
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/octet-stream');
-    res.end(Buffer.from(await upstream.arrayBuffer()));
   } catch (e) { next(e); }
 });
 
