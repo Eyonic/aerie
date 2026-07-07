@@ -1,10 +1,29 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// @ts-ignore - leaflet ships no bundled types in this project
+import L from 'leaflet';
+// @ts-ignore - side-effect plugin, augments L with markerClusterGroup
+import 'leaflet.markercluster';
+import 'leaflet/dist/leaflet.css';
+import 'leaflet.markercluster/dist/MarkerCluster.css';
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatBytes, formatDate } from '../lib/utils';
 import { toast } from '../lib/store';
 import { ConfirmModal, EmptyState, PageLoader, Spinner } from '../components/ui';
 import type { NativePhoto } from '../lib/model';
+
+type GeoPoint = { path: string; lat: number; lon: number; takenAt: string | null };
+
+// Coarse location cell (~50m) so a marker opens everything taken nearby.
+function cellKey(p: { lat: number; lon: number }) {
+  return `${p.lat.toFixed(3)},${p.lon.toFixed(3)}`;
+}
+
+// A geo point carries no dimensions/camera; fill the rest so the lightbox is happy.
+function geoToPhoto(p: GeoPoint): NativePhoto {
+  return { path: p.path, takenAt: p.takenAt, width: null, height: null, size: 0, camera: null, lat: p.lat, lon: p.lon };
+}
 
 const PAGE = 200;
 const ACCEPT = 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/avif,image/bmp,image/tiff';
@@ -180,6 +199,93 @@ function Meta({ label, value }: { label: string; value: string }) {
   );
 }
 
+// ---- Places map ---------------------------------------------------------
+function PlacesMap({ onOpen }: { onOpen: (list: NativePhoto[], index: number) => void }) {
+  const [points, setPoints] = useState<GeoPoint[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+
+  useEffect(() => {
+    let alive = true;
+    api.photos.native.geo()
+      .then(pts => { if (alive) setPoints(Array.isArray(pts) ? pts : []); })
+      .catch((e: any) => { if (alive) { setFailed(true); setPoints([]); toast('Failed to load photo map', 'error', e?.message); } });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!points || points.length === 0 || !containerRef.current) return;
+    if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+
+    const map = L.map(containerRef.current, { zoomControl: true, scrollWheelZoom: true, worldCopyJump: true });
+    mapRef.current = map;
+
+    // Tiles proxied through our own server so OSM never sees the viewer's IP.
+    L.tileLayer('/tiles/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+
+    const groups = new Map<string, GeoPoint[]>();
+    for (const p of points) {
+      const k = cellKey(p);
+      const g = groups.get(k);
+      if (g) g.push(p); else groups.set(k, [p]);
+    }
+
+    const cluster = (L as any).markerClusterGroup({ showCoverageOnHover: false, maxClusterRadius: 55, spiderfyOnMaxZoom: true, chunkedLoading: true });
+    const bounds = L.latLngBounds([]);
+    for (const p of points) {
+      const src = api.photos.native.thumbUrl(p.path);
+      const icon = L.divIcon({
+        className: 'cb-geo-marker',
+        html:
+          `<div style="width:44px;height:44px;border-radius:12px;overflow:hidden;` +
+          `border:2px solid rgba(255,255,255,.9);box-shadow:0 4px 14px rgba(0,0,0,.55);background:#12121c;">` +
+          `<img src="${src}" loading="lazy" alt="" style="width:100%;height:100%;object-fit:cover;display:block;" /></div>`,
+        iconSize: [48, 48], iconAnchor: [24, 24],
+      });
+      const marker = L.marker([p.lat, p.lon], { icon });
+      marker.on('click', () => {
+        const grp = groups.get(cellKey(p)) || [p];
+        const idx = Math.max(0, grp.findIndex(q => q.path === p.path));
+        onOpenRef.current(grp.map(geoToPhoto), idx);
+      });
+      cluster.addLayer(marker);
+      bounds.extend([p.lat, p.lon]);
+    }
+    map.addLayer(cluster);
+    if (bounds.isValid()) map.fitBounds(bounds, { padding: [48, 48], maxZoom: 14 });
+    else map.setView([20, 0], 2);
+
+    const t = setTimeout(() => mapRef.current && mapRef.current.invalidateSize(), 120);
+    const onResize = () => mapRef.current && mapRef.current.invalidateSize();
+    window.addEventListener('resize', onResize);
+    return () => { clearTimeout(t); window.removeEventListener('resize', onResize); map.remove(); mapRef.current = null; };
+  }, [points]);
+
+  if (points === null) return <div className="flex justify-center py-16"><Spinner size={26} /></div>;
+  if (points.length === 0) {
+    return (
+      <EmptyState
+        icon={<Icon.Cloud size={30} />}
+        title={failed ? 'Couldn’t load the map' : 'No places yet'}
+        subtitle={failed ? 'The map is unavailable right now. Try again later.' : 'Photos that carry GPS location data will appear on a map here.'}
+      />
+    );
+  }
+  const cells = new Set(points.map(cellKey)).size;
+  return (
+    <div className="relative isolate w-full overflow-hidden rounded-2xl border border-white/10 bg-ink-900 shadow-card animate-fade-in">
+      <div className="pointer-events-none absolute left-3 top-3 z-[500] flex items-center gap-2 rounded-full border border-white/10 bg-ink-950/80 px-3 py-1.5 text-xs font-medium text-slate-200 backdrop-blur-md">
+        <Icon.Cloud size={14} className="text-brand-400" />
+        {points.length.toLocaleString()} photos · {cells.toLocaleString()} place{cells === 1 ? '' : 's'}
+      </div>
+      <div ref={containerRef} className="h-[70vh] min-h-[420px] w-full [&_.leaflet-container]:bg-ink-900" style={{ touchAction: 'none' }} />
+    </div>
+  );
+}
+
 export default function NativePhotos() {
   const [items, setItems] = useState<NativePhoto[]>([]);
   const [count, setCount] = useState(0);
@@ -191,6 +297,8 @@ export default function NativePhotos() {
   const [dragOver, setDragOver] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [lightbox, setLightbox] = useState<number | null>(null);
+  const [mapLb, setMapLb] = useState<{ items: NativePhoto[]; index: number } | null>(null);
+  const [tab, setTab] = useState<'timeline' | 'places'>('timeline');
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const sentinel = useRef<HTMLDivElement | null>(null);
@@ -330,7 +438,23 @@ export default function NativePhotos() {
         </div>
       </div>
 
-      {selecting && (
+      <div className="mb-5 flex gap-1.5">
+        {(['timeline', 'places'] as const).map(t => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={cx('flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sm font-medium transition',
+              tab === t ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white')}
+          >
+            {t === 'timeline' ? <Icon.Photos size={15} /> : <Icon.Cloud size={15} />}
+            {t === 'timeline' ? 'Timeline' : 'Places'}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'places' && <PlacesMap onOpen={(list, index) => setMapLb({ items: list, index })} />}
+
+      {tab === 'timeline' && selecting && (
         <div className="sticky top-2 z-30 mb-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-ink-950/95 p-2 backdrop-blur-xl shadow-float">
           <span className="px-2 text-sm font-medium text-white">{selected.size} selected</span>
           <button className="btn-ghost !py-1.5" onClick={() => downloadMany(selectedItems.map(i => i.path))}><Icon.Download size={15} /> Download</button>
@@ -339,6 +463,7 @@ export default function NativePhotos() {
         </div>
       )}
 
+      {tab === 'timeline' && (
       <div
         onDragOver={e => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -389,6 +514,7 @@ export default function NativePhotos() {
           </div>
         )}
       </div>
+      )}
 
       <ConfirmModal
         open={!!confirmDelete}
@@ -406,6 +532,16 @@ export default function NativePhotos() {
           index={lightbox}
           onClose={() => setLightbox(null)}
           onNav={d => setLightbox(i => i == null ? i : Math.min(Math.max(i + d, 0), items.length - 1))}
+          onDelete={p => setConfirmDelete([p.path])}
+        />
+      )}
+
+      {mapLb && (
+        <Lightbox
+          items={mapLb.items}
+          index={mapLb.index}
+          onClose={() => setMapLb(null)}
+          onNav={d => setMapLb(m => m ? { ...m, index: Math.min(Math.max(m.index + d, 0), m.items.length - 1) } : m)}
           onDelete={p => setConfirmDelete([p.path])}
         />
       )}

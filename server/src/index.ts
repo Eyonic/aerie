@@ -34,6 +34,7 @@ import appsRouter from './routes/apps.js';
 import requestsRouter from './routes/requests.js';
 import musicGenRouter from './routes/musicgen.js';
 import castRouter, { castStreamRouter } from './routes/cast.js';
+import tilesRouter from './routes/tiles.js';
 import historyRouter from './routes/history.js';
 import subtitlesRouter from './routes/subtitles.js';
 import syncRouter from './routes/sync.js';
@@ -61,6 +62,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/shares', sharesRouter); // has both public (link view) + authed subroutes
 app.use('/api/apps', appsRouter);     // public downloads catalog
 app.use('/api/cast-stream', castStreamRouter); // token-authed media proxy for cast TVs
+app.use('/tiles', tilesRouter);       // public map-tile proxy (Photos "Places" map)
 
 // Native app installers — public static (a browser download can't send auth headers).
 fs.mkdirSync(config.downloadsDir, { recursive: true });

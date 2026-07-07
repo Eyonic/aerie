@@ -35,8 +35,8 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Never cache API, streams, downloads, or auth — always go to network.
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/downloads/')) return;
+  // Never cache API, streams, downloads, map tiles, or auth — always go to network.
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/downloads/') || url.pathname.startsWith('/tiles/')) return;
 
   // App navigations: network-first, fall back to cached shell (offline).
   if (e.request.mode === 'navigate') {

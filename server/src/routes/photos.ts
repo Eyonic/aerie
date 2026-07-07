@@ -55,6 +55,10 @@ r.get('/native/months', (req: AuthedRequest, res, next) => {
   try { res.json(photolib.months(u(req).id)); } catch (e) { next(e); }
 });
 
+r.get('/native/geo', (req: AuthedRequest, res, next) => {
+  try { res.json(photolib.geo(u(req).id)); } catch (e) { next(e); }
+});
+
 r.post('/native/upload', upload.array('files', 50), async (req: AuthedRequest, res, next) => {
   const files = ((req as any).files as any[]) || [];
   try {

@@ -164,6 +164,7 @@ export const api = {
       scan: () => req<{ count: number }>('POST', '/api/photos/native/scan'),
       timeline: (cursor?: string, limit = 200) => req<{ items: NativePhoto[]; nextCursor: string | null }>('GET', `/api/photos/native/timeline?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
       months: () => req<{ month: string; count: number }[]>('GET', '/api/photos/native/months'),
+      geo: () => req<{ path: string; lat: number; lon: number; takenAt: string | null }[]>('GET', '/api/photos/native/geo'),
       upload: (files: File[], onProgress?: (done: number, total: number, pct: number) => void) => {
         return new Promise<{ items: NativePhoto[] }>((resolve, reject) => {
           const form = new FormData();

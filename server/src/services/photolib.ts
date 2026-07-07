@@ -247,6 +247,14 @@ export function months(userId: number) {
     FROM photo_index WHERE user_id=? AND taken_at IS NOT NULL GROUP BY month ORDER BY month DESC`).all(userId);
 }
 
+// Geotagged photos for the Places map (newest first). Capped so a huge library
+// stays responsive on the client; the map clusters them anyway.
+export function geo(userId: number) {
+  return db.prepare(`SELECT rel_path path, lat, lon, taken_at takenAt
+    FROM photo_index WHERE user_id=? AND lat IS NOT NULL AND lon IS NOT NULL
+    ORDER BY taken_at DESC, rel_path ASC LIMIT 5000`).all(userId);
+}
+
 export async function thumb(user: User, relPath: string): Promise<string> {
   const clean = assertPhotoPath(relPath);
   const src = resolvePhoto(user.username, clean);
