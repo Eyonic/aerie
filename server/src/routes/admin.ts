@@ -8,8 +8,9 @@ const r = Router();
 r.use(requireAdmin);
 
 function cleanFeatures(raw: any) {
-  const out: { audiobooks?: boolean } = {};
+  const out: { audiobooks?: boolean; autoRequest?: boolean } = {};
   if (raw && typeof raw === 'object' && raw.audiobooks !== undefined) out.audiobooks = !!raw.audiobooks;
+  if (raw && typeof raw === 'object' && raw.autoRequest !== undefined) out.autoRequest = !!raw.autoRequest;
   return out;
 }
 

@@ -283,6 +283,19 @@ export const api = {
     requestMusic: (artist: { foreignArtistId?: string; name?: string }) => req<{ ok: boolean; name?: string; already?: boolean }>('POST', '/api/requests/music', artist),
   },
 
+  autorequest: {
+    suggestions: () => req<{
+      movies: any[];
+      tv: any[];
+      artists: { name: string; why?: string }[];
+      reason?: string;
+      profile?: { topGenres: string[]; topArtists: string[] };
+    }>('GET', '/api/autorequest/suggestions'),
+    run: () => req<{ requested?: { kind: string; title: string; why?: string }; capped?: boolean; none?: boolean; noHistory?: boolean }>('POST', '/api/autorequest/run'),
+    status: () => req<{ enabled: boolean; thisWeek: number; cap: number; recent: { title: string; ts: string; meta: any }[] }>('GET', '/api/autorequest/status'),
+    setEnabled: (enabled: boolean) => req<{ enabled: boolean }>('POST', '/api/autorequest/enabled', { enabled }),
+  },
+
   // ---- Cast to TV (server-side Google Cast — works from the app too) ----
   cast: {
     devices: (refresh = false) => req<{ ip: string; name: string }[]>('GET', `/api/cast/devices${refresh ? '?refresh=1' : ''}`),

@@ -8,6 +8,10 @@ import path from 'node:path';
 import { db, notify, audit } from '../lib/db.js';
 import { config } from '../config.js';
 import { serviceStatuses, systemHealth } from './monitoring.js';
+import * as autorequest from './autorequest.js';
+import * as jellyseerr from './jellyseerr.js';
+import * as lidarr from './lidarr.js';
+import * as ai from './ai.js';
 
 const backupDir = path.join(config.dataDir, 'backups');
 
@@ -16,6 +20,36 @@ function admins(): { id: number }[] {
 }
 function notifyAdmins(title: string, body: string, level = 'warning', link?: string) {
   for (const a of admins()) notify(a.id, title, body, level, link);
+}
+
+function autoUsers(): { id: number; features: string }[] {
+  return db.prepare('SELECT id, features FROM users').all() as any[];
+}
+function autoEnabled(raw: string): boolean {
+  try { return JSON.parse(raw || '{}')?.autoRequest !== false; } catch { return true; }
+}
+async function maybeAutoRequest() {
+  try {
+    if (!(jellyseerr.configured() || lidarr.configured())) return;
+    if (!(await ai.available().catch(() => false))) return;
+    console.log('scheduler auto-request sweep');
+    for (const user of autoUsers()) {
+      try {
+        if (!autoEnabled(user.features)) continue;
+        if (autorequest.countThisWeek(user.id) >= 3) continue;
+        const last = db.prepare("SELECT ts FROM audit WHERE user_id=? AND action='auto_requested' ORDER BY ts DESC LIMIT 1").get(user.id) as any;
+        if (last?.ts) {
+          const lastMs = Date.parse(`${String(last.ts).replace(' ', 'T')}Z`);
+          if (Number.isFinite(lastMs) && Date.now() - lastMs < 40 * 3600_000) continue;
+        }
+        const prof = await autorequest.profile(user.id);
+        if (prof.noHistory) continue;
+        await autorequest.runFor(user.id, {});
+      } catch (e: any) {
+        console.warn('[auto-request]', user.id, String(e?.message || e).slice(0, 120));
+      }
+    }
+  } catch { /* best-effort */ }
 }
 function bumpAutomation(name: string) {
   db.prepare("UPDATE automations SET last_run=datetime('now'), run_count=run_count+1 WHERE name LIKE ? AND enabled=1").run(`%${name}%`);
@@ -73,5 +107,7 @@ export function startScheduler() {
   setInterval(healthCheck, 5 * 60 * 1000);
   // check hourly whether it's time for the nightly backup
   setInterval(maybeNightlyBackup, 60 * 60 * 1000);
-  console.log('scheduler started (health alerts + nightly backup)');
+  setTimeout(maybeAutoRequest, 2 * 60 * 1000);
+  setInterval(maybeAutoRequest, 6 * 60 * 60 * 1000);
+  console.log('scheduler started (health alerts + nightly backup + auto-request)');
 }

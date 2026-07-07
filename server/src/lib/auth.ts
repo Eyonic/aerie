@@ -15,7 +15,10 @@ function parseFeatures(raw: any): User['features'] {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
     if (!parsed || typeof parsed !== 'object') return {};
-    return typeof parsed.audiobooks === 'boolean' ? { audiobooks: parsed.audiobooks } : {};
+    const out: User['features'] = {};
+    if (typeof parsed.audiobooks === 'boolean') out.audiobooks = parsed.audiobooks;
+    if (typeof parsed.autoRequest === 'boolean') out.autoRequest = parsed.autoRequest;
+    return out;
   } catch {
     return {};
   }

@@ -32,6 +32,7 @@ import settingsRouter from './routes/settings.js';
 import integrationsRouter, { loadIntegrationOverrides } from './routes/integrations.js';
 import appsRouter from './routes/apps.js';
 import requestsRouter from './routes/requests.js';
+import autorequestRouter from './routes/autorequest.js';
 import musicGenRouter from './routes/musicgen.js';
 import castRouter, { castStreamRouter } from './routes/cast.js';
 import tilesRouter from './routes/tiles.js';
@@ -93,6 +94,7 @@ app.use('/api/integrations', integrationsRouter);
 // Re-apply integration settings saved from the UI (override > env from here on).
 loadIntegrationOverrides();
 app.use('/api/requests', requestsRouter);
+app.use('/api/autorequest', autorequestRouter);
 app.use('/api/music-gen', musicGenRouter);
 app.use('/api/cast', castRouter);
 app.use('/api/history', historyRouter);

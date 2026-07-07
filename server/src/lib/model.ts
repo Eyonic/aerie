@@ -5,6 +5,7 @@ export type Role = 'admin' | 'user';
 
 export interface UserFeatures {
   audiobooks?: boolean;
+  autoRequest?: boolean;
 }
 
 export interface User {

@@ -665,7 +665,11 @@ function PreferencesTab() {
   // `prefs` also carries any preference keys owned by other pages (e.g. Music); we
   // preserve them on save by spreading the loaded object back to the server.
   const [prefs, setPrefs] = useState<Prefs | null>(null);
+  const [autoRequest, setAutoRequest] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
+  const [autoSaving, setAutoSaving] = useState(false);
+  const { user } = useAuth();
+  const setUser = useAuth.getState().setUser;
 
   useEffect(() => {
     api.settings.get()
@@ -675,6 +679,9 @@ function PreferencesTab() {
         setPrefs(merged);
       })
       .catch(() => { applyAppearance(DEFAULT_PREFS); setPrefs(DEFAULT_PREFS); });
+    api.autorequest.status()
+      .then(s => setAutoRequest(s.enabled))
+      .catch(() => setAutoRequest(user?.features?.autoRequest !== false));
   }, []);
 
   // Apply + cache immediately so the change is visible the instant a toggle flips.
@@ -696,6 +703,22 @@ function PreferencesTab() {
     } finally { setSaving(false); }
   };
 
+  const toggleAutoRequest = async (enabled: boolean) => {
+    setAutoRequest(enabled);
+    setAutoSaving(true);
+    try {
+      const res = await api.autorequest.setEnabled(enabled);
+      setAutoRequest(res.enabled);
+      if (user) setUser({ ...user, features: { ...(user.features || {}), autoRequest: res.enabled } });
+      toast(res.enabled ? 'Auto-add enabled' : 'Auto-add disabled', res.enabled ? 'success' : 'info');
+    } catch (e: any) {
+      setAutoRequest(v => !v);
+      toast('Could not update auto-add', 'error', e?.message);
+    } finally {
+      setAutoSaving(false);
+    }
+  };
+
   if (!prefs) return <PageLoader />;
 
   return (
@@ -708,6 +731,13 @@ function PreferencesTab() {
           </PrefRow>
           <PrefRow title="Reduce motion" desc="Minimize animations and transitions everywhere.">
             <Toggle on={prefs.reduceMotion} onChange={v => update({ reduceMotion: v })} />
+          </PrefRow>
+          <PrefRow title="Auto-add movies, shows & music I'll like" desc="Up to 3 a week, based on your history. You'll get a notification for each.">
+            {autoRequest === null ? <Spinner size={16} /> : (
+              <div className={cx(autoSaving && 'opacity-60 pointer-events-none')}>
+                <Toggle on={autoRequest} onChange={toggleAutoRequest} />
+              </div>
+            )}
           </PrefRow>
         </div>
         <div className="mt-5 flex items-start gap-2.5 rounded-xl bg-ink-800/60 p-3.5">

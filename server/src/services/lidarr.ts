@@ -124,6 +124,11 @@ export async function artistStatuses(): Promise<Map<string, { name: string; post
   }));
 }
 
+export async function listArtistNames(): Promise<string[]> {
+  const list = await ld('/artist');
+  return (list || []).map((a: any) => a.artistName).filter(Boolean);
+}
+
 // Add an artist to Lidarr (monitored + search its discography) = "request music".
 export async function requestArtist(foreignArtistId: string): Promise<{ ok: boolean; name?: string; already?: boolean; foreignArtistId?: string }> {
   // Already added? Answer with the name so the audit row stays meaningful.

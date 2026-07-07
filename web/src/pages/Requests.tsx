@@ -33,6 +33,13 @@ type MyRequest = {
   createdAt?: string;
 };
 
+type ForYou = {
+  movies: (Result & { why?: string })[];
+  tv: (Result & { why?: string })[];
+  artists: (MusicResult & { why?: string })[];
+  reason?: string;
+};
+
 // ---- Media status → availability helpers ----
 type Avail = { kind: 'request' | 'requested' | 'processing' | 'partial' | 'available'; label: string; color: 'green' | 'amber' | 'cyan' | 'slate' };
 
@@ -295,6 +302,9 @@ export default function Requests() {
   const [musicTrending, setMusicTrending] = useState<MusicResult[]>([]);
   const [musicMine, setMusicMine] = useState<MusicRequest[]>([]);
   const [musicStaticLoading, setMusicStaticLoading] = useState(true);
+  const [forYou, setForYou] = useState<ForYou | null>(null);
+  const [forYouLoading, setForYouLoading] = useState(true);
+  const [surpriseBusy, setSurpriseBusy] = useState(false);
 
   // Trending chart + my music requests (shown when the music search is empty).
   const loadMusicStatic = () => {
@@ -348,6 +358,24 @@ export default function Requests() {
     cacheMeta(tr || []);
   };
 
+  const loadForYou = async () => {
+    setForYouLoading(true);
+    try {
+      const s = await api.autorequest.suggestions();
+      setForYou({
+        movies: (s.movies || []).map((x: any) => ({ ...x, id: x.tmdbId, status: 0 })),
+        tv: (s.tv || []).map((x: any) => ({ ...x, id: x.tmdbId, status: 0 })),
+        artists: (s.artists || []).map((x: any) => ({ ...x, foreignArtistId: '', status: 'none' as const })),
+        reason: s.reason,
+      });
+      cacheMeta([...(s.movies || []), ...(s.tv || [])]);
+    } catch {
+      setForYou(null);
+    } finally {
+      setForYouLoading(false);
+    }
+  };
+
   // Hide a submitted request from the local list (jellyseerr exposes no cancel endpoint).
   const dismiss = (id: number) => {
     setDismissed(prev => {
@@ -383,6 +411,7 @@ export default function Requests() {
       try {
         const st = await api.requests.status();
         if (cancelled) return;
+        loadForYou();
         // Music state first: Lidarr is independent of Jellyseerr, so the Music tab
         // must survive Jellyseerr being unconfigured or down.
         setMusicConfigured(!!st?.music?.configured);
@@ -507,6 +536,30 @@ export default function Requests() {
     }
   };
 
+  const surpriseMe = async () => {
+    if (surpriseBusy) return;
+    setSurpriseBusy(true);
+    try {
+      const res = await api.autorequest.run();
+      if (res.requested) {
+        toast(`Added “${res.requested.title}”`, 'success', res.requested.why || 'Picked from your history.');
+        loadForYou();
+        api.requests.list().then(m => setMyRequests(m || [])).catch(() => {});
+        api.requests.musicMine().then(m => setMusicMine(m || [])).catch(() => {});
+      } else if (res.capped) {
+        toast("You've hit this week's limit", 'warning', 'Auto-adds are limited to 3 in a rolling 7 days.');
+      } else if (res.noHistory) {
+        toast('Watch a few things first so we can learn your taste', 'info');
+      } else {
+        toast('No new match found', 'info', 'Everything suggested was already in your library or request queue.');
+      }
+    } catch (e: any) {
+      toast('Surprise me failed', 'error', String(e?.message || 'Could not add a recommendation.'));
+    } finally {
+      setSurpriseBusy(false);
+    }
+  };
+
   // Shared card renderer for music search results and the trending rail.
   const musicCard = (a: MusicResult) => {
     const id = a.foreignArtistId || a.name;
@@ -542,6 +595,8 @@ export default function Requests() {
 
   const showTrending = !debounced;
   const modeOnline = mode === 'music' ? musicOnline : online;
+  const forYouItems = forYou ? [...forYou.movies, ...forYou.tv] : [];
+  const showForYou = !!forYou && (forYouItems.length > 0 || forYou.artists.length > 0 || forYou.reason === 'no history yet');
 
   if (loading) {
     return (
@@ -600,6 +655,52 @@ export default function Requests() {
               </button>
             ))}
           </div>
+        </div>
+      )}
+
+      {(forYouLoading || showForYou) && (
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Icon.Sparkles size={18} className="text-brand-400" />
+              <h2 className="section-title !mb-0">Recommended for you</h2>
+            </div>
+            <button
+              onClick={surpriseMe}
+              disabled={surpriseBusy}
+              className="btn-secondary !py-2 !px-3 text-xs gap-1.5 ml-auto disabled:opacity-60"
+            >
+              {surpriseBusy ? <Spinner size={14} /> : <><Icon.Sparkles size={14} /> Surprise me →</>}
+            </button>
+          </div>
+          {forYouLoading ? (
+            <GridSkeleton count={6} />
+          ) : forYou?.reason === 'no history yet' ? (
+            <div className="card p-5 text-sm muted">Watch a few movies, shows, or music tracks first so Aerie can learn your taste.</div>
+          ) : (
+            <div className="space-y-5">
+              {forYouItems.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
+                  {forYouItems.map(r => (
+                    <ResultCard
+                      key={`fy-${r.mediaType}-${r.tmdbId}`}
+                      item={r}
+                      busy={busy.has(keyFor(r))}
+                      overrideStatus={overrideFor(r)}
+                      onOpen={() => setSelected(r)}
+                      onRequest={() => doRequest(r)}
+                      onWatch={() => openInLibrary(r.title, r.mediaType)}
+                    />
+                  ))}
+                </div>
+              )}
+              {forYou?.artists.length > 0 && (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
+                  {forYou.artists.map(musicCard)}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
