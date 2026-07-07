@@ -8,6 +8,7 @@ import path from 'node:path';
 import * as storage from './storage.js';
 import * as jf from './jellyfin.js';
 import * as abs from './audiobookshelf.js';
+import * as progress from './progress.js';
 import * as ai from './ai.js';
 import { db } from '../lib/db.js';
 import type { User } from '../lib/model.js';
@@ -105,8 +106,16 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
     }
     case 'continue_media': {
       const [vids, books] = await Promise.all([
-        safe(jf.resumeItems('Video'), [] as any[]),
-        audiobooksEnabled ? safe(abs.allBooks('book').then(bs => bs.filter(b => (b.progressPct || 0) > 0 && (b.progressPct || 0) < 100)), [] as any[]) : Promise.resolve([]),
+        safe(Promise.all(progress.resume(userId, 'video', 8).map(async p => {
+          const v = await jf.itemDetail(p.itemId);
+          const dur = p.durationTicks || v.runtimeTicks || 0;
+          return { ...v, positionTicks: p.positionTicks, progressPct: dur ? Math.round((p.positionTicks / dur) * 100) : v.progressPct };
+        })), [] as any[]),
+        audiobooksEnabled ? safe(Promise.all(progress.resume(userId, 'audio', 8).map(async p => {
+          const b = await abs.itemDetail(p.itemId);
+          const dur = p.durationTicks || Math.round((b.durationSec || 0) * 1e7);
+          return { ...b, currentTimeSec: p.positionTicks / 1e7, progressPct: dur ? Math.round((p.positionTicks / dur) * 100) : 0 };
+        })), [] as any[]) : Promise.resolve([]),
       ]);
       return {
         // Carry id/type/series so the UI can deep-link episodes to /tv (not /movies) and

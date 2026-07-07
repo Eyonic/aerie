@@ -77,6 +77,9 @@ export interface MediaItem {
   runtimeMinutes?: number;
   progressPct?: number;   // continue watching/listening
   playedPct?: number;
+  positionTicks?: number;
+  played?: boolean;
+  seriesId?: string;
   seriesName?: string;
   seasonNumber?: number;
   episodeNumber?: number;

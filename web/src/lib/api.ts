@@ -144,8 +144,9 @@ export const api = {
     search: (q: string) => req<MediaItem[]>('GET', `/api/media/search?q=${encodeURIComponent(q)}`).then(tokMediaList),
     streamUrl: (id: string, audio = false) => api.url(`/api/media/stream/${id}${audio ? '?audio=1' : ''}`),
     imageUrl: (id: string, type = 'Primary') => api.url(`/api/media/image/${id}/${type}`),
-    progress: (id: string, positionTicks: number) => req('POST', '/api/media/progress', { id, positionTicks }),
-    setPlayed: (id: string, played: boolean) => req('POST', '/api/media/played', { id, played }),
+    progress: (id: string, positionTicks: number, durationTicks?: number, seriesId?: string) =>
+      req('POST', '/api/media/progress', { id, positionTicks, durationTicks, seriesId }),
+    setPlayed: (id: string, played: boolean, durationTicks?: number) => req('POST', '/api/media/played', { id, played, durationTicks }),
     recommendations: () => req<{ nextUp: MediaItem[]; suggestions: MediaItem[]; recentlyAdded: MediaItem[] }>('GET', '/api/media/recommendations')
       .then(r => ({ nextUp: tokMediaList(r.nextUp), suggestions: tokMediaList(r.suggestions), recentlyAdded: tokMediaList(r.recentlyAdded) })),
     similar: (id: string) => req<MediaItem[]>('GET', `/api/media/similar/${id}`).then(tokMediaList),

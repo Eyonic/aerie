@@ -347,7 +347,7 @@ export default function TVShows() {
     setWatchedIds(prev => { const s = new Set(prev); next ? s.add(item.id) : s.delete(item.id); return s; });
     setUnwatchedIds(prev => { const s = new Set(prev); next ? s.delete(item.id) : s.add(item.id); return s; });
     try {
-      await api.media.setPlayed(item.id, next);
+      await api.media.setPlayed(item.id, next, item.runtimeTicks);
       toast(next ? 'Marked as watched' : 'Marked as unwatched', 'success', item.name);
     } catch (e: any) {
       setWatchedIds(prev => { const s = new Set(prev); next ? s.delete(item.id) : s.add(item.id); return s; });

@@ -193,6 +193,11 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
   const [muted, setMuted] = useState(false);
   const [ctrlShow, setCtrlShow] = useState(true);
   const ctrlTimer = useRef<any>(null);
+  const durationTicks = () => {
+    const v = videoRef.current;
+    const sec = v?.duration && isFinite(v.duration) && v.duration > 0 ? v.duration : ((item.runtimeTicks || 0) / 1e7);
+    return sec > 0 ? Math.round(sec * 1e7) : (item.runtimeTicks || 0);
+  };
 
   const toggleUpscale = () => {
     const next = !upscale;
@@ -367,7 +372,11 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     // clobber a real saved position with a near-zero value before the seek lands.
     // While casting, the local video is paused/detached — its stale position must
     // not clobber the TV's progress (the cast poll reports instead).
-    const report = () => { if (!tvCastRef.current && v.currentTime > 5) api.media.progress(item.id, Math.round(v.currentTime * 1e7)).catch(() => {}); };
+    const report = () => {
+      if (!tvCastRef.current && v.currentTime > 5) {
+        api.media.progress(item.id, Math.round(v.currentTime * 1e7), durationTicks(), item.seriesId).catch(() => {});
+      }
+    };
     const rep = setInterval(report, 15000);
     const esc = (e: KeyboardEvent) => e.key === 'Escape' && !document.fullscreenElement && onClose();
     window.addEventListener('keydown', esc);
@@ -533,7 +542,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           // and close the overlay rather than showing "Playing · 0:00".
           if ((s as any).idleReason === 'FINISHED') {
             const total = (s.duration || 0) + tvOffset.current;
-            if (total > 0) api.media.progress(item.id, Math.round(total * 1e7)).catch(() => {});
+            if (total > 0) api.media.progress(item.id, Math.round(total * 1e7), Math.round(total * 1e7), item.seriesId).catch(() => {});
             toast('Finished playing on TV', 'info', item.name);
           }
           setTvCast(null); setTvState(null);
@@ -544,7 +553,13 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           setTvState(s);
           if (s.currentTime && s.currentTime > 2 && Date.now() - lastReport > 15000) {
             lastReport = Date.now();
-            api.media.progress(item.id, Math.round((s.currentTime + tvOffset.current) * 1e7)).catch(() => {});
+            const total = (s.duration || 0) + tvOffset.current;
+            api.media.progress(
+              item.id,
+              Math.round((s.currentTime + tvOffset.current) * 1e7),
+              total > 0 ? Math.round(total * 1e7) : durationTicks(),
+              item.seriesId,
+            ).catch(() => {});
           }
         } else strike();
       }).catch(strike); // unreachable TV/server counts too — never a stuck overlay

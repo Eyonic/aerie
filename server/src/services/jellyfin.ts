@@ -60,6 +60,8 @@ function mapItem(it: any): MediaItem {
     progressPct: ud.PlayedPercentage,
     positionTicks: ud.PlaybackPositionTicks || 0,   // exact resume position (for seek-back)
     playedPct: ud.Played ? 100 : ud.PlayedPercentage,
+    played: !!ud.Played,
+    seriesId: it.SeriesId || (it.Type === 'Series' ? it.Id : undefined),
     seriesName: it.SeriesName,
     seasonNumber: it.ParentIndexNumber,
     episodeNumber: it.IndexNumber,
@@ -113,6 +115,22 @@ export async function children(parentId: string): Promise<MediaItem[]> {
     ParentId: parentId, Fields: 'Overview,RunTimeTicks', SortBy: 'SortName',
   });
   return (data.Items || []).map(mapItem);
+}
+
+export async function episodes(seriesId: string): Promise<MediaItem[]> {
+  const uid = await jellyUserId();
+  const data = await jf(`/Users/${uid}/Items`, {
+    ParentId: seriesId,
+    IncludeItemTypes: 'Episode',
+    Recursive: true,
+    Fields: 'Overview,ProductionYear,RunTimeTicks',
+    SortBy: 'ParentIndexNumber,IndexNumber,SortName',
+    SortOrder: 'Ascending',
+  });
+  return (data.Items || []).map(mapItem).sort((a: MediaItem, b: MediaItem) =>
+    (a.seasonNumber || 0) - (b.seasonNumber || 0)
+    || (a.episodeNumber || 0) - (b.episodeNumber || 0)
+    || a.name.localeCompare(b.name));
 }
 
 export function streamUrl(id: string, isAudio = false): string {
@@ -216,6 +234,18 @@ export async function recommendations(): Promise<{ nextUp: MediaItem[]; suggesti
   ]);
   return {
     nextUp: (nextUpRaw.Items || []).map(mapItem),
+    suggestions: (sugRaw.Items || []).map(mapItem),
+    recentlyAdded: (recentRaw.Items || []).map(mapItem),
+  };
+}
+
+export async function recommendationCatalog(): Promise<{ suggestions: MediaItem[]; recentlyAdded: MediaItem[] }> {
+  const uid = await jellyUserId();
+  const [sugRaw, recentRaw] = await Promise.all([
+    jf(`/Users/${uid}/Suggestions`, { Limit: 20, Type: 'Movie,Series', Fields: 'Overview,ProductionYear' }).catch(() => ({ Items: [] })),
+    jf(`/Users/${uid}/Items`, { IncludeItemTypes: 'Movie,Series', Recursive: true, SortBy: 'DateCreated', SortOrder: 'Descending', Limit: 20, Fields: 'Overview,ProductionYear' }).catch(() => ({ Items: [] })),
+  ]);
+  return {
     suggestions: (sugRaw.Items || []).map(mapItem),
     recentlyAdded: (recentRaw.Items || []).map(mapItem),
   };

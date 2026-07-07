@@ -2,6 +2,8 @@
 import { Router } from 'express';
 import * as abs from '../services/audiobookshelf.js';
 import { type AuthedRequest } from '../lib/auth.js';
+import * as progress from '../services/progress.js';
+import type { Book } from '../lib/model.js';
 
 const r = Router();
 
@@ -12,15 +14,31 @@ r.use((req: AuthedRequest, res, next) => {
 
 r.get('/status', (_req, res) => res.json({ configured: abs.configured() }));
 
-r.get('/audiobooks', async (_req, res, next) => {
-  try { res.json(await abs.allBooks('book')); } catch (e) { if (!abs.configured()) return res.json([]); next(e); }
+function overlayBook(book: Book, row?: { positionTicks: number; durationTicks: number; played: boolean } | null): Book {
+  if (!row) return book;
+  const durationTicks = row.durationTicks || Math.round((book.durationSec || 0) * 1e7);
+  const currentTimeSec = row.positionTicks / 1e7;
+  const progressPct = durationTicks > 0 ? Math.round((row.positionTicks / durationTicks) * 100) : (row.played ? 100 : 0);
+  return { ...book, currentTimeSec, progressPct };
+}
+
+function overlayBooks(userId: number, books: Book[]): Book[] {
+  const rows = progress.mapFor(userId, books.map(b => b.id));
+  return books.map(b => overlayBook(b, rows.get(b.id)));
+}
+
+r.get('/audiobooks', async (req: AuthedRequest, res, next) => {
+  try { res.json(overlayBooks(req.user!.id, await abs.allBooks('book'))); } catch (e) { if (!abs.configured()) return res.json([]); next(e); }
 });
-r.get('/podcasts', async (_req, res, next) => {
-  try { res.json(await abs.allBooks('podcast')); } catch (e) { if (!abs.configured()) return res.json([]); next(e); }
+r.get('/podcasts', async (req: AuthedRequest, res, next) => {
+  try { res.json(overlayBooks(req.user!.id, await abs.allBooks('podcast'))); } catch (e) { if (!abs.configured()) return res.json([]); next(e); }
 });
 
-r.get('/item/:id', async (req, res, next) => {
-  try { res.json(await abs.itemDetail(req.params.id)); } catch (e) { next(e); }
+r.get('/item/:id', async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    res.json(overlayBook(await abs.itemDetail(id), progress.get(req.user!.id, id)));
+  } catch (e) { next(e); }
 });
 
 r.get('/cover/:id', async (req, res, next) => {
@@ -77,7 +95,13 @@ r.get('/stream/:id', async (req, res, next) => {
 
 r.post('/progress', async (req, res) => {
   const { id, currentTime, duration } = req.body || {};
-  await abs.updateProgress(id, currentTime || 0, duration || 0);
+  progress.report(
+    (req as AuthedRequest).user!.id,
+    id,
+    'audio',
+    Math.round((currentTime || 0) * 1e7),
+    Math.round((duration || 0) * 1e7),
+  );
   res.json({ ok: true });
 });
 

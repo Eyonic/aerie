@@ -7,8 +7,10 @@ import path from 'node:path';
 import * as storage from '../services/storage.js';
 import * as jf from '../services/jellyfin.js';
 import * as abs from '../services/audiobookshelf.js';
+import * as progress from '../services/progress.js';
 import { serviceStatuses, systemHealth } from '../services/monitoring.js';
 import { backupStatuses } from './backups.js';
+import type { Book, MediaItem } from '../lib/model.js';
 
 const r = Router();
 
@@ -19,6 +21,44 @@ async function safe<T>(p: Promise<T>, fallback: T): Promise<T> {
 function recentNativePhotos(userId: number, limit: number) {
   return db.prepare(`SELECT rel_path path, taken_at takenAt, width, height, size, camera, lat, lon
     FROM photo_index WHERE user_id=? ORDER BY taken_at DESC, rel_path ASC LIMIT ?`).all(userId, limit) as any[];
+}
+
+function overlayMedia(item: MediaItem, row: { positionTicks: number; durationTicks: number; played: boolean }): MediaItem {
+  const runtimeTicks = item.runtimeTicks || row.durationTicks || undefined;
+  const progressPct = row.durationTicks > 0 ? Math.round((row.positionTicks / row.durationTicks) * 100) : item.progressPct;
+  return {
+    ...item,
+    runtimeTicks,
+    runtimeMinutes: runtimeTicks ? Math.round(runtimeTicks / 600000000) : item.runtimeMinutes,
+    positionTicks: row.positionTicks,
+    progressPct,
+    playedPct: row.played ? 100 : progressPct,
+    played: row.played,
+  };
+}
+
+async function buildContinueWatching(userId: number): Promise<MediaItem[]> {
+  const rows = progress.resume(userId, 'video', 12);
+  const items = await Promise.all(rows.map(async row => {
+    try { return overlayMedia(await jf.itemDetail(row.itemId), row); }
+    catch { return null; }
+  }));
+  return items.filter(Boolean) as MediaItem[];
+}
+
+function overlayBook(book: Book, row: { positionTicks: number; durationTicks: number; played: boolean }): Book {
+  const durationTicks = row.durationTicks || Math.round((book.durationSec || 0) * 1e7);
+  const pct = durationTicks > 0 ? Math.round((row.positionTicks / durationTicks) * 100) : (row.played ? 100 : 0);
+  return { ...book, currentTimeSec: row.positionTicks / 1e7, progressPct: pct };
+}
+
+async function buildContinueListening(userId: number): Promise<Book[]> {
+  const rows = progress.resume(userId, 'audio', 8);
+  const books = await Promise.all(rows.map(async row => {
+    try { return overlayBook(await abs.itemDetail(row.itemId), row); }
+    catch { return null; }
+  }));
+  return (books.filter(Boolean) as Book[]).filter(b => (b.progressPct || 0) > 0 && (b.progressPct || 0) < 100);
 }
 
 r.get('/', async (req: AuthedRequest, res) => {
@@ -50,8 +90,8 @@ r.get('/', async (req: AuthedRequest, res) => {
   const [storageUsage, recentPhotos, continueWatching, continueListening, services, health, backups] = await Promise.all([
     safe(storage.computeUsage(user.username, user.id), { usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }),
     safe(Promise.resolve(recentNativePhotos(user.id, 12)), [] as any[]),
-    safe(jf.resumeItems('Video'), [] as any[]),
-    audiobooksEnabled ? safe(abs.allBooks('book').then(b => b.filter(x => (x.progressPct || 0) > 0 && (x.progressPct || 0) < 100).slice(0, 8)), [] as any[]) : Promise.resolve([]),
+    safe(buildContinueWatching(user.id), [] as any[]),
+    audiobooksEnabled ? safe(buildContinueListening(user.id), [] as any[]) : Promise.resolve([]),
     safe(serviceStatuses(), [] as any[]),
     safe(systemHealth(), null as any),
     safe(backupStatuses(), [] as any[]),

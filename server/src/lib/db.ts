@@ -185,6 +185,19 @@ CREATE TABLE IF NOT EXISTS play_history (
   PRIMARY KEY (user_id, kind, item_id, day)
 );
 
+CREATE TABLE IF NOT EXISTS playback_progress (
+  user_id INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  media TEXT NOT NULL,
+  position_ticks INTEGER NOT NULL DEFAULT 0,
+  duration_ticks INTEGER NOT NULL DEFAULT 0,
+  played INTEGER NOT NULL DEFAULT 0,
+  series_id TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pp_user ON playback_progress(user_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS photo_index (
   user_id INTEGER NOT NULL,
   rel_path TEXT NOT NULL,
