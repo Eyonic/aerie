@@ -275,14 +275,20 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
   }, [onClose]);
   const cur = p.current!;
   return (
-    <div className="fixed inset-0 z-[130] flex flex-col items-center animate-fade-in overflow-hidden">
+    <div
+      className="fixed inset-0 z-[130] flex flex-col items-center animate-fade-in overflow-hidden"
+      // 100dvh + safe-area padding: on mobile, inset-0 spills behind the browser
+      // chrome / system bars, which would hide the transport controls. dvh tracks
+      // the *visible* height so the controls always sit on-screen.
+      style={{ height: '100dvh', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
       {/* blurred artwork backdrop */}
       <div className="absolute inset-0 bg-ink-950" />
       {cur.artUrl && <img src={cur.artUrl} aria-hidden className="absolute inset-0 w-full h-full object-cover scale-110 blur-3xl opacity-30" />}
       <div className="absolute inset-0 bg-gradient-to-b from-ink-950/60 via-ink-950/80 to-ink-950" />
 
-      <div className="relative w-full max-w-md flex flex-col items-center flex-1 px-6 pt-4 pb-8 min-h-0">
-        <div className="w-full flex items-center justify-between">
+      <div className="relative w-full max-w-md flex flex-col items-center flex-1 min-h-0 px-6 pt-3 pb-5">
+        <div className="w-full flex items-center justify-between shrink-0">
           <button className="icon-btn h-11 w-11 text-white hover:bg-white/10" onClick={onClose} title="Close"><Icon.ChevronDown size={24} /></button>
           <span className="text-[11px] uppercase tracking-widest text-slate-400">
             {cur.kind === 'audiobook' ? 'Audiobook' : cur.kind === 'podcast' ? 'Podcast' : 'Now Playing'}
@@ -290,25 +296,26 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
           <button className="icon-btn h-11 w-11 text-white hover:bg-white/10" onClick={() => { p.clear(); onClose(); }} title="Close player"><Icon.Close size={20} /></button>
         </div>
 
+        {/* Artwork fits the remaining height (object-contain, max-h-full) so it can
+            never push the title/scrubber/controls off a short mobile screen. */}
         <div className="flex-1 flex items-center justify-center w-full min-h-0 py-4">
-          <div className="aspect-square w-full max-w-[min(75vw,20rem)] rounded-2xl bg-ink-800 overflow-hidden shadow-float">
-            {cur.artUrl ? <img src={cur.artUrl} className="w-full h-full object-cover" /> :
-              <div className="w-full h-full grid place-items-center text-slate-600">{isBook ? <Icon.Book size={64} /> : <Icon.Music size={64} />}</div>}
-          </div>
+          {cur.artUrl
+            ? <img src={cur.artUrl} className="max-h-full max-w-full w-auto object-contain rounded-2xl shadow-float aspect-square" />
+            : <div className="h-full aspect-square max-h-full rounded-2xl bg-ink-800 grid place-items-center text-slate-600 shadow-float">{isBook ? <Icon.Book size={64} /> : <Icon.Music size={64} />}</div>}
         </div>
 
-        <div className="w-full text-center mb-4">
+        <div className="w-full text-center mb-4 shrink-0">
           <p className="text-xl font-bold text-white truncate">{cur.title}</p>
           {cur.subtitle && <p className="text-sm text-slate-400 truncate mt-1">{cur.subtitle}</p>}
         </div>
 
-        <div className="w-full flex items-center gap-2 mb-5">
+        <div className="w-full flex items-center gap-2 mb-5 shrink-0">
           <span className="text-[11px] tabular-nums text-slate-400 w-10 text-right">{formatDuration(p.currentTime)}</span>
           <input type="range" min={0} max={100} value={p.progress * 100 || 0} onChange={seek} className="cb-range flex-1" />
           <span className="text-[11px] tabular-nums text-slate-400 w-10">{formatDuration(p.duration)}</span>
         </div>
 
-        <div className="w-full flex items-center justify-center gap-5">
+        <div className="w-full flex items-center justify-center gap-5 shrink-0">
           {isBook ? (
             <>
               <button className="icon-btn h-12 w-12 text-white hover:bg-white/10" onClick={() => skip(-15)} title="Back 15s"><Skip dir={-1} secs={15} /></button>

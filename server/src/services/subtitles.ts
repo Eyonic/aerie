@@ -289,25 +289,53 @@ export function translateSubtitles(itemId: string, source: SubtitleSource, targe
   return enqueue(userId, `translate:${itemId}:${lang}`, jobId => translate(jobId, itemId, source, lang, userId));
 }
 
+function audioChannels(src: string): Promise<number> {
+  return new Promise(resolve => {
+    const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels', '-of', 'default=nw=1:nk=1', src]);
+    let out = '';
+    p.stdout.on('data', d => out += d);
+    p.on('close', () => resolve(Number(out.trim()) || 2));
+    p.on('error', () => resolve(2));
+  });
+}
+
+// 10 Hz speech-activity envelope. Two things make auto-sync actually lock on:
+// (1) on 5.1+ audio, isolate the front-center channel — it is near-pure dialogue
+//     (music/effects sit in L/R/surround), so a stereo downmix's wall of sound is
+//     removed; (2) mark speech as energy standing ABOVE the local background floor
+//     (rolling 10 s minimum), which drops sustained score/ambience and leaves the
+//     dialogue onsets that track the subtitles. Validated against a known-aligned
+//     reference sub (peaks at offset 0) where a plain-energy envelope found noise.
 async function audioEnvelope(itemId: string, jobId: string) {
-  const src = await resolveMediaPath(itemId), dur = await durationSec(itemId, src), proc = ffmpegPcm(src);
+  const src = await resolveMediaPath(itemId), dur = await durationSec(itemId, src);
+  const ch = await audioChannels(src);
+  const af = ch >= 3 ? ['-af', 'pan=mono|c0=FC'] : [];
+  const proc = spawn('ffmpeg', ['-nostdin', '-v', 'error', '-i', src, ...af, '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', '-']);
   let carry = Buffer.alloc(0), frame = Buffer.alloc(0), idx = 0;
-  const vals: number[] = [];
+  const energy: number[] = [];
   for await (const chunk of proc.stdout) {
     carry = Buffer.concat([carry, chunk as Buffer]);
     while (carry.length >= 640) {
       frame = Buffer.concat([frame, carry.subarray(0, 640)]); carry = carry.subarray(640);
-      if (frame.length >= 3200) { vals.push(rms(frame)); frame = Buffer.alloc(0); idx++; if (dur && idx % 50 === 0) progress(jobId, (idx / 10) / dur * 0.5); }
+      if (frame.length >= 3200) { energy.push(rms(frame)); frame = Buffer.alloc(0); idx++; if (dur && idx % 50 === 0) progress(jobId, (idx / 10) / dur * 0.5); }
     }
   }
-  const sorted = [...vals].sort((a, b) => a - b), p20 = sorted[Math.floor(sorted.length * 0.2)] || 0;
-  const th = Math.max(0.004, p20 * 2);
-  return vals.map(v => v > th ? 1 : 0);
+  const n = energy.length, half = 50; // 100-frame (10 s) rolling window
+  const sorted = [...energy].sort((a, b) => a - b), base = Math.max(0.003, sorted[Math.floor(n * 0.3)] || 0);
+  const bits = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    let m = Infinity;
+    for (let j = Math.max(0, i - half); j < Math.min(n, i + half); j++) if (energy[j] < m) m = energy[j];
+    bits[i] = energy[i] > Math.max(m * 1.7, base) ? 1 : 0;
+  }
+  return bits;
 }
 
-function subEnvelope(cues: Cue[], len: number) {
+// Subtitle activity at 10 Hz. `scale` applies a framerate ratio (e.g. 25→23.976)
+// so a PAL-sourced sub can be tested against a film-rate track.
+function subEnvelope(cues: Cue[], len: number, scale = 1) {
   const bits = new Array(len).fill(0);
-  for (const c of cues) for (let i = Math.max(0, Math.floor(c.start * 10)); i < Math.min(len, Math.ceil(c.end * 10)); i++) bits[i] = 1;
+  for (const c of cues) for (let i = Math.max(0, Math.floor(c.start * scale * 10)); i < Math.min(len, Math.ceil(c.end * scale * 10)); i++) bits[i] = 1;
   return bits;
 }
 
@@ -329,10 +357,10 @@ function correlate(a: number[], s: number[], from = 0, to = a.length) {
     }
     return cnt ? dot / (cnt * va * vs) : 0;
   };
-  // Coarse (0.5s) sweep over ±120s for the landscape, then fine (100ms) refine.
+  // Coarse (0.5s) sweep over ±150s for the landscape, then fine (100ms) refine.
   const landscape: number[] = [];
   let best = { off: 0, score: -Infinity, median: 0 };
-  for (let off = -1200; off <= 1200; off += 5) {
+  for (let off = -1500; off <= 1500; off += 5) {
     const score = r(off);
     landscape.push(score);
     if (score > best.score) best = { off, score, median: 0 };
@@ -345,25 +373,51 @@ function correlate(a: number[], s: number[], from = 0, to = a.length) {
   return best;
 }
 
+// Common framerate ratios: identity, PAL↔film (25↔23.976), and NTSC 24↔23.976.
+// A subtitle authored at the wrong rate drifts progressively; scaling by the
+// right ratio makes a single offset fit again.
+const FPS_RATIOS = [1, 23.976 / 25, 25 / 23.976, 23.976 / 24, 24 / 23.976];
+
 async function sync(jobId: string, itemId: string, source: SubtitleSource, userId: number) {
   const src = await sourceBytes(itemId, source);
   const cues = parseSubs(decodeSubtitle(src.bytes));
+  if (!cues.length) throw new Error('subtitle has no readable cues');
   const a = await audioEnvelope(itemId, jobId);
-  const s = subEnvelope(cues, Math.max(a.length, Math.ceil(Math.max(...cues.map(c => c.end), 0) * 10) + 1));
-  const whole = correlate(a, s);
-  // Pearson r: require a real (if modest) peak that clearly beats the landscape.
-  if (whole.score < 0.08 || whole.score - whole.median < 0.03) throw new Error('could not find alignment');
-  const third = Math.floor(a.length / 3);
-  const first = correlate(a, s, 0, third), last = correlate(a, s, third * 2, a.length);
+  const maxEnd = Math.max(...cues.map(c => c.end), 0);
+  const envFor = (ratio: number) => {
+    const len = Math.max(a.length, Math.ceil(maxEnd * ratio * 10) + 1);
+    const aP = a.length < len ? a.concat(new Array(len - a.length).fill(0)) : a;
+    return { aP, s: subEnvelope(cues, len, ratio) };
+  };
+  // Pick the framerate ratio whose best offset gives the most prominent peak.
+  let best = { score: -Infinity, off: 0, median: 0, ratio: 1 };
+  for (const ratio of FPS_RATIOS) {
+    const { aP, s } = envFor(ratio);
+    const r = correlate(aP, s);
+    if (r.score - r.median > best.score - best.median) best = { ...r, ratio };
+  }
+  // Energy↔subtitle correlation tops out around 0.1 even on a perfect match, so
+  // gate on the peak's prominence over the landscape, not an absolute r.
+  if (best.score < 0.05 || best.score - best.median < 0.05) {
+    throw new Error('could not confidently match this subtitle to the audio');
+  }
+  const { aP, s } = envFor(best.ratio);
+  const mid = Math.floor(a.length / 2);
+  const h1 = correlate(aP, s, 0, mid), h2 = correlate(aP, s, mid, a.length);
   const shifted = cues.map(c => ({ ...c }));
-  if (Math.abs(first.off - last.off) > 4) {
-    const x1 = third / 20, x2 = (third * 2 + a.length) / 20, y1 = first.off / 10, y2 = last.off / 10;
-    const scale = (x2 + y2 - (x1 + y1)) / Math.max(1, x2 - x1);
-    const b = x1 + y1 - scale * x1;
-    shifted.forEach(c => { c.start = Math.max(0, scale * c.start + b); c.end = Math.max(c.start + 0.1, scale * c.end + b); });
+  // Residual drift after ratio scaling: if the two halves disagree by >2s and both
+  // are confident, fit a line through their centres; otherwise a constant offset.
+  if (Math.abs(h1.off - h2.off) > 20 && h1.score - h1.median > 0.04 && h2.score - h2.median > 0.04) {
+    const x1 = mid / 20, x2 = (mid + a.length) / 20, y1 = h1.off / 10, y2 = h2.off / 10;
+    const slope = (y2 - y1) / Math.max(1, x2 - x1);
+    shifted.forEach(c => {
+      const st = c.start * best.ratio, en = c.end * best.ratio;
+      c.start = Math.max(0, st + y1 + slope * (st - x1));
+      c.end = Math.max(c.start + 0.1, en + y1 + slope * (en - x1));
+    });
   } else {
-    const off = whole.off / 10;
-    shifted.forEach(c => { c.start = Math.max(0, c.start + off); c.end = Math.max(c.start + 0.1, c.end + off); });
+    const off = best.off / 10;
+    shifted.forEach(c => { c.start = Math.max(0, c.start * best.ratio + off); c.end = Math.max(c.start + 0.1, c.end * best.ratio + off); });
   }
   return insertSubtitle(itemId, src.lang, `${src.label} (synced)`, 'synced', userId, toVtt(shifted)).id;
 }
