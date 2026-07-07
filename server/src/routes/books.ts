@@ -15,7 +15,10 @@ r.use((req: AuthedRequest, res, next) => {
 r.get('/status', (_req, res) => res.json({ configured: abs.configured() }));
 
 function overlayBook(book: Book, row?: { positionTicks: number; durationTicks: number; played: boolean } | null): Book {
-  if (!row) return book;
+  // No Aerie row = clean per-user state. ABS's own progressPct/currentTimeSec is
+  // the SHARED backend account's — never surface it, or one member's listening
+  // position would show for everyone.
+  if (!row) return { ...book, currentTimeSec: 0, progressPct: 0 };
   const durationTicks = row.durationTicks || Math.round((book.durationSec || 0) * 1e7);
   const currentTimeSec = row.positionTicks / 1e7;
   const progressPct = durationTicks > 0 ? Math.round((row.positionTicks / durationTicks) * 100) : (row.played ? 100 : 0);

@@ -45,7 +45,6 @@ export function directImageUrl(id: string, type = 'Primary'): string {
 }
 
 function mapItem(it: any): MediaItem {
-  const ud = it.UserData || {};
   return {
     id: it.Id,
     type: it.Type,
@@ -57,10 +56,13 @@ function mapItem(it: any): MediaItem {
     thumbUrl: it.ImageTags?.Thumb ? imageUrl(it.Id, 'Thumb', it.ImageTags.Thumb) : undefined,
     runtimeTicks: it.RunTimeTicks,
     runtimeMinutes: it.RunTimeTicks ? Math.round(it.RunTimeTicks / 600000000) : undefined,
-    progressPct: ud.PlayedPercentage,
-    positionTicks: ud.PlaybackPositionTicks || 0,   // exact resume position (for seek-back)
-    playedPct: ud.Played ? 100 : ud.PlayedPercentage,
-    played: !!ud.Played,
+    // Per-user progress/played state is Aerie-owned (playback_progress) and
+    // layered on by the route overlay. Jellyfin's UserData is the SHARED backend
+    // account's state, so we deliberately ignore it here — no row = clean/zero.
+    progressPct: 0,
+    positionTicks: 0,
+    playedPct: 0,
+    played: false,
     seriesId: it.SeriesId || (it.Type === 'Series' ? it.Id : undefined),
     seriesName: it.SeriesName,
     seasonNumber: it.ParentIndexNumber,
