@@ -59,6 +59,7 @@ interface PlayerState {
   repeat: 'off' | 'one' | 'all';
   playTrack: (t: Track, queue?: Track[]) => void;
   playQueue: (q: Track[], startIndex?: number) => void;
+  playAt: (i: number) => void;
   toggle: () => void;
   next: () => void;
   prev: () => void;
@@ -74,6 +75,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   progress: 0, currentTime: 0, duration: 0, volume: 1, shuffle: false, repeat: 'off',
   playTrack: (t, queue) => set({ current: t, queue: queue || [t], index: (queue || [t]).findIndex(x => x.id === t.id) || 0, playing: true }),
   playQueue: (q, startIndex = 0) => set({ queue: q, index: startIndex, current: q[startIndex] || null, playing: true }),
+  playAt: (i) => set(s => (i >= 0 && i < s.queue.length) ? { index: i, current: s.queue[i], playing: true, progress: 0, currentTime: 0 } : {}),
   toggle: () => set(s => ({ playing: !s.playing })),
   setPlaying: (playing) => set({ playing }),
   next: () => {

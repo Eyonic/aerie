@@ -274,6 +274,9 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
     return () => window.removeEventListener('keydown', h);
   }, [onClose]);
   const cur = p.current!;
+  // Music with a real queue (an album/playlist) shows the tracklist, like any
+  // proper player. A single track or an audiobook keeps the big-artwork layout.
+  const showList = !isBook && p.queue.length > 1;
   return (
     <div
       className="fixed inset-0 z-[130] flex flex-col items-center animate-fade-in overflow-hidden"
@@ -296,12 +299,13 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
           <button className="icon-btn h-11 w-11 text-white hover:bg-white/10" onClick={() => { p.clear(); onClose(); }} title="Close player"><Icon.Close size={20} /></button>
         </div>
 
-        {/* Artwork fits the remaining height (object-contain, max-h-full) so it can
-            never push the title/scrubber/controls off a short mobile screen. */}
-        <div className="flex-1 flex items-center justify-center w-full min-h-0 py-4">
+        {/* Artwork. Without a tracklist it fills the free height (object-contain so
+            it never pushes controls off a short screen); with a tracklist it's a
+            fixed medium size to leave room for the list. */}
+        <div className={cx('flex items-center justify-center w-full py-4', showList ? 'shrink-0' : 'flex-1 min-h-0')}>
           {cur.artUrl
-            ? <img src={cur.artUrl} className="max-h-full max-w-full w-auto object-contain rounded-2xl shadow-float aspect-square" />
-            : <div className="h-full aspect-square max-h-full rounded-2xl bg-ink-800 grid place-items-center text-slate-600 shadow-float">{isBook ? <Icon.Book size={64} /> : <Icon.Music size={64} />}</div>}
+            ? <img src={cur.artUrl} className={cx('object-cover rounded-2xl shadow-float aspect-square', showList ? 'w-40 h-40 sm:w-44 sm:h-44' : 'max-h-full max-w-full w-auto object-contain')} />
+            : <div className={cx('rounded-2xl bg-ink-800 grid place-items-center text-slate-600 shadow-float aspect-square', showList ? 'w-40 h-40' : 'h-full max-h-full')}>{isBook ? <Icon.Book size={64} /> : <Icon.Music size={64} />}</div>}
         </div>
 
         <div className="w-full text-center mb-4 shrink-0">
@@ -336,6 +340,31 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
             </>
           )}
         </div>
+
+        {showList && (
+          <div className="w-full flex-1 min-h-0 overflow-y-auto mt-6 -mx-1 px-1">
+            <p className="text-[11px] uppercase tracking-widest text-slate-500 mb-2 px-2">Up next · {p.queue.length} tracks</p>
+            {p.queue.map((t, i) => (
+              <button
+                key={`${t.id}-${i}`}
+                onClick={() => p.playAt(i)}
+                className={cx('w-full flex items-center gap-3 rounded-lg px-2 py-2 text-left transition',
+                  i === p.index ? 'bg-white/10' : 'hover:bg-white/[0.05]')}
+              >
+                <span className="w-6 shrink-0 text-center text-xs tabular-nums">
+                  {i === p.index
+                    ? <Icon.Volume size={15} className="mx-auto text-brand-400" />
+                    : <span className="text-slate-500">{i + 1}</span>}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className={cx('block truncate text-sm', i === p.index ? 'text-brand-300 font-medium' : 'text-white')}>{t.title}</span>
+                  {t.subtitle && <span className="block truncate text-xs text-slate-500">{t.subtitle}</span>}
+                </span>
+                {t.durationSec ? <span className="shrink-0 text-[11px] tabular-nums text-slate-500">{formatDuration(t.durationSec)}</span> : null}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
