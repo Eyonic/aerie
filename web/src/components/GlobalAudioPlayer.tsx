@@ -1,6 +1,7 @@
 // The persistent now-playing bar + <audio> engine. Mounted once in Layout so
 // music/audiobooks/podcasts keep playing while the user browses.
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { usePlayer } from '../lib/store';
 import { Icon } from '../lib/icons';
 import { formatDuration, cx } from '../lib/utils';
@@ -277,7 +278,10 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
   // Music with a real queue (an album/playlist) shows the tracklist, like any
   // proper player. A single track or an audiobook keeps the big-artwork layout.
   const showList = !isBook && p.queue.length > 1;
-  return (
+  // Portal to <body>: the audio bar uses backdrop-blur (backdrop-filter), which
+  // makes it the containing block for fixed children — without the portal the
+  // card would be trapped inside the 80px bar instead of covering the viewport.
+  return createPortal(
     <div
       className="fixed inset-0 z-[130] flex flex-col items-center animate-fade-in overflow-hidden"
       // 100dvh + safe-area padding: on mobile, inset-0 spills behind the browser
@@ -366,6 +370,7 @@ function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
