@@ -109,7 +109,7 @@ function progress(id: string, p: number) {
 
 function enqueue(userId: number, prompt: 'scan' | 'remove', run: (jobId: string) => Promise<any>) {
   const id = uid('job');
-  db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,progress) VALUES (?,?,?,?,?,0)').run(id, userId, 'dedup', prompt);
+  db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,progress) VALUES (?,?,?,?,?,0)').run(id, userId, 'dedup', 'queued', prompt);
   queue.push({ id, userId, run, done: result => {
     db.prepare("UPDATE jobs SET status='done', progress=1, result_urls=?, finished_at=datetime('now') WHERE id=?").run(JSON.stringify(result), id);
   } });

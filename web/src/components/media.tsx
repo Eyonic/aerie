@@ -728,7 +728,10 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
       {upscale && !tvCast && cueText && (
         <div className={cx('absolute inset-x-0 z-[4] flex justify-center px-6 pointer-events-none transition-all',
           (ctrlShow || !playing) ? 'bottom-24' : 'bottom-8')}>
-          <p className="text-white text-center text-lg leading-snug bg-black/60 rounded-lg px-3 py-1.5 whitespace-pre-line max-w-3xl">{cueText}</p>
+          {/* Match the browser's native cue scaling (~5% of video height) so
+              subtitles don't shrink to a fixed size when 2K takes over painting. */}
+          <p className="text-white text-center leading-snug bg-black/60 rounded-lg px-3 py-1.5 whitespace-pre-line max-w-[90%]"
+            style={{ fontSize: 'clamp(1.05rem, 3.4vh, 2.6rem)' }}>{cueText}</p>
         </div>
       )}
       {/* Custom controls while the canvas covers the native ones */}
