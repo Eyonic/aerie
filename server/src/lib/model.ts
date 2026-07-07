@@ -3,6 +3,10 @@
 
 export type Role = 'admin' | 'user';
 
+export interface UserFeatures {
+  audiobooks?: boolean;
+}
+
 export interface User {
   id: number;
   username: string;
@@ -13,6 +17,7 @@ export interface User {
   avatarUrl: string | null;         // uploaded profile picture, or null (use colour+initials)
   storageQuotaBytes: number | null; // null = unlimited
   aiMode: AiMode;
+  features?: UserFeatures;
   createdAt: string;
 }
 

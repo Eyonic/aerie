@@ -48,11 +48,13 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
 // Admin-only destinations, hidden from regular members (the pages also guard
 // themselves client-side and the API returns 403 for non-admins).
 const ADMIN_ONLY = new Set(['/admin', '/integrations']);
+const AUDIOBOOKS_ONLY = new Set(['/audiobooks', '/podcasts']);
 
 function Sidebar() {
   const { user } = useAuth();
   const { sidebarOpen, setSidebarOpen } = useUi();
   const isAdmin = user?.role === 'admin';
+  const audiobooksEnabled = user?.features?.audiobooks !== false;
   return (
     <>
       {sidebarOpen && <div className="fixed inset-0 bg-black/50 z-40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
@@ -71,7 +73,10 @@ function Sidebar() {
             <div key={gi}>
               {group.section && <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-600 px-3 mb-1.5">{group.section}</p>}
               <div className="space-y-0.5">
-                {group.items.filter(it => !ADMIN_ONLY.has(it.to) || isAdmin).map(it => (
+                {group.items
+                  .filter(it => !ADMIN_ONLY.has(it.to) || isAdmin)
+                  .filter(it => audiobooksEnabled || !AUDIOBOOKS_ONLY.has(it.to))
+                  .map(it => (
                   <NavLink key={it.to} to={it.to} end={it.to === '/'} onClick={() => setSidebarOpen(false)}
                     className={({ isActive }) => cx('nav-item', isActive && 'nav-item-active')}>
                     {it.icon}<span>{it.label}</span>

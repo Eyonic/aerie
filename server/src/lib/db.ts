@@ -206,6 +206,7 @@ function addColumn(table: string, col: string, def: string) {
 }
 addColumn('users', 'totp_secret', 'TEXT');
 addColumn('users', 'totp_enabled', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'features', "TEXT NOT NULL DEFAULT '{}'");
 // Uploaded profile picture: 0 = none (fall back to colour+initials); otherwise a
 // version stamp used to cache-bust the avatar image URL after each upload.
 addColumn('users', 'avatar_version', 'INTEGER NOT NULL DEFAULT 0');

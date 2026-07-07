@@ -10,8 +10,9 @@ import * as jf from './jellyfin.js';
 import * as abs from './audiobookshelf.js';
 import * as ai from './ai.js';
 import { db } from '../lib/db.js';
+import type { User } from '../lib/model.js';
 
-export interface Ctx { username: string; userId: number; }
+export interface Ctx { username: string; userId: number; user?: User; }
 
 // ---- Ollama tool (function) definitions ----
 export const TOOLS = [
@@ -51,6 +52,7 @@ function fmtBytes(b: number) { if (!b) return '0 B'; const u = ['B', 'KB', 'MB',
 
 export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> {
   const { username, userId } = ctx;
+  const audiobooksEnabled = ctx.user?.features?.audiobooks !== false;
   switch (name) {
     case 'search_files': {
       const q = String(args.query || '').toLowerCase();
@@ -95,13 +97,16 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
       if (args.kind === 'series') return { items: (await safe(jf.listByType('Series', { Limit: limit }), [])).map((m: any) => ({ name: m.name, year: m.year })) };
       if (args.kind === 'albums') return { items: (await safe(jf.listByType('MusicAlbum', { Limit: limit }), [])).map((m: any) => ({ name: m.name, artist: m.albumArtist })) };
       if (args.kind === 'songs') return { items: (await safe(jf.listByType('Audio', { Limit: limit }), [])).map((m: any) => ({ name: m.name, album: m.album })) };
-      if (args.kind === 'audiobooks') return { items: (await safe(abs.allBooks('book'), [])).slice(0, limit).map((b: any) => ({ title: b.title, author: b.author })) };
+      if (args.kind === 'audiobooks') {
+        if (!audiobooksEnabled) return { items: [] };
+        return { items: (await safe(abs.allBooks('book'), [])).slice(0, limit).map((b: any) => ({ title: b.title, author: b.author })) };
+      }
       return { items: [] };
     }
     case 'continue_media': {
       const [vids, books] = await Promise.all([
         safe(jf.resumeItems('Video'), [] as any[]),
-        safe(abs.allBooks('book').then(bs => bs.filter(b => (b.progressPct || 0) > 0 && (b.progressPct || 0) < 100)), [] as any[]),
+        audiobooksEnabled ? safe(abs.allBooks('book').then(bs => bs.filter(b => (b.progressPct || 0) > 0 && (b.progressPct || 0) < 100)), [] as any[]) : Promise.resolve([]),
       ]);
       return {
         // Carry id/type/series so the UI can deep-link episodes to /tv (not /movies) and

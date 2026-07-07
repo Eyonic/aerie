@@ -23,6 +23,7 @@ function recentNativePhotos(userId: number, limit: number) {
 
 r.get('/', async (req: AuthedRequest, res) => {
   const user = req.user!;
+  const audiobooksEnabled = user.features?.audiobooks !== false;
 
   // recent files (shallow walk)
   const recentFiles = (() => {
@@ -50,7 +51,7 @@ r.get('/', async (req: AuthedRequest, res) => {
     safe(storage.computeUsage(user.username, user.id), { usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }),
     safe(Promise.resolve(recentNativePhotos(user.id, 12)), [] as any[]),
     safe(jf.resumeItems('Video'), [] as any[]),
-    safe(abs.allBooks('book').then(b => b.filter(x => (x.progressPct || 0) > 0 && (x.progressPct || 0) < 100).slice(0, 8)), [] as any[]),
+    audiobooksEnabled ? safe(abs.allBooks('book').then(b => b.filter(x => (x.progressPct || 0) > 0 && (x.progressPct || 0) < 100).slice(0, 8)), [] as any[]) : Promise.resolve([]),
     safe(serviceStatuses(), [] as any[]),
     safe(systemHealth(), null as any),
     safe(backupStatuses(), [] as any[]),

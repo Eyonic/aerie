@@ -495,14 +495,21 @@ function BookDetail({ book, onClose }: { book: Book; onClose: () => void }) {
 export default function Audiobooks() {
   const [books, setBooks] = useState<Book[] | null>(null);
   const [err, setErr] = useState(false);
+  const [disabled, setDisabled] = useState(false);
   const [selected, setSelected] = useState<Book | null>(null);
   const [query, setQuery] = useState('');
 
   useEffect(() => {
     let alive = true;
+    setDisabled(false);
     api.books.audiobooks()
       .then((b) => { if (alive) setBooks(b || []); })
-      .catch(() => { if (alive) { setBooks([]); setErr(true); toast('Failed to load audiobooks', 'error'); } });
+      .catch((e: any) => {
+        if (!alive) return;
+        setBooks([]); setErr(true);
+        if (e?.message === 'feature_disabled') setDisabled(true);
+        else toast('Failed to load audiobooks', 'error');
+      });
     return () => { alive = false; };
   }, []);
 
@@ -551,8 +558,8 @@ export default function Audiobooks() {
       {books.length === 0 ? (
         <EmptyState
           icon={<Icon.Book size={30} />}
-          title={err ? 'Library unavailable' : 'No audiobooks yet'}
-          subtitle={err ? 'Could not reach your audiobook library. Check the connection and try again.' : 'Add books to your Audiobookshelf library and they will appear here, ready to play.'}
+          title={disabled ? 'Not available on this account' : err ? 'Library unavailable' : 'No audiobooks yet'}
+          subtitle={disabled ? 'Audiobooks and podcasts are disabled for this account.' : err ? 'Could not reach your audiobook library. Check the connection and try again.' : 'Add books to your Audiobookshelf library and they will appear here, ready to play.'}
         />
       ) : (
         <div className="space-y-8">

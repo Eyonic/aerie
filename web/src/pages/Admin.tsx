@@ -52,8 +52,8 @@ function Select({ value, onChange, options }: { value: string; onChange: (v: str
 // =============================================================================
 // USERS TAB
 // =============================================================================
-interface UserForm { username: string; displayName: string; email: string; password: string; role: Role; quotaGb: string; aiMode: AiMode; }
-const emptyForm: UserForm = { username: '', displayName: '', email: '', password: '', role: 'user', quotaGb: '', aiMode: 'ask_before_send' };
+interface UserForm { username: string; displayName: string; email: string; password: string; role: Role; quotaGb: string; aiMode: AiMode; audiobooks: boolean; }
+const emptyForm: UserForm = { username: '', displayName: '', email: '', password: '', role: 'user', quotaGb: '', aiMode: 'ask_before_send', audiobooks: true };
 
 function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose: () => void; editing: User | null; onSaved: () => void }) {
   const [form, setForm] = useState<UserForm>(emptyForm);
@@ -71,6 +71,7 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
         role: editing.role,
         quotaGb: editing.storageQuotaBytes == null ? '' : String(Math.round(editing.storageQuotaBytes / 1e9)),
         aiMode: editing.aiMode,
+        audiobooks: editing.features?.audiobooks !== false,
       });
     } else setForm(emptyForm);
   }, [open, editing]);
@@ -90,6 +91,7 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
         role: form.role,
         storageQuotaBytes: quotaBytes,
         aiMode: form.aiMode,
+        features: { audiobooks: form.audiobooks },
       };
       if (form.password) payload.password = form.password;
       if (isEdit) await api.admin.updateUser(editing!.id, payload);
@@ -133,6 +135,13 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
           <Field label="AI mode">
             <Select value={form.aiMode} onChange={v => set('aiMode', v as AiMode)} options={AI_MODES} />
           </Field>
+        </div>
+        <div className="sm:col-span-2 flex items-center justify-between gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
+          <div>
+            <p className="text-sm font-medium text-slate-200">Audiobooks & podcasts</p>
+            <p className="text-xs text-slate-500 mt-0.5">Show Audiobookshelf-backed pages and results.</p>
+          </div>
+          <Toggle on={form.audiobooks} onChange={v => set('audiobooks', v)} />
         </div>
       </div>
     </Modal>

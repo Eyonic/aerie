@@ -63,7 +63,7 @@ r.post('/agent', async (req: AuthedRequest, res, next) => {
         convo.push(turn.rawMessage);
         for (const c of turn.toolCalls) {
           send({ type: 'tool', name: c.name, args: c.args });
-          const result = await execTool(c.name, c.args || {}, { username: req.user!.username, userId: req.user!.id }).catch((e) => ({ error: String(e) }));
+          const result = await execTool(c.name, c.args || {}, { username: req.user!.username, userId: req.user!.id, user: req.user! }).catch((e) => ({ error: String(e) }));
           send({ type: 'tool_result', name: c.name, result });
           convo.push({ role: 'tool', tool_call_id: c.id, name: c.name, content: JSON.stringify(result).slice(0, 8000) });
         }

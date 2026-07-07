@@ -22,6 +22,7 @@ function nativePhotoSearch(userId: number, q: string) {
 r.get('/', async (req: AuthedRequest, res) => {
   const q = String(req.query.q || '').trim();
   const user = req.user!;
+  const audiobooksEnabled = user.features?.audiobooks !== false;
   if (!q) return res.json({ query: q, groups: [] });
   const ql = q.toLowerCase();
 
@@ -50,7 +51,7 @@ r.get('/', async (req: AuthedRequest, res) => {
 
   const [media, books, photos] = await Promise.all([
     safe(jf.search(q), [] as any[]),
-    safe(abs.allBooks('book').then(bs => bs.filter(b => b.title.toLowerCase().includes(ql)).slice(0, 12)), [] as any[]),
+    audiobooksEnabled ? safe(abs.allBooks('book').then(bs => bs.filter(b => b.title.toLowerCase().includes(ql)).slice(0, 12)), [] as any[]) : Promise.resolve([]),
     safe(Promise.resolve(nativePhotoSearch(user.id, q)), [] as any[]),
   ]);
 

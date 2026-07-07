@@ -11,6 +11,16 @@ export interface AuthedRequest extends Request {
   user?: User;
 }
 
+function parseFeatures(raw: any): User['features'] {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
+    if (!parsed || typeof parsed !== 'object') return {};
+    return typeof parsed.audiobooks === 'boolean' ? { audiobooks: parsed.audiobooks } : {};
+  } catch {
+    return {};
+  }
+}
+
 export function rowToUser(r: any): User {
   return {
     id: r.id,
@@ -22,6 +32,7 @@ export function rowToUser(r: any): User {
     avatarUrl: r.avatar_version ? `/api/settings/avatar/${r.id}?v=${r.avatar_version}` : null,
     storageQuotaBytes: r.storage_quota_bytes,
     aiMode: r.ai_mode,
+    features: parseFeatures(r.features),
     createdAt: r.created_at,
   };
 }

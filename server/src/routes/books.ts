@@ -1,8 +1,14 @@
 // Audiobooks + Podcasts — Audiobookshelf-backed, streamed through Aerie.
 import { Router } from 'express';
 import * as abs from '../services/audiobookshelf.js';
+import { type AuthedRequest } from '../lib/auth.js';
 
 const r = Router();
+
+r.use((req: AuthedRequest, res, next) => {
+  if (req.user!.features?.audiobooks === false) return res.status(403).json({ error: 'feature_disabled' });
+  next();
+});
 
 r.get('/status', (_req, res) => res.json({ configured: abs.configured() }));
 

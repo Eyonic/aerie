@@ -21,6 +21,8 @@ class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+type AdminUserParams = Partial<Pick<User, 'username' | 'displayName' | 'email' | 'role' | 'storageQuotaBytes' | 'aiMode' | 'features'>> & { password?: string };
+
 async function req<T>(method: string, path: string, body?: any, opts: { raw?: boolean; form?: FormData } = {}): Promise<T> {
   const headers: Record<string, string> = {};
   if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
@@ -306,8 +308,8 @@ export const api = {
   // ---- admin ----
   admin: {
     users: () => req<User[]>('GET', '/api/admin/users'),
-    createUser: (params: any) => req<User>('POST', '/api/admin/users', params),
-    updateUser: (id: number, params: any) => req<User>('PATCH', `/api/admin/users/${id}`, params),
+    createUser: (params: AdminUserParams) => req<User>('POST', '/api/admin/users', params),
+    updateUser: (id: number, params: AdminUserParams) => req<User>('PATCH', `/api/admin/users/${id}`, params),
     deleteUser: (id: number) => req('DELETE', `/api/admin/users/${id}`),
     settings: () => req<any>('GET', '/api/admin/settings'),
     saveSettings: (params: any) => req('POST', '/api/admin/settings', params),

@@ -76,6 +76,7 @@ function ShowTile({ show, onOpen, onPlay }: { show: Book; onOpen: () => void; on
 export default function Podcasts() {
   const [shows, setShows] = useState<Book[] | null>(null);
   const [configured, setConfigured] = useState(true);
+  const [disabled, setDisabled] = useState(false);
   const [speed, setSpeed] = useState(sessionSpeed);
   const [query, setQuery] = useState('');
 
@@ -90,15 +91,17 @@ export default function Podcasts() {
 
   async function load() {
     try {
+      setDisabled(false);
       const [st, list] = await Promise.all([
         api.books.status().catch(() => ({ configured: true } as { configured: boolean })),
-        api.books.podcasts().catch(() => [] as Book[]),
+        api.books.podcasts(),
       ]);
       setConfigured(!!st?.configured);
       setShows(Array.isArray(list) ? list : []);
     } catch (e: any) {
       setShows([]);
-      toast('Failed to load podcasts', 'error', e?.message);
+      if (e?.message === 'feature_disabled') setDisabled(true);
+      else toast('Failed to load podcasts', 'error', e?.message);
     }
   }
   useEffect(() => { load(); }, []);
@@ -207,8 +210,8 @@ export default function Podcasts() {
       {empty ? (
         <EmptyState
           icon={<Icon.Podcast size={30} />}
-          title={configured ? 'No podcasts yet' : 'Podcasts not configured'}
-          subtitle={configured ? 'Subscribe to shows in your media server and they will appear here.' : 'Connect your audiobook & podcast server to start listening.'}
+          title={disabled ? 'Not available on this account' : configured ? 'No podcasts yet' : 'Podcasts not configured'}
+          subtitle={disabled ? 'Audiobooks and podcasts are disabled for this account.' : configured ? 'Subscribe to shows in your media server and they will appear here.' : 'Connect your audiobook & podcast server to start listening.'}
         />
       ) : (
         <div className="space-y-9">

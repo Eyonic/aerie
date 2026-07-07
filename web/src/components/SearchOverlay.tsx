@@ -4,7 +4,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
-import { useUi, toast } from '../lib/store';
+import { useAuth, useUi, toast } from '../lib/store';
 import { Icon } from '../lib/icons';
 import { Spinner } from './ui';
 import { debounce } from '../lib/utils';
@@ -37,6 +37,7 @@ const PAGES: { label: string; to: string; icon: React.ReactNode; keys: string }[
 
 export function SearchOverlay() {
   const { searchOpen, setSearchOpen } = useUi();
+  const { user } = useAuth();
   const [q, setQ] = useState('');
   const [res, setRes] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -90,7 +91,10 @@ export function SearchOverlay() {
     if (filteredActions.length) sections.push({ section: 'Actions', items: filteredActions });
 
     // Page jumps
-    const pages = PAGES.filter(p => !query || p.label.toLowerCase().includes(ql) || p.keys.includes(ql))
+    const audiobooksEnabled = user?.features?.audiobooks !== false;
+    const pages = PAGES
+      .filter(p => audiobooksEnabled || (p.to !== '/audiobooks' && p.to !== '/podcasts'))
+      .filter(p => !query || p.label.toLowerCase().includes(ql) || p.keys.includes(ql))
       .slice(0, query ? 5 : 6)
       .map<Item>(p => ({ id: `p-${p.to}`, label: p.label, subtitle: 'Go to page', icon: p.icon, run: () => go(p.to) }));
     if (pages.length) sections.push({ section: 'Jump to', items: pages });
@@ -103,7 +107,7 @@ export function SearchOverlay() {
       }
     }
     return sections;
-  }, [q, res]);
+  }, [q, res, user?.features?.audiobooks]);
 
   const flat = useMemo(() => items.flatMap(s => s.items), [items]);
 
