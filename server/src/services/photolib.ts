@@ -8,7 +8,7 @@ import type { User } from '../lib/model.js';
 import { config } from '../config.js';
 import * as storage from './storage.js';
 
-const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.avif', '.bmp', '.tiff']);
+export const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.avif', '.bmp', '.tiff']);
 const running = new Map<number, Promise<number>>();
 const lastScan = new Map<number, string>();
 

@@ -9,6 +9,8 @@ import { EmptyState, PageHeader, ConfirmModal, Modal, Spinner } from '../compone
 type DesktopSyncFolder = { id: string; label: string; localPath: string; mode: 'up' | 'two'; enabled: boolean; lastSync?: string | null; lastError?: string };
 type DesktopSyncStatus = { id: string; state?: string; pending?: number; uploaded?: number; downloaded?: number; conflicts?: number; lastSync?: string | null; lastError?: string };
 type ServerSyncBase = { base: string; files: number; bytes: number; lastChange: number };
+type DedupJobType = 'scan' | 'remove';
+type DedupState = { type: DedupJobType | null; status: string; progress: number; error?: string; result?: any; jobId?: string };
 
 function parseNativeJson<T>(raw: string | undefined, fallback: T): T {
   try { return raw ? JSON.parse(raw) : fallback; } catch { return fallback; }
@@ -221,6 +223,111 @@ function ServerSyncSection() {
   );
 }
 
+function DuplicateFilesSection() {
+  const [state, setState] = useState<DedupState>({ type: null, status: 'idle', progress: 0 });
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const running = !!state.jobId && (state.status === 'queued' || state.status === 'running');
+  const pct = Math.round(Math.max(0, Math.min(1, state.progress || 0)) * 100);
+
+  const loadLast = async () => {
+    try { setState(await api.dedup.last()); }
+    catch (e: any) { toast('Could not load duplicate status', 'error', e?.message); }
+  };
+
+  const startScan = async () => {
+    try {
+      const r = await api.dedup.scan();
+      setState({ type: 'scan', status: 'queued', progress: 0, jobId: r.jobId });
+    } catch (e: any) { toast('Could not start duplicate scan', 'error', e?.message); }
+  };
+
+  const startRemove = async () => {
+    try {
+      const r = await api.dedup.remove();
+      setState({ type: 'remove', status: 'queued', progress: 0, jobId: r.jobId });
+    } catch (e: any) { toast('Could not remove duplicates', 'error', e?.message); }
+  };
+
+  useEffect(() => { loadLast(); }, []);
+  useEffect(() => {
+    if (!running || !state.jobId) return;
+    const tick = async () => {
+      try {
+        const j = await api.dedup.job(state.jobId!);
+        setState(s => ({ ...s, status: j.status, progress: j.progress || 0, error: j.error, result: j.result }));
+      } catch (e: any) {
+        toast('Could not update duplicate job', 'error', e?.message);
+      }
+    };
+    tick();
+    const t = setInterval(tick, 2000);
+    return () => clearInterval(t);
+  }, [running, state.jobId]);
+
+  let body: React.ReactNode;
+  if (running) {
+    const label = `${state.type === 'remove' ? 'Removing' : 'Scanning'}… ${pct}%`;
+    body = (
+      <div>
+        <div className="flex items-center justify-between text-sm mb-2">
+          <span className="text-brand-300">{label}</span>
+          <span className="text-slate-500">{state.status === 'queued' ? 'Queued' : 'Running'}</span>
+        </div>
+        <div className="h-2 rounded-full bg-white/[0.08] overflow-hidden">
+          <div className="h-full bg-brand-500 transition-all" style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    );
+  } else if (state.status === 'error') {
+    body = (
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+        <p className="text-sm text-accent-red">{state.error || 'Duplicate job failed.'}</p>
+        <button className="btn-secondary" onClick={startScan}><Icon.Refresh size={15} /> Scan again</button>
+      </div>
+    );
+  } else if (state.type === 'remove' && state.status === 'done') {
+    body = (
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+        <p className="text-sm text-white">Removed {state.result?.removed || 0} files · freed {formatBytes(state.result?.bytesFreed || 0)}.</p>
+        <button className="btn-secondary" onClick={startScan}><Icon.Refresh size={15} /> Scan again</button>
+      </div>
+    );
+  } else if (state.type === 'scan' && state.status === 'done' && (state.result?.sets || 0) > 0) {
+    const thumbs = (state.result?.samples || []).map((s: any) => s.keepThumb).filter(Boolean).slice(0, 8);
+    body = (
+      <div className="rounded-xl bg-white/[0.025] border border-white/[0.05] p-4">
+        <div className="flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
+          <div className="min-w-0">
+            <p className="text-lg font-semibold text-white">
+              {state.result.sets} duplicate sets · {formatBytes(state.result.bytesRemovable || 0)} reclaimable · {state.result.removable || 0} files
+            </p>
+            {thumbs.length > 0 && (
+              <div className="flex gap-2 mt-3 overflow-hidden">
+                {thumbs.map((src: string, i: number) => (
+                  <img key={`${src}-${i}`} src={api.url(src)} className="w-14 h-14 rounded-lg object-cover bg-white/[0.04] border border-white/[0.06]" />
+                ))}
+              </div>
+            )}
+          </div>
+          <button className="btn-danger shrink-0" onClick={() => setConfirmOpen(true)}><Icon.Trash size={15} /> Remove duplicates</button>
+        </div>
+      </div>
+    );
+  } else if (state.type === 'scan' && state.status === 'done') {
+    body = <p className="text-sm text-accent-green">No duplicates found — your library is tidy.</p>;
+  } else {
+    body = <button className="btn-primary" onClick={startScan}><Icon.Search size={15} /> Scan for duplicates</button>;
+  }
+
+  return (
+    <Section title="Duplicate files" subtitle="Find photos and videos stored more than once and reclaim the space. Copies are moved to Files trash, and won't sync back.">
+      {body}
+      <ConfirmModal open={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={startRemove}
+        title="Remove duplicate files" message="Extra copies are moved to Files trash and flagged so your devices won't upload them again." confirmLabel="Remove duplicates" danger />
+    </Section>
+  );
+}
+
 function SetupCard() {
   return (
     <div className="glass rounded-2xl px-5 py-4 border border-brand-500/30 bg-brand-500/[0.06]">
@@ -255,6 +362,7 @@ export default function FolderSync() {
       <DesktopSyncSection />
       <PhoneSyncSection />
       {!hasDesktop && !hasPhone && <SetupCard />}
+      <DuplicateFilesSection />
       <ServerSyncSection />
     </div>
   );

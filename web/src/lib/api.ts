@@ -63,6 +63,13 @@ export const api = {
     bases: () => req<{ bases: { base: string; files: number; bytes: number; lastChange: number }[] }>('GET', '/api/sync/bases'),
   },
 
+  dedup: {
+    scan: () => req<{ jobId: string }>('POST', '/api/dedup/scan'),
+    remove: () => req<{ jobId: string }>('POST', '/api/dedup/remove'),
+    job: (id: string) => req<{ status: string; progress: number; error?: string; result?: any }>('GET', `/api/dedup/job/${id}`),
+    last: () => req<{ type: 'scan' | 'remove' | null; status: string; progress: number; error?: string; result?: any; jobId?: string }>('GET', '/api/dedup/last'),
+  },
+
   // ---- auth ----
   login: (username: string, password: string, code?: string) => req<AuthResponse | { needs2fa: true }>('POST', '/api/auth/login', { username, password, code }),
   logout: () => req('POST', '/api/auth/logout'),

@@ -7,6 +7,7 @@ import mime from 'mime-types';
 import { type AuthedRequest } from '../lib/auth.js';
 import { config } from '../config.js';
 import * as storage from '../services/storage.js';
+import * as dedup from '../services/dedup.js';
 
 const r = Router();
 const uploadTmp = path.join(config.filesRoot, '.sync-uploads-tmp');
@@ -74,7 +75,13 @@ r.post('/check', (req: AuthedRequest, res, next) => {
       const real = realFor(u(req).username, base, rel);
       let st: fs.Stats | null = null;
       try { st = fs.statSync(real); } catch { /* missing */ }
-      if (!st || !st.isFile()) { needed.push(rel); continue; }
+      if (!st || !st.isFile()) {
+        const vpath = path.posix.join(base, rel);
+        if (dedup.isTombstoned(u(req).id, vpath, size)) continue;
+        dedup.clearTombstone(u(req).id, vpath);
+        needed.push(rel);
+        continue;
+      }
       if (mtimeMs > st.mtimeMs + TOLERANCE_MS) needed.push(rel);
       else if (st.mtimeMs > mtimeMs + TOLERANCE_MS && st.size !== size) conflicts.push(rel);
     }

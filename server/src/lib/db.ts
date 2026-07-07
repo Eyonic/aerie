@@ -197,6 +197,24 @@ CREATE TABLE IF NOT EXISTS photo_index (
   PRIMARY KEY (user_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_photo_taken ON photo_index(user_id, taken_at DESC);
+
+CREATE TABLE IF NOT EXISTS file_hashes (
+  user_id INTEGER NOT NULL,
+  rel_path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mtime INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  PRIMARY KEY (user_id, rel_path)
+);
+
+CREATE TABLE IF NOT EXISTS dedup_removed (
+  user_id INTEGER NOT NULL,
+  rel_path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  removed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, rel_path)
+);
 `);
 
 // ---------- Migrations (add columns to existing DBs) ----------
