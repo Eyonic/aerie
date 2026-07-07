@@ -1,14 +1,27 @@
 // The persistent now-playing bar + <audio> engine. Mounted once in Layout so
 // music/audiobooks/podcasts keep playing while the user browses.
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { usePlayer } from '../lib/store';
 import { Icon } from '../lib/icons';
 import { formatDuration, cx } from '../lib/utils';
 import { api } from '../lib/api';
 
+// Skip-back-15 / skip-forward-30 glyphs (audiobooks/podcasts) — the shared icon
+// set ships no seek icons, so keep them local like the video player's controls.
+const Skip = ({ dir, secs }: { dir: -1 | 1; secs: number }) => (
+  <svg width={26} height={26} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+    {dir === -1
+      ? <path d="M11 4 5 9l6 5" />
+      : <path d="M13 4l6 5-6 5" />}
+    <path d={dir === -1 ? 'M5 9h9a5 5 0 0 1 0 10h-3' : 'M19 9h-9a5 5 0 0 0 0 10h3'} />
+    <text x="12" y="22.5" textAnchor="middle" fontSize="6.5" fontWeight="700" fill="currentColor" stroke="none">{secs}</text>
+  </svg>
+);
+
 export function GlobalAudioPlayer() {
   const p = usePlayer();
   const audioRef = useRef<HTMLAudioElement>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     const a = audioRef.current; if (!a || !p.current) return;
@@ -168,6 +181,8 @@ export function GlobalAudioPlayer() {
     const a = audioRef.current; const dur = effDur(); if (!a || !dur) return;
     a.currentTime = (Number(e.target.value) / 100) * dur;
   };
+  const skip = (secs: number) => { const a = audioRef.current; if (!a) return; a.currentTime = Math.max(0, Math.min(effDur() || a.duration || 0, a.currentTime + secs)); };
+  const isBook = p.current.kind === 'audiobook' || p.current.kind === 'podcast';
 
   return (
     <div className="shrink-0 h-20 glass-strong border-t border-white/[0.07] px-4 flex items-center gap-4 z-40">
@@ -198,12 +213,19 @@ export function GlobalAudioPlayer() {
           try { nat.mediaPosition(Math.round(e.currentTarget.currentTime * 1000), Math.round(dur * 1000)); } catch { /* */ }
         }} />
 
-      {/* track info */}
+      {/* track info — tap the artwork to open the full Now Playing card */}
       <div className="flex items-center gap-3 w-[240px] min-w-0">
-        <div className="w-14 h-14 rounded-lg bg-ink-700 overflow-hidden shrink-0 shadow-card">
+        <button
+          onClick={() => setExpanded(true)}
+          title="Open now playing"
+          className="group relative w-14 h-14 rounded-lg bg-ink-700 overflow-hidden shrink-0 shadow-card focus:outline-none focus:ring-2 focus:ring-brand-500"
+        >
           {p.current.artUrl ? <img src={p.current.artUrl} className="w-full h-full object-cover" /> :
             <div className="w-full h-full grid place-items-center text-slate-600"><Icon.Music size={22} /></div>}
-        </div>
+          <span className="absolute inset-0 grid place-items-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity text-white">
+            <Icon.ChevronDown size={20} className="rotate-180" />
+          </span>
+        </button>
         <div className="min-w-0">
           <p className="text-sm font-medium text-white truncate">{p.current.title}</p>
           <p className="text-xs muted truncate">{p.current.subtitle}</p>
@@ -233,6 +255,80 @@ export function GlobalAudioPlayer() {
         <Icon.Volume size={18} className="text-slate-400" />
         <input type="range" min={0} max={1} step={0.01} value={p.volume} onChange={(e) => p.setVolume(Number(e.target.value))} className="cb-range flex-1" />
         <button className="icon-btn" onClick={p.clear}><Icon.Close size={16} /></button>
+      </div>
+
+      {expanded && <NowPlayingCard p={p} isBook={isBook} seek={seek} skip={skip} onClose={() => setExpanded(false)} />}
+    </div>
+  );
+}
+
+// Full-screen "Now Playing" card (opens when the bar artwork is tapped). Reuses
+// the same <audio> engine + store; it only renders a bigger surface.
+function NowPlayingCard({ p, isBook, seek, skip, onClose }: {
+  p: ReturnType<typeof usePlayer>; isBook: boolean;
+  seek: (e: React.ChangeEvent<HTMLInputElement>) => void; skip: (secs: number) => void; onClose: () => void;
+}) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+  const cur = p.current!;
+  return (
+    <div className="fixed inset-0 z-[130] flex flex-col items-center animate-fade-in overflow-hidden">
+      {/* blurred artwork backdrop */}
+      <div className="absolute inset-0 bg-ink-950" />
+      {cur.artUrl && <img src={cur.artUrl} aria-hidden className="absolute inset-0 w-full h-full object-cover scale-110 blur-3xl opacity-30" />}
+      <div className="absolute inset-0 bg-gradient-to-b from-ink-950/60 via-ink-950/80 to-ink-950" />
+
+      <div className="relative w-full max-w-md flex flex-col items-center flex-1 px-6 pt-4 pb-8 min-h-0">
+        <div className="w-full flex items-center justify-between">
+          <button className="icon-btn h-11 w-11 text-white hover:bg-white/10" onClick={onClose} title="Close"><Icon.ChevronDown size={24} /></button>
+          <span className="text-[11px] uppercase tracking-widest text-slate-400">
+            {cur.kind === 'audiobook' ? 'Audiobook' : cur.kind === 'podcast' ? 'Podcast' : 'Now Playing'}
+          </span>
+          <button className="icon-btn h-11 w-11 text-white hover:bg-white/10" onClick={() => { p.clear(); onClose(); }} title="Close player"><Icon.Close size={20} /></button>
+        </div>
+
+        <div className="flex-1 flex items-center justify-center w-full min-h-0 py-4">
+          <div className="aspect-square w-full max-w-[min(75vw,20rem)] rounded-2xl bg-ink-800 overflow-hidden shadow-float">
+            {cur.artUrl ? <img src={cur.artUrl} className="w-full h-full object-cover" /> :
+              <div className="w-full h-full grid place-items-center text-slate-600">{isBook ? <Icon.Book size={64} /> : <Icon.Music size={64} />}</div>}
+          </div>
+        </div>
+
+        <div className="w-full text-center mb-4">
+          <p className="text-xl font-bold text-white truncate">{cur.title}</p>
+          {cur.subtitle && <p className="text-sm text-slate-400 truncate mt-1">{cur.subtitle}</p>}
+        </div>
+
+        <div className="w-full flex items-center gap-2 mb-5">
+          <span className="text-[11px] tabular-nums text-slate-400 w-10 text-right">{formatDuration(p.currentTime)}</span>
+          <input type="range" min={0} max={100} value={p.progress * 100 || 0} onChange={seek} className="cb-range flex-1" />
+          <span className="text-[11px] tabular-nums text-slate-400 w-10">{formatDuration(p.duration)}</span>
+        </div>
+
+        <div className="w-full flex items-center justify-center gap-5">
+          {isBook ? (
+            <>
+              <button className="icon-btn h-12 w-12 text-white hover:bg-white/10" onClick={() => skip(-15)} title="Back 15s"><Skip dir={-1} secs={15} /></button>
+              <button className="w-16 h-16 rounded-full bg-white text-ink-900 grid place-items-center hover:scale-105 transition-transform" onClick={p.toggle}>
+                {p.playing ? <Icon.Pause size={28} /> : <Icon.Play size={28} />}
+              </button>
+              <button className="icon-btn h-12 w-12 text-white hover:bg-white/10" onClick={() => skip(30)} title="Forward 30s"><Skip dir={1} secs={30} /></button>
+            </>
+          ) : (
+            <>
+              <button className={cx('icon-btn h-11 w-11', p.shuffle ? 'text-brand-400' : 'text-white')} onClick={p.toggleShuffle}><Icon.Shuffle size={19} /></button>
+              <button className="icon-btn h-12 w-12 text-white hover:bg-white/10" onClick={p.prev}><Icon.Prev size={24} /></button>
+              <button className="w-16 h-16 rounded-full bg-white text-ink-900 grid place-items-center hover:scale-105 transition-transform" onClick={p.toggle}>
+                {p.playing ? <Icon.Pause size={28} /> : <Icon.Play size={28} />}
+              </button>
+              <button className="icon-btn h-12 w-12 text-white hover:bg-white/10" onClick={p.next}><Icon.Next size={24} /></button>
+              <button className={cx('icon-btn h-11 w-11', p.repeat !== 'off' ? 'text-brand-400' : 'text-white')} onClick={p.cycleRepeat}><Icon.Repeat size={19} /></button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
