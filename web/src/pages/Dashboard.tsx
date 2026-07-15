@@ -104,6 +104,7 @@ export default function Dashboard() {
         id: t.id, title: t.name, subtitle: album.albumArtist || album.name,
         artUrl: album.posterUrl && new URL(album.posterUrl, location.origin).href,
         streamUrl: api.media.streamUrl(t.id, true), kind: 'music' as const,
+        cast: { source: 'jellyfin' as const, itemId: t.id },
       }));
       if (q.length) player.playQueue(q, 0);
     } catch { nav('/music'); }
@@ -123,12 +124,13 @@ export default function Dashboard() {
           subtitle: b.author || 'Unknown author',
           artUrl: art, streamUrl: api.books.trackUrl(t.streamUrl),
           kind: 'audiobook' as const, durationSec: t.durationSec,
+          cast: { source: 'audiobookshelf' as const, itemId: b.id, fileId: t.ino },
           startAt: i === 0 ? resumeAt : undefined,
         })), 0);
         return;
       }
     } catch { /* fall through */ }
-    player.playTrack({ id: b.id, title: b.title, subtitle: b.author, artUrl: art, streamUrl: api.books.streamUrl(b.id), kind: 'audiobook', startAt: resumeAt });
+    player.playTrack({ id: b.id, title: b.title, subtitle: b.author, artUrl: art, streamUrl: api.books.streamUrl(b.id), kind: 'audiobook', startAt: resumeAt, cast: { source: 'audiobookshelf', itemId: b.id } });
   };
 
   const hasContinue = resume.length > 0 || continueBooks.length > 0;

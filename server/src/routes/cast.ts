@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { audit } from '../lib/db.js';
 import * as cast from '../services/cast.js';
 import * as jellyfin from '../services/jellyfin.js';
+import * as audiobookshelf from '../services/audiobookshelf.js';
 
 const r = Router();
 
@@ -57,6 +58,63 @@ r.post('/play', async (req: AuthedRequest, res, next) => {
     });
     audit(req.user!.id, req.user!.username, 'cast_play', `${itemId} -> ${ip}`);
     res.json({ ok: true, canSeek: source.canSeek, offset: source.canSeek ? 0 : startSec });
+  } catch (e) { next(e); }
+});
+
+// Music and audiobook tracks use the same Default Media Receiver as video, but
+// their upstreams differ: Jellyfin music may need an MP3 transcode, while an
+// Audiobookshelf book must address the currently playing audio file by inode.
+r.post('/play-audio', async (req: AuthedRequest, res, next) => {
+  try {
+    const { ip, source, itemId, fileId, positionSec } = req.body || {};
+    const targetIp = String(ip || '');
+    const id = String(itemId || '');
+    const safeId = /^[A-Za-z0-9_-]{1,160}$/;
+    if (!isPrivateLanIp(targetIp) || !safeId.test(id) || !['jellyfin', 'audiobookshelf'].includes(source)) {
+      return res.status(400).json({ error: 'missing_device_or_item' });
+    }
+    if (!(await cast.isKnownDevice(targetIp))) return res.status(400).json({ error: 'unknown_device' });
+    const startSec = Number(positionSec) > 0 && Number.isFinite(Number(positionSec)) ? Number(positionSec) : 0;
+
+    let media: { url: string; contentType: string; canSeek: boolean };
+    let title = 'Aerie';
+    let subtitle = '';
+    let imageUrl = '';
+    if (source === 'jellyfin') {
+      const item = await jellyfin.itemDetail(id);
+      if (item.type !== 'Audio') return res.status(400).json({ error: 'item_is_not_audio' });
+      media = await jellyfin.castAudioSource(id, startSec);
+      title = item.name || title;
+      subtitle = item.albumArtist || item.album || '';
+      const artToken = cast.mintStreamToken(jellyfin.directImageUrl(id), 'image/jpeg');
+      imageUrl = `${lanBase()}/api/cast-stream/${artToken}`;
+    } else {
+      const requestedFile = fileId == null ? '' : String(fileId);
+      if (requestedFile && !/^\d{1,32}$/.test(requestedFile)) return res.status(400).json({ error: 'bad_audio_file' });
+      const [item, tracks] = await Promise.all([
+        audiobookshelf.itemDetail(id),
+        audiobookshelf.getAudioTracks(id),
+      ]);
+      const track = requestedFile ? tracks.find(t => t.ino === requestedFile) : tracks[0];
+      if (!track) return res.status(404).json({ error: 'audio_file_not_found' });
+      media = { url: audiobookshelf.directFileUrl(id, track.ino), contentType: track.mimeType, canSeek: true };
+      title = tracks.length > 1 ? `${item.title} — ${track.title}` : item.title;
+      subtitle = item.author || (item.mediaType === 'podcast' ? 'Podcast' : 'Audiobook');
+      const artToken = cast.mintStreamToken(audiobookshelf.directCoverUrl(id), 'image/jpeg');
+      imageUrl = `${lanBase()}/api/cast-stream/${artToken}`;
+    }
+
+    const streamToken = cast.mintStreamToken(media.url, media.contentType);
+    await cast.play(targetIp, {
+      url: `${lanBase()}/api/cast-stream/${streamToken}`,
+      contentType: media.contentType,
+      title,
+      subtitle,
+      imageUrl,
+      startTime: media.canSeek ? startSec : 0,
+    });
+    audit(req.user!.id, req.user!.username, 'cast_audio', `${source}:${id} -> ${targetIp}`);
+    res.json({ ok: true, canSeek: media.canSeek, offset: media.canSeek ? 0 : startSec });
   } catch (e) { next(e); }
 });
 

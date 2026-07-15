@@ -42,6 +42,7 @@ function toTrack(m: MediaItem, artFallback?: string): Track {
     streamUrl: api.media.streamUrl(m.id, true),
     kind: 'music',
     durationSec: durationSecOf(m),
+    cast: { source: 'jellyfin', itemId: m.id },
   };
 }
 

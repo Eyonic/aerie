@@ -300,8 +300,10 @@ export const api = {
   cast: {
     devices: (refresh = false) => req<{ ip: string; name: string }[]>('GET', `/api/cast/devices${refresh ? '?refresh=1' : ''}`),
     play: (ip: string, itemId: string, positionSec = 0) => req<{ ok: boolean }>('POST', '/api/cast/play', { ip, itemId, positionSec }),
+    playAudio: (ip: string, track: { source: 'jellyfin' | 'audiobookshelf'; itemId: string; fileId?: string }, positionSec = 0) =>
+      req<{ ok: boolean; canSeek: boolean; offset: number }>('POST', '/api/cast/play-audio', { ip, ...track, positionSec }),
     control: (ip: string, action: 'play' | 'pause' | 'stop' | 'seek' | 'quit', value?: number) => req<{ ok: boolean }>('POST', '/api/cast/control', { ip, action, value }),
-    status: (ip: string) => req<{ active: boolean; playerState?: string; currentTime?: number; duration?: number }>('GET', `/api/cast/status?ip=${encodeURIComponent(ip)}`),
+    status: (ip: string) => req<{ active: boolean; playerState?: string; idleReason?: string; currentTime?: number; duration?: number }>('GET', `/api/cast/status?ip=${encodeURIComponent(ip)}`),
   },
 
   // ---- AI music generation (ace-step) ----

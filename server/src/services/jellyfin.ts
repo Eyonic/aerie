@@ -197,6 +197,39 @@ export async function castSource(id: string, startSec = 0): Promise<{ url: strin
   };
 }
 
+// Progressive audio for Google Cast. Direct-play the common Cast-supported
+// containers so Range seeking works; transcode anything else to MP3. A live
+// transcode resumes server-side because its response is not Range-seekable.
+export async function castAudioSource(id: string, startSec = 0): Promise<{ url: string; contentType: string; canSeek: boolean }> {
+  try {
+    const uid = await jellyUserId();
+    const it = await jf(`/Users/${uid}/Items/${id}`);
+    const src = it.MediaSources?.[0];
+    const container = String(src?.Container || '').toLowerCase().split(',')[0];
+    const contentTypes: Record<string, string> = {
+      mp3: 'audio/mpeg', aac: 'audio/aac', m4a: 'audio/mp4', m4b: 'audio/mp4',
+      mp4: 'audio/mp4', flac: 'audio/flac', wav: 'audio/wav', ogg: 'audio/ogg',
+      oga: 'audio/ogg', opus: 'audio/ogg', webm: 'audio/webm',
+    };
+    if (src?.Id && contentTypes[container]) {
+      return {
+        url: `${base()}/Audio/${id}/stream?Static=true&api_key=${key()}&MediaSourceId=${src.Id}`,
+        contentType: contentTypes[container],
+        canSeek: true,
+      };
+    }
+  } catch { /* fall through to the transcode URL */ }
+
+  const uid = await jellyUserId();
+  const st = startSec > 0 ? `&StartTimeTicks=${Math.round(startSec * 1e7)}` : '';
+  return {
+    url: `${base()}/Audio/${id}/universal?api_key=${key()}&UserId=${uid}&DeviceId=aerie-cast`
+      + `&Container=mp3&TranscodingContainer=mp3&TranscodingProtocol=http&AudioCodec=mp3&MaxStreamingBitrate=320000${st}`,
+    contentType: 'audio/mpeg',
+    canSeek: false,
+  };
+}
+
 export function directStreamUrl(id: string, isAudio: boolean): string {
   if (isAudio) {
     return `${base()}/Audio/${id}/universal?api_key=${key()}&UserId=&Container=mp3,aac,flac&AudioCodec=aac&TranscodingContainer=ts&TranscodingProtocol=hls&MaxStreamingBitrate=320000`;

@@ -45,6 +45,7 @@ function trackFor(book: Book) {
     streamUrl: api.books.streamUrl(book.id),
     kind: 'audiobook' as const,
     durationSec: book.durationSec,
+    cast: { source: 'audiobookshelf' as const, itemId: book.id },
   };
 }
 
@@ -104,6 +105,7 @@ function playBook(book: Book, seconds?: number) {
         subtitle: authorName(book),
         artUrl: art, streamUrl: api.books.trackUrl(t.streamUrl),
         kind: 'audiobook' as const, durationSec: t.durationSec,
+        cast: { source: 'audiobookshelf' as const, itemId: book.id, fileId: t.ino },
         ...(i === 0 && resumeAt > 0 ? { startAt: resumeAt } : {}),
       })), 0);
     } else P.playTrack(resumeAt > 0 ? { ...trackFor(book), startAt: resumeAt } : trackFor(book));

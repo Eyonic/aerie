@@ -32,6 +32,7 @@ function trackForShow(b: Book) {
     streamUrl: api.books.streamUrl(b.id),
     kind: 'podcast' as const,
     durationSec: b.durationSec,
+    cast: { source: 'audiobookshelf' as const, itemId: b.id },
   };
 }
 
@@ -149,6 +150,7 @@ export default function Podcasts() {
       streamUrl,
       kind: 'podcast',
       durationSec: ch.end != null && ch.start != null ? Math.max(0, ch.end - ch.start) : show.durationSec,
+      cast: { source: 'audiobookshelf', itemId: show.id },
     });
     const seconds = ch.start || 0;
     if (sameStream && a) {

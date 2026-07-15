@@ -62,11 +62,30 @@ function mapItem(it: any, progMap?: Map<string, { progress: number; currentTime:
 }
 
 export async function listLibraryItems(libraryId: string): Promise<Book[]> {
-  const [data, progs] = await Promise.all([
-    abs(`/api/libraries/${libraryId}/items`, { limit: 200, sort: 'media.metadata.title' }),
-    progressMap(),
-  ]);
-  return (data.results || []).map((it: any) => mapItem(it, progs));
+  const pageSize = 200;
+  const items: any[] = [];
+  let page = 0;
+
+  // Audiobookshelf paginates this endpoint. Fetch every page instead of
+  // silently treating the first 200 results as the complete library.
+  while (true) {
+    const data = await abs(`/api/libraries/${libraryId}/items`, {
+      limit: pageSize,
+      page,
+      sort: 'media.metadata.title',
+    });
+    const results = Array.isArray(data.results) ? data.results : [];
+    items.push(...results);
+
+    const total = Number(data.total);
+    if (results.length === 0
+      || (Number.isFinite(total) && items.length >= total)
+      || results.length < pageSize) break;
+    page++;
+  }
+
+  const progs = await progressMap();
+  return items.map((it: any) => mapItem(it, progs));
 }
 
 export async function allBooks(mediaType: 'book' | 'podcast'): Promise<Book[]> {

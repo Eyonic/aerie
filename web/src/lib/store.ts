@@ -45,6 +45,11 @@ export interface Track {
   kind: 'music' | 'audiobook' | 'podcast';
   durationSec?: number;
   startAt?: number;   // resume position in seconds (audiobooks)
+  cast?: {
+    source: 'jellyfin' | 'audiobookshelf';
+    itemId: string;
+    fileId?: string;
+  };
 }
 interface PlayerState {
   queue: Track[];

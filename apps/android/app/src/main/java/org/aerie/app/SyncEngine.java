@@ -1,8 +1,6 @@
 package org.aerie.app;
 
-import android.app.job.JobInfo;
 import android.app.job.JobScheduler;
-import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -11,6 +9,12 @@ import android.net.Uri;
 import android.os.Build;
 import android.provider.DocumentsContract;
 import android.webkit.MimeTypeMap;
+
+import androidx.work.Constraints;
+import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.NetworkType;
+import androidx.work.PeriodicWorkRequest;
+import androidx.work.WorkManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -24,9 +28,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Calendar;
+import java.util.concurrent.TimeUnit;
 
 public class SyncEngine {
     static final int JOB_ID = 44012;
+    private static final String WORK_NAME = "aerie-nightly-folder-sync";
     private static final long MAX_FILE = 2L * 1024L * 1024L * 1024L;
     private final Context context;
     private final SharedPreferences prefs;
@@ -58,19 +65,44 @@ public class SyncEngine {
     static void schedule(Context context) {
         try {
             SharedPreferences p = context.getSharedPreferences("aerie", Context.MODE_PRIVATE);
-            JobScheduler js = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+            WorkManager wm = WorkManager.getInstance(context.getApplicationContext());
             if (new JSONArray(p.getString("sync_folders", "[]")).length() == 0) {
-                if (js != null) js.cancel(JOB_ID);
+                wm.cancelUniqueWork(WORK_NAME);
                 return;
             }
-            JobInfo job = new JobInfo.Builder(JOB_ID, new ComponentName(context, SyncJobService.class))
-                    .setPeriodic(12L * 60L * 60L * 1000L)
+            // Cancel the old raw JobScheduler entry when upgrading from 1.2.
+            JobScheduler legacy = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
+            if (legacy != null) legacy.cancel(JOB_ID);
+
+            Constraints constraints = new Constraints.Builder()
                     .setRequiresCharging(true)
-                    .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
-                    .setPersisted(true)
+                    .setRequiredNetworkType(NetworkType.UNMETERED)
                     .build();
-            if (js != null) js.schedule(job);
-        } catch (Exception ignored) { }
+            long delay = delayUntilNextNight();
+            PeriodicWorkRequest work = new PeriodicWorkRequest.Builder(SyncWorker.class, 24, TimeUnit.HOURS)
+                    .setInitialDelay(delay, TimeUnit.MILLISECONDS)
+                    .setConstraints(constraints)
+                    .addTag(WORK_NAME)
+                    .build();
+            // KEEP makes this safe to call on every app launch: it repairs a
+            // missing job without moving an already scheduled night's run.
+            wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, work);
+            p.edit().putLong("sync_next_run", System.currentTimeMillis() + delay).apply();
+        } catch (Exception e) {
+            context.getSharedPreferences("aerie", Context.MODE_PRIVATE).edit()
+                    .putString("sync_last_result", "schedule_failed").apply();
+        }
+    }
+
+    private static long delayUntilNextNight() {
+        Calendar now = Calendar.getInstance();
+        Calendar next = (Calendar) now.clone();
+        next.set(Calendar.HOUR_OF_DAY, 2);
+        next.set(Calendar.MINUTE, 0);
+        next.set(Calendar.SECOND, 0);
+        next.set(Calendar.MILLISECOND, 0);
+        if (!next.after(now)) next.add(Calendar.DAY_OF_YEAR, 1);
+        return Math.max(0, next.getTimeInMillis() - now.getTimeInMillis());
     }
 
     static JSONArray folders(Context context) {
@@ -94,6 +126,7 @@ public class SyncEngine {
             o.put("running", p.getBoolean("sync_running", false));
             o.put("lastRun", p.getLong("sync_last_run", 0));
             o.put("lastResult", p.getString("sync_last_result", ""));
+            o.put("nextRun", p.getLong("sync_next_run", 0));
             String progress = p.getString("sync_progress", null);
             if (progress != null && !progress.isEmpty()) o.put("progress", new JSONObject(progress));
             o.put("folders", folders(context));
@@ -190,9 +223,16 @@ public class SyncEngine {
     }
 
     private boolean finish(String result, boolean needsMore) {
+        Calendar next = Calendar.getInstance();
+        next.add(Calendar.DAY_OF_YEAR, 1);
+        next.set(Calendar.HOUR_OF_DAY, 2);
+        next.set(Calendar.MINUTE, 0);
+        next.set(Calendar.SECOND, 0);
+        next.set(Calendar.MILLISECOND, 0);
         prefs.edit()
                 .putBoolean("sync_running", false)
                 .putLong("sync_last_run", System.currentTimeMillis())
+                .putLong("sync_next_run", next.getTimeInMillis())
                 .putString("sync_last_result", result)
                 .remove("sync_progress")
                 .apply();

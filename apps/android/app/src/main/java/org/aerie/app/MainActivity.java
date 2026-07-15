@@ -98,6 +98,9 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("aerie", MODE_PRIVATE);
         current = new WeakReference<>(this);
+        // WorkManager KEEP semantics make this an inexpensive schedule repair
+        // after an app update, force-stop recovery, or OEM job cleanup.
+        SyncEngine.schedule(this);
 
         // Migration: older builds persisted the auto-selected origin into the
         // custom-server slot, which inverted LAN-first probing at home.

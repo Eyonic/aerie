@@ -383,6 +383,7 @@ function ResultCard({ name, args, result }: { name: string; args?: any; result: 
         subtitle: t.artist || undefined,
         streamUrl: api.media.streamUrl(String(t.id), true),
         kind: 'music' as const,
+        cast: { source: 'jellyfin' as const, itemId: String(t.id) },
       }));
       player.playQueue(q, 0);
       toast('Now playing', 'success', `${q.length} song${q.length > 1 ? 's' : ''} queued${result.name ? ` · ${result.name}` : ''}`);
