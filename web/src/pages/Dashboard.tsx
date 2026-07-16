@@ -46,10 +46,10 @@ export default function Dashboard() {
     Promise.all([
       safe(api.dashboard(), null as any),
       safe(api.media.resumeVideo(), [] as MediaItem[]),
-      safe(api.media.movies(), [] as MediaItem[]),
-      safe(api.media.series(), [] as MediaItem[]),
-      safe(api.media.albums(), [] as MediaItem[]),
-      safe(api.books.audiobooks(), [] as Book[]),
+      safe(api.media.movies(50), [] as MediaItem[]),
+      safe(api.media.series(50), [] as MediaItem[]),
+      safe(api.media.albums(50), [] as MediaItem[]),
+      safe(api.books.audiobooks(50), [] as Book[]),
       safe(api.media.recommendations(), { nextUp: [], suggestions: [], recentlyAdded: [] } as Recs),
     ]).then(([d, r, m, s, a, b, rec]) => {
       setData(d); setResume(r || []); setMovies(m || []); setSeries(s || []); setAlbums(a || []); setBooks(b || []);

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
@@ -111,9 +111,8 @@ export default function Movies() {
   const [query, setQuery] = useState('');
   const [genre, setGenre] = useState<string>('all');
   const [sort, setSort] = useState<SortKey>('recent');
-  // Server-side search results (whole library, not just the loaded page). null = not searching.
-  const [serverResults, setServerResults] = useState<MediaItem[] | null>(null);
-  const [searching, setSearching] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(50);
+  const loadMoreRef = useRef<HTMLButtonElement>(null);
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -180,21 +179,6 @@ export default function Movies() {
     return () => { alive = false; };
   }, [selected?.id]);
 
-  // ---- Server-side search: query the WHOLE library, not just the loaded page ----
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) { setServerResults(null); setSearching(false); return; }
-    let alive = true;
-    setSearching(true);
-    const t = setTimeout(() => {
-      api.media.search(q)
-        .then(list => { if (alive) setServerResults((list || []).filter(m => m.type === 'Movie')); })
-        .catch(() => { if (alive) setServerResults([]); })
-        .finally(() => { if (alive) setSearching(false); });
-    }, 300);
-    return () => { alive = false; clearTimeout(t); };
-  }, [query]);
-
   const isWatched = (item: MediaItem) => {
     if (unwatchedIds.has(item.id)) return false;
     if (watchedIds.has(item.id)) return true;
@@ -243,20 +227,27 @@ export default function Movies() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    // When searching, use the server results (whole library). The server already
-    // matched the query, so don't re-filter by name — only apply the genre facet.
-    const usingServer = q !== '' && serverResults !== null;
-    const base = usingServer ? serverResults! : movies;
-    let list = base.filter(m => {
+    let list = movies.filter(m => {
       if (genre !== 'all' && !(m.genres || []).includes(genre)) return false;
-      if (!usingServer && q && !(m.name || '').toLowerCase().includes(q)) return false;
+      if (q && !(m.name || '').toLowerCase().includes(q)) return false;
       return true;
     });
     if (sort === 'title') list = [...list].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     else if (sort === 'rating') list = [...list].sort((a, b) => (b.communityRating || 0) - (a.communityRating || 0));
     else if (sort === 'year') list = [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
     return list;
-  }, [movies, serverResults, query, genre, sort]);
+  }, [movies, query, genre, sort]);
+
+  useEffect(() => { setVisibleCount(50); }, [query, genre, sort]);
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, filtered.length));
+    }, { rootMargin: '600px 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [filtered.length, visibleCount]);
 
   const hero = useMemo<MediaItem | null>(() => {
     const withBackdrop = (arr: MediaItem[]) => arr.find(m => m.backdropUrl || m.posterUrl);
@@ -406,9 +397,7 @@ export default function Movies() {
           <h2 className="section-title">{filtering ? 'Results' : 'All movies'}</h2>
           <span className="muted text-sm">{filtered.length} title{filtered.length === 1 ? '' : 's'}</span>
         </div>
-        {searching && filtered.length === 0 ? (
-          <div className="py-16 grid place-items-center"><Spinner size={28} /></div>
-        ) : filtered.length === 0 ? (
+        {filtered.length === 0 ? (
           <EmptyState
             icon={<Icon.Search size={28} />}
             title="No matches"
@@ -416,9 +405,17 @@ export default function Movies() {
             action={<Link to="/requests" className="btn-primary gap-2"><Icon.Plus size={18} /> Request it</Link>}
           />
         ) : (
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 sm:gap-4">
-            {filtered.map(m => <CheckPoster key={m.id} item={m} aspect="portrait" watched={isWatched(m)} onClick={() => setSelected(m)} />)}
-          </div>
+          <>
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 sm:gap-4">
+              {filtered.slice(0, visibleCount).map(m => <CheckPoster key={m.id} item={m} aspect="portrait" watched={isWatched(m)} onClick={() => setSelected(m)} />)}
+            </div>
+            {visibleCount < filtered.length && (
+              <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, filtered.length))}
+                className="btn-secondary mx-auto mt-6">
+                Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
+              </button>
+            )}
+          </>
         )}
       </div>
 

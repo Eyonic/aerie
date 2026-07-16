@@ -129,12 +129,12 @@ export const api = {
   // ---- media (jellyfin) ----
   media: {
     status: () => req<{ configured: boolean }>('GET', '/api/media/status'),
-    movies: () => req<MediaItem[]>('GET', '/api/media/movies').then(tokMediaList),
-    series: () => req<MediaItem[]>('GET', '/api/media/series').then(tokMediaList),
-    videos: () => req<MediaItem[]>('GET', '/api/media/videos').then(tokMediaList),
-    albums: () => req<MediaItem[]>('GET', '/api/media/music/albums').then(tokMediaList),
-    artists: () => req<MediaItem[]>('GET', '/api/media/music/artists').then(tokMediaList),
-    songs: () => req<MediaItem[]>('GET', '/api/media/music/songs').then(tokMediaList),
+    movies: (limit?: number) => req<MediaItem[]>('GET', `/api/media/movies${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
+    series: (limit?: number) => req<MediaItem[]>('GET', `/api/media/series${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
+    videos: (limit?: number) => req<MediaItem[]>('GET', `/api/media/videos${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
+    albums: (limit?: number) => req<MediaItem[]>('GET', `/api/media/music/albums${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
+    artists: (limit?: number) => req<MediaItem[]>('GET', `/api/media/music/artists${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
+    songs: (limit?: number) => req<MediaItem[]>('GET', `/api/media/music/songs${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
     resumeVideo: () => req<MediaItem[]>('GET', '/api/media/resume/video').then(tokMediaList),
     resumeAudio: () => req<MediaItem[]>('GET', '/api/media/resume/audio').then(tokMediaList),
     item: (id: string) => req<MediaItem>('GET', `/api/media/item/${id}`).then(tokMedia),
@@ -200,7 +200,7 @@ export const api = {
   // ---- books (audiobookshelf) ----
   books: {
     status: () => req<{ configured: boolean }>('GET', '/api/books/status'),
-    audiobooks: () => req<Book[]>('GET', '/api/books/audiobooks'),
+    audiobooks: (limit?: number) => req<Book[]>('GET', `/api/books/audiobooks${limit ? `?limit=${limit}` : ''}`),
     podcasts: () => req<Book[]>('GET', '/api/books/podcasts'),
     item: (id: string) => req<Book & { chapters: Chapter[]; overview?: string }>('GET', `/api/books/item/${id}`),
     tracks: (id: string) => req<{ ino: string; index: number; title: string; durationSec: number; mimeType: string; streamUrl: string }[]>('GET', `/api/books/tracks/${id}`),

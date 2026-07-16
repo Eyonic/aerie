@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
@@ -299,6 +299,8 @@ export default function TVShows() {
   const [query, setQuery] = useState('');
   const [genre, setGenre] = useState('all');
   const [sort, setSort] = useState<SortKey>('recent');
+  const [visibleCount, setVisibleCount] = useState(50);
+  const loadMoreRef = useRef<HTMLButtonElement>(null);
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -380,6 +382,17 @@ export default function TVShows() {
     else if (sort === 'year') list = [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
     return list;
   }, [series, query, genre, sort]);
+
+  useEffect(() => { setVisibleCount(50); }, [query, genre, sort]);
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, filtered.length));
+    }, { rootMargin: '600px 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [filtered.length, visibleCount]);
 
   if (series === null) return <PageLoader />;
 
@@ -525,11 +538,19 @@ export default function TVShows() {
               action={<Link to="/requests" className="btn-primary gap-2"><Icon.Plus size={18} /> Request it</Link>}
             />
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
-              {filtered.map(s => (
-                <CheckPoster key={s.id} item={s} aspect="portrait" watched={isWatched(s)} onClick={() => setSelected(s)} />
-              ))}
-            </div>
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
+                {filtered.slice(0, visibleCount).map(s => (
+                  <CheckPoster key={s.id} item={s} aspect="portrait" watched={isWatched(s)} onClick={() => setSelected(s)} />
+                ))}
+              </div>
+              {visibleCount < filtered.length && (
+                <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, filtered.length))}
+                  className="btn-secondary mx-auto mt-6">
+                  Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
+                </button>
+              )}
+            </>
           )}
         </>
       )}

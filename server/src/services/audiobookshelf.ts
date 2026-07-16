@@ -88,13 +88,18 @@ export async function listLibraryItems(libraryId: string): Promise<Book[]> {
   return items.map((it: any) => mapItem(it, progs));
 }
 
+const libraryCache = new Map<'book' | 'podcast', { expires: number; items: Book[] }>();
+
 export async function allBooks(mediaType: 'book' | 'podcast'): Promise<Book[]> {
+  const cached = libraryCache.get(mediaType);
+  if (cached && cached.expires > Date.now()) return cached.items;
   const libs = await libraries();
   const target = libs.filter(l => l.mediaType === mediaType);
   const out: Book[] = [];
   for (const l of target) {
     try { out.push(...await listLibraryItems(l.id)); } catch { /* skip */ }
   }
+  libraryCache.set(mediaType, { expires: Date.now() + 60_000, items: out });
   return out;
 }
 

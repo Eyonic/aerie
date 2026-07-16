@@ -91,6 +91,57 @@ export async function listByType(includeItemTypes: string, params: Record<string
   return (data.Items || []).map(mapItem);
 }
 
+const fullLibraryCache = new Map<string, { expires: number; items: MediaItem[] }>();
+
+// Full-library variant for screens that must show every title. Jellyfin caps a
+// request at Limit, so keep advancing StartIndex until TotalRecordCount (or a
+// short final page) says the library is complete. listByType intentionally
+// remains a bounded request because assistant/automation callers use Limit as
+// an actual result cap.
+export async function listAllByType(includeItemTypes: string, params: Record<string, any> = {}): Promise<MediaItem[]> {
+  const uid = await jellyUserId();
+  const cacheKey = `${uid}:${includeItemTypes}:${JSON.stringify(params)}`;
+  const cached = fullLibraryCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.items;
+
+  const pageSize = 500;
+  const out: any[] = [];
+  const seen = new Set<string>();
+  let startIndex = 0;
+
+  while (true) {
+    const data = await jf(`/Users/${uid}/Items`, {
+      IncludeItemTypes: includeItemTypes,
+      Recursive: true,
+      Fields: 'Overview,Genres,ProductionYear,RunTimeTicks',
+      SortBy: params.SortBy || 'SortName',
+      SortOrder: params.SortOrder || 'Ascending',
+      ...params,
+      StartIndex: startIndex,
+      Limit: pageSize,
+    });
+    const batch = Array.isArray(data.Items) ? data.Items : [];
+    const before = out.length;
+    for (const item of batch) {
+      const id = String(item?.Id || '');
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(item);
+    }
+
+    startIndex += batch.length;
+    const total = Number(data.TotalRecordCount);
+    if (batch.length === 0
+      || out.length === before
+      || batch.length < pageSize
+      || (Number.isFinite(total) && startIndex >= total)) break;
+  }
+
+  const items = out.map(mapItem);
+  fullLibraryCache.set(cacheKey, { expires: Date.now() + 60_000, items });
+  return items;
+}
+
 export async function resumeItems(mediaType: 'Video' | 'Audio'): Promise<MediaItem[]> {
   const uid = await jellyUserId();
   const data = await jf(`/Users/${uid}/Items/Resume`, {

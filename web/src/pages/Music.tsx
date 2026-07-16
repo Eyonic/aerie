@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, ticksToTime, colorFor, initials } from '../lib/utils';
@@ -545,6 +545,8 @@ export default function Music() {
   const [openArtistItem, setOpenArtistItem] = useState<MediaItem | null>(null);
   const [showQueue, setShowQueue] = useState(false);
   const [query, setQuery] = useState('');
+  const [visibleCount, setVisibleCount] = useState(50);
+  const loadMoreRef = useRef<HTMLButtonElement>(null);
 
   const [favIds, setFavIds] = useState<Set<string>>(new Set());
   const [prefs, setPrefs] = useState<any>({});
@@ -567,7 +569,7 @@ export default function Music() {
         if (!alive) return;
         setAlbums(al || []);
         setArtists((ar || []).filter(a => !isSystemArtist(a.name)));
-        setSongs((so || []).slice(0, 500));
+        setSongs(so || []);
         setResume((rs || []).filter(x => x.type === 'Audio'));
         // Prefer server-side "recently added" albums when it surfaces music.
         const recAlbums = (rec?.recentlyAdded || []).filter(x => x.type === 'MusicAlbum');
@@ -629,6 +631,23 @@ export default function Music() {
   }, [artists, q]);
 
   const likedSongs = useMemo(() => songs.filter(s => favIds.has(s.id)), [songs, favIds]);
+  const visibleTotal = searching
+    ? Math.max(filteredSongs.length, filteredAlbums.length, filteredArtists.length)
+    : tab === 'albums' ? albums.length
+      : tab === 'artists' ? artists.length
+        : tab === 'songs' ? songs.length
+          : likedSongs.length;
+
+  useEffect(() => { setVisibleCount(50); }, [tab, query]);
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || visibleCount >= visibleTotal || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, visibleTotal));
+    }, { rootMargin: '600px 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visibleCount, visibleTotal]);
   // Only the server's recommendations feed carries a real "date added" ordering.
   // When it doesn't surface music albums we fall back to the plain album list —
   // in that case label the rail "Albums" instead of falsely claiming recency.
@@ -733,7 +752,7 @@ export default function Music() {
                 <div>
                   <h2 className="section-title mb-3">Artists</h2>
                   <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-4">
-                    {filteredArtists.slice(0, 12).map(a => <ArtistCard key={a.id} item={a} onClick={() => setOpenArtistItem(a)} />)}
+                    {filteredArtists.slice(0, visibleCount).map(a => <ArtistCard key={a.id} item={a} onClick={() => setOpenArtistItem(a)} />)}
                   </div>
                 </div>
               )}
@@ -741,7 +760,7 @@ export default function Music() {
                 <div>
                   <h2 className="section-title mb-3">Albums</h2>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                    {filteredAlbums.slice(0, 15).map(a => <AlbumCard key={a.id} album={a} onClick={() => setOpenAlbum(a)} />)}
+                    {filteredAlbums.slice(0, visibleCount).map(a => <AlbumCard key={a.id} album={a} onClick={() => setOpenAlbum(a)} />)}
                   </div>
                 </div>
               )}
@@ -749,13 +768,13 @@ export default function Music() {
                 <div>
                   <h2 className="section-title mb-3">Songs</h2>
                   <div className="card p-2 sm:p-3 space-y-0.5">
-                    {filteredSongs.slice(0, 60).map((s, i) => (
+                    {filteredSongs.slice(0, visibleCount).map((s, i) => (
                       <SongRow
                         key={s.id}
                         song={s}
                         index={i}
                         showArt
-                        onPlay={() => playSong(s, filteredSongs.slice(0, 60))}
+                        onPlay={() => playSong(s, filteredSongs)}
                         isCurrent={player.current?.id === s.id}
                         isPlaying={player.playing}
                         isFav={favIds.has(s.id)}
@@ -851,7 +870,7 @@ export default function Music() {
                   <EmptyState icon={<Icon.Grid size={26} />} title="No albums" subtitle="Albums in your library will show here." />
                 ) : (
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                    {albums.map(a => <AlbumCard key={a.id} album={a} onClick={() => setOpenAlbum(a)} />)}
+                    {albums.slice(0, visibleCount).map(a => <AlbumCard key={a.id} album={a} onClick={() => setOpenAlbum(a)} />)}
                   </div>
                 )
               )}
@@ -862,7 +881,7 @@ export default function Music() {
                   <EmptyState icon={<Icon.Music size={26} />} title="No artists" subtitle="Artists in your library will show here." />
                 ) : (
                   <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-4">
-                    {artists.map(a => <ArtistCard key={a.id} item={a} onClick={() => setOpenArtistItem(a)} />)}
+                    {artists.slice(0, visibleCount).map(a => <ArtistCard key={a.id} item={a} onClick={() => setOpenArtistItem(a)} />)}
                   </div>
                 )
               )}
@@ -874,7 +893,7 @@ export default function Music() {
                     <EmptyState icon={<Icon.List size={24} />} title="No songs" subtitle="Songs in your library will show here." />
                   ) : (
                     <div className="space-y-0.5">
-                      {songs.map((s, i) => (
+                      {songs.slice(0, visibleCount).map((s, i) => (
                         <SongRow
                           key={s.id}
                           song={s}
@@ -925,7 +944,7 @@ export default function Music() {
                     <EmptyState icon={<Icon.Heart size={26} />} title="No liked songs yet" subtitle="Tap the heart on any song to save it here." />
                   ) : (
                     <div className="card p-2 sm:p-3 space-y-0.5">
-                      {likedSongs.map((s, i) => (
+                      {likedSongs.slice(0, visibleCount).map((s, i) => (
                         <SongRow
                           key={s.id}
                           song={s}
@@ -943,6 +962,12 @@ export default function Music() {
                 </div>
               )}
             </>
+          )}
+          {visibleCount < visibleTotal && (
+            <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, visibleTotal))}
+              className="btn-secondary mx-auto mt-6">
+              Show more <span className="muted text-xs">({visibleTotal - visibleCount} remaining)</span>
+            </button>
           )}
         </>
       )}

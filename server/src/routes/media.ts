@@ -33,6 +33,15 @@ function overlayItems(userId: number, items: MediaItem[]): MediaItem[] {
   return items.map(i => overlayItem(i, rows.get(i.id)));
 }
 
+async function libraryItems(req: AuthedRequest, type: string, params: Record<string, any> = {}): Promise<MediaItem[]> {
+  const raw = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
+  const requested = Number(raw);
+  if (Number.isFinite(requested) && requested > 0) {
+    return jf.listByType(type, { ...params, Limit: Math.min(500, Math.floor(requested)) });
+  }
+  return jf.listAllByType(type, params);
+}
+
 async function resumeItems(userId: number, media: 'video' | 'audio', limit = 20): Promise<MediaItem[]> {
   const rows = progress.resume(userId, media, limit);
   const items = await Promise.all(rows.map(async row => {
@@ -46,33 +55,33 @@ async function resumeItems(userId: number, media: 'video' | 'audio', limit = 20)
 
 // Movies
 r.get('/movies', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await jf.listByType('Movie', { SortBy: 'DateCreated', SortOrder: 'Descending' }))); }
+  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Movie', { SortBy: 'DateCreated', SortOrder: 'Descending' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 
 // Series
 r.get('/series', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await jf.listByType('Series', { SortBy: 'SortName' }))); }
+  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Series', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 
 // Music: artists / albums / songs
 r.get('/music/albums', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await jf.listByType('MusicAlbum', { SortBy: 'SortName' }))); }
+  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'MusicAlbum', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 r.get('/music/artists', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await jf.listByType('MusicArtist', { SortBy: 'SortName' }))); }
+  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'MusicArtist', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 r.get('/music/songs', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await jf.listByType('Audio', { SortBy: 'SortName', Limit: 500 }))); }
+  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Audio', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 
 // Personal videos (Home videos / everything with MediaType Video not Movie/Episode)
 r.get('/videos', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await jf.listByType('Video', { SortBy: 'DateCreated', SortOrder: 'Descending' }))); }
+  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Video', { SortBy: 'DateCreated', SortOrder: 'Descending' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 

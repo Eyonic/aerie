@@ -32,7 +32,12 @@ function overlayBooks(userId: number, books: Book[]): Book[] {
 }
 
 r.get('/audiobooks', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayBooks(req.user!.id, await abs.allBooks('book'))); } catch (e) { if (!abs.configured()) return res.json([]); next(e); }
+  try {
+    const raw = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
+    const limit = Math.min(500, Math.max(0, Math.floor(Number(raw) || 0)));
+    const books = await abs.allBooks('book');
+    res.json(overlayBooks(req.user!.id, limit ? books.slice(0, limit) : books));
+  } catch (e) { if (!abs.configured()) return res.json([]); next(e); }
 });
 r.get('/podcasts', async (req: AuthedRequest, res, next) => {
   try { res.json(overlayBooks(req.user!.id, await abs.allBooks('podcast'))); } catch (e) { if (!abs.configured()) return res.json([]); next(e); }

@@ -504,7 +504,7 @@ export default function Audiobooks() {
   const [disabled, setDisabled] = useState(false);
   const [selected, setSelected] = useState<Book | null>(null);
   const [query, setQuery] = useState('');
-  const [visibleCount, setVisibleCount] = useState(72);
+  const [visibleCount, setVisibleCount] = useState(50);
   const loadMoreRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -542,12 +542,12 @@ export default function Audiobooks() {
 
   // Keep the full library searchable, but only mount cards in batches. Rendering
   // thousands of image cards at once was expensive even with native lazy-loading.
-  useEffect(() => { setVisibleCount(72); }, [books, query]);
+  useEffect(() => { setVisibleCount(50); }, [books, query]);
   useEffect(() => {
     const node = loadMoreRef.current;
     if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 72, filtered.length));
+      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, filtered.length));
     }, { rootMargin: '600px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
@@ -610,7 +610,7 @@ export default function Audiobooks() {
                   ))}
                 </div>
                 {visibleCount < filtered.length && (
-                  <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 72, filtered.length))}
+                  <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, filtered.length))}
                     className="btn-secondary mx-auto mt-6">
                     Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
                   </button>
