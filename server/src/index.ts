@@ -2,6 +2,7 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import compression from 'compression';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -48,6 +49,7 @@ app.use(cors());
 app.use(cookieParser());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(compression({ threshold: 1024 }));
 
 // Public
 // NOTE: `compat: 'CloudBox'` is the legacy Android captive-portal marker —
@@ -105,9 +107,18 @@ app.use('/api/dedup', dedupRouter);
 // Serve built web app (SPA)
 const webDist = path.resolve(__dirname, '../../web/dist');
 if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist));
+  // Vite filenames under /assets are content-hashed, so they can be cached
+  // permanently.  HTML must always revalidate so a deploy is picked up at once.
+  app.use('/assets', express.static(path.join(webDist, 'assets'), { maxAge: '1y', immutable: true }));
+  app.use(express.static(webDist, {
+    maxAge: '7d',
+    setHeaders: (res, file) => {
+      if (path.basename(file) === 'index.html') res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next();
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(webDist, 'index.html'));
   });
 }

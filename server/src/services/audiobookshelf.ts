@@ -16,7 +16,7 @@ async function abs(path: string, params: Record<string, any> = {}): Promise<any>
 }
 
 export function coverUrl(itemId: string): string {
-  return `/api/books/cover/${itemId}`;
+  return `/api/books/cover/${itemId}?w=480`;
 }
 export function directCoverUrl(itemId: string): string {
   return `${base}/api/items/${itemId}/cover?token=${key()}`;

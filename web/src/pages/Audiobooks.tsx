@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatDuration } from '../lib/utils';
 import { usePlayer, toast } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, ProgressBar, Badge, Spinner } from '../components/ui';
 import type { Book, Chapter } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 const SLEEP_OPTIONS = [15, 30, 45, 60];
@@ -219,7 +220,10 @@ function Cover({ book, className, iconSize = 26 }: { book: Book; className?: str
       {src && !failed ? (
         <img
           src={src}
+          srcSet={imageSrcSet(src, [240, 480])}
+          sizes="(max-width: 640px) 46vw, (max-width: 1280px) 24vw, 180px"
           loading="lazy"
+          decoding="async"
           onError={() => { failedCovers.add(src); setFailed(true); }}
           className="w-full h-full object-cover"
         />
@@ -500,6 +504,8 @@ export default function Audiobooks() {
   const [disabled, setDisabled] = useState(false);
   const [selected, setSelected] = useState<Book | null>(null);
   const [query, setQuery] = useState('');
+  const [visibleCount, setVisibleCount] = useState(72);
+  const loadMoreRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -533,6 +539,19 @@ export default function Audiobooks() {
     if (!q) return books || [];
     return (books || []).filter((b) => matchesQuery(b, q));
   }, [books, query]);
+
+  // Keep the full library searchable, but only mount cards in batches. Rendering
+  // thousands of image cards at once was expensive even with native lazy-loading.
+  useEffect(() => { setVisibleCount(72); }, [books, query]);
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 72, filtered.length));
+    }, { rootMargin: '600px 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [filtered.length, visibleCount]);
 
   if (books === null) return <PageLoader />;
 
@@ -584,11 +603,19 @@ export default function Audiobooks() {
             {filtered.length === 0 ? (
               <EmptyState icon={<Icon.Search size={26} />} title="No matches" subtitle="Try a different title or author." />
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-5">
-                {filtered.map((b) => (
-                  <BookCard key={b.id} book={b} onOpen={() => setSelected(b)} />
-                ))}
-              </div>
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-5">
+                  {filtered.slice(0, visibleCount).map((b) => (
+                    <BookCard key={b.id} book={b} onOpen={() => setSelected(b)} />
+                  ))}
+                </div>
+                {visibleCount < filtered.length && (
+                  <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 72, filtered.length))}
+                    className="btn-secondary mx-auto mt-6">
+                    Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
+                  </button>
+                )}
+              </>
             )}
           </section>
         </div>

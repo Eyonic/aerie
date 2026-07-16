@@ -7,6 +7,7 @@ import { formatRelative } from '../lib/utils';
 import { PageLoader } from '../components/ui';
 import { PosterCard, VideoPlayer } from '../components/media';
 import type { DashboardData, MediaItem, Book } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 // A horizontal, swipeable content rail (Netflix-style).
 function Rail({ title, onSeeAll, seeAllLabel = 'See all', children, count }: { title: string; onSeeAll?: () => void; seeAllLabel?: string; children: React.ReactNode; count?: number }) {
@@ -154,7 +155,7 @@ export default function Dashboard() {
         {continueBooks.map(b => (
           <button key={b.id} onClick={() => playBook(b)} className="snap-start shrink-0 w-32 sm:w-36 text-left group">
             <div className="aspect-[2/3] rounded-xl overflow-hidden bg-ink-800 shadow-card card-hover relative">
-              {b.coverUrl ? <img src={api.books.coverUrl(b.coverUrl)} loading="lazy" className="w-full h-full object-cover" /> : <div className="grid place-items-center h-full text-slate-600"><Icon.Book size={28} /></div>}
+              {b.coverUrl ? <img src={api.books.coverUrl(b.coverUrl)} srcSet={imageSrcSet(api.books.coverUrl(b.coverUrl), [240, 480])} sizes="144px" loading="lazy" decoding="async" className="w-full h-full object-cover" /> : <div className="grid place-items-center h-full text-slate-600"><Icon.Book size={28} /></div>}
               <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/30"><div className="w-11 h-11 rounded-full bg-white/90 text-ink-900 grid place-items-center"><Icon.Play size={20} /></div></div>
               <div className="absolute bottom-0 inset-x-0 h-1 bg-black/40"><div className="h-full bg-brand-500" style={{ width: `${bookPct(b)}%` }} /></div>
             </div>
@@ -215,7 +216,7 @@ export default function Dashboard() {
         {recentAlbums.map(a => (
           <button key={a.id} onClick={() => playAlbum(a)} className="snap-start shrink-0 w-32 sm:w-36 text-left group">
             <div className="aspect-square rounded-xl overflow-hidden bg-ink-800 shadow-card card-hover relative">
-              {a.posterUrl ? <img src={a.posterUrl} loading="lazy" className="w-full h-full object-cover" /> : <div className="grid place-items-center h-full text-slate-600"><Icon.Music size={26} /></div>}
+              {a.posterUrl ? <img src={a.posterUrl} srcSet={imageSrcSet(a.posterUrl, [160, 320, 480])} sizes="144px" loading="lazy" decoding="async" className="w-full h-full object-cover" /> : <div className="grid place-items-center h-full text-slate-600"><Icon.Music size={26} /></div>}
               <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/30"><div className="w-11 h-11 rounded-full bg-white/90 text-ink-900 grid place-items-center"><Icon.Play size={20} /></div></div>
             </div>
             <p className="text-sm font-medium text-white truncate mt-2">{a.name}</p>
@@ -229,7 +230,7 @@ export default function Dashboard() {
         {books.slice(0, 18).map(b => (
           <button key={b.id} onClick={() => playBook(b)} className="snap-start shrink-0 w-32 sm:w-36 text-left group">
             <div className="aspect-[2/3] rounded-xl overflow-hidden bg-ink-800 shadow-card card-hover relative">
-              {b.coverUrl ? <img src={api.books.coverUrl(b.coverUrl)} loading="lazy" className="w-full h-full object-cover" /> : <div className="grid place-items-center h-full text-slate-600"><Icon.Book size={26} /></div>}
+              {b.coverUrl ? <img src={api.books.coverUrl(b.coverUrl)} srcSet={imageSrcSet(api.books.coverUrl(b.coverUrl), [240, 480])} sizes="144px" loading="lazy" decoding="async" className="w-full h-full object-cover" /> : <div className="grid place-items-center h-full text-slate-600"><Icon.Book size={26} /></div>}
               <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/30"><div className="w-11 h-11 rounded-full bg-white/90 text-ink-900 grid place-items-center"><Icon.Play size={20} /></div></div>
               {typeof b.progressPct === 'number' && b.progressPct > 0 && b.progressPct < 99 && (
                 <div className="absolute bottom-0 inset-x-0 h-1 bg-black/40"><div className="h-full bg-brand-500" style={{ width: `${bookPct(b)}%` }} /></div>

@@ -3,6 +3,7 @@ import { Router } from 'express';
 import * as abs from '../services/audiobookshelf.js';
 import { type AuthedRequest } from '../lib/auth.js';
 import * as progress from '../services/progress.js';
+import { cachedWebp, fetchImage, imageWidth } from '../services/image-cache.js';
 import type { Book } from '../lib/model.js';
 
 const r = Router();
@@ -46,11 +47,17 @@ r.get('/item/:id', async (req: AuthedRequest, res, next) => {
 
 r.get('/cover/:id', async (req, res, next) => {
   try {
-    const upstream = await fetch(abs.directCoverUrl(req.params.id));
-    if (!upstream.ok) return res.status(404).end();
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
+    const id = String(req.params.id);
+    const width = imageWidth(req.query.w, 480, 960);
+    const cached = await cachedWebp({
+      namespace: 'audiobookshelf', key: id, width, quality: 80,
+      maxAgeMs: 7 * 86400_000,
+      source: () => fetchImage(abs.directCoverUrl(id)),
+    });
+    res.setHeader('Content-Type', 'image/webp');
     res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.end(Buffer.from(await upstream.arrayBuffer()));
+    res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+    res.sendFile(cached.file);
   } catch (e) { next(e); }
 });
 

@@ -33,15 +33,18 @@ export async function jellyUserId(): Promise<string> {
 }
 
 export function imageUrl(id: string, type = 'Primary', tag?: string): string {
-  const u = new URL(`${base()}/Items/${id}/Images/${type}`);
-  u.searchParams.set('quality', '90');
-  if (tag) u.searchParams.set('tag', tag);
-  // proxied form for the browser:
-  return `/api/media/image/${id}/${type}${tag ? `?tag=${tag}` : ''}`;
+  const width = type === 'Backdrop' ? 1280 : type === 'Thumb' ? 640 : 480;
+  const q = new URLSearchParams({ w: String(width) });
+  if (tag) q.set('tag', tag);
+  return `/api/media/image/${id}/${type}?${q}`;
 }
 
-export function directImageUrl(id: string, type = 'Primary'): string {
-  return `${base()}/Items/${id}/Images/${type}?api_key=${key()}`;
+export function directImageUrl(id: string, type = 'Primary', maxWidth?: number): string {
+  const u = new URL(`${base()}/Items/${id}/Images/${type}`);
+  u.searchParams.set('api_key', key());
+  u.searchParams.set('quality', '90');
+  if (maxWidth) u.searchParams.set('maxWidth', String(maxWidth));
+  return u.toString();
 }
 
 function mapItem(it: any): MediaItem {

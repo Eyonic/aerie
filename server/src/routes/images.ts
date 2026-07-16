@@ -1,11 +1,13 @@
 // AI Image Studio — text-to-image, img2img/inpaint, generated gallery.
 import { Router } from 'express';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { type AuthedRequest } from '../lib/auth.js';
 import { db, audit, notify } from '../lib/db.js';
 import { config } from '../config.js';
 import * as sd from '../services/images.js';
+import { cachedWebp, imageWidth } from '../services/image-cache.js';
 
 const r = Router();
 
@@ -17,9 +19,29 @@ r.get('/status', async (_req, res) => {
 r.get('/gallery', (req: AuthedRequest, res) => {
   const rows = db.prepare('SELECT * FROM generated_images WHERE user_id=? ORDER BY created_at DESC LIMIT 200').all(req.user!.id) as any[];
   res.json(rows.map(g => ({
-    id: g.id, prompt: g.prompt, url: `/api/images/file/${g.filename}`, thumbUrl: `/api/images/file/${g.filename}`,
+    id: g.id, prompt: g.prompt, url: `/api/images/file/${g.filename}`, thumbUrl: `/api/images/thumb/${g.filename}?w=640`,
     createdAt: g.created_at, width: g.width, height: g.height, workflow: g.workflow,
   })));
+});
+
+r.get('/thumb/:name', async (req, res, next) => {
+  try {
+    const name = path.basename(req.params.name);
+    const full = path.join(config.generatedDir, name);
+    const st = await fsp.stat(full);
+    const width = imageWidth(req.query.w, 640, 1280);
+    const cached = await cachedWebp({
+      namespace: 'generated', key: name, source: full,
+      sourceMtimeMs: st.mtimeMs, width, quality: 80,
+    });
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', 'private, max-age=604800, immutable');
+    res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+    res.sendFile(cached.file);
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return res.status(404).end();
+    next(e);
+  }
 });
 
 r.get('/file/:name', (req, res) => {
@@ -36,7 +58,7 @@ function recordImages(userId: number, prompt: string, b64s: string[], w: number,
     const id = 'g_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     db.prepare('INSERT INTO generated_images (id,user_id,prompt,filename,width,height,workflow) VALUES (?,?,?,?,?,?,?)')
       .run(id, userId, prompt, filename, w, h, workflow);
-    out.push({ id, prompt, url: `/api/images/file/${filename}`, thumbUrl: `/api/images/file/${filename}`, width: w, height: h, workflow });
+    out.push({ id, prompt, url: `/api/images/file/${filename}`, thumbUrl: `/api/images/thumb/${filename}?w=640`, width: w, height: h, workflow });
   }
   return out;
 }

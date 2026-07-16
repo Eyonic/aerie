@@ -62,7 +62,7 @@ function Sidebar() {
         'fixed lg:static inset-y-0 left-0 z-50 w-[248px] shrink-0 flex flex-col glass border-r border-white/[0.06] transition-transform',
         sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0')}>
         <div className="h-16 flex items-center gap-2 px-4 shrink-0">
-          <img src="/logo.png" alt="Aerie" className="w-12 h-12 object-contain shrink-0" />
+          <img src="/logo.svg" alt="Aerie" className="w-12 h-12 object-contain shrink-0" />
           <div>
             <p className="font-bold text-white tracking-tight leading-none">Aerie</p>
             <p className="text-[10px] text-slate-500 mt-0.5">private cloud</p>

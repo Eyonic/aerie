@@ -7,6 +7,7 @@ import { toast } from '../lib/store';
 import { EmptyState, Modal, Badge, Menu, Spinner } from '../components/ui';
 import { PosterCard, VideoPlayer } from '../components/media';
 import type { MediaItem } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 function runtimeLabel(min?: number) {
   if (!min) return '';
@@ -353,7 +354,7 @@ export default function Movies() {
       {hero && !filtering && (
         <div className="relative h-[44vh] min-h-[320px] sm:h-[54vh] sm:min-h-[400px] rounded-3xl overflow-hidden mb-8 shadow-float">
           {heroBg
-            ? <img src={heroBg} className="absolute inset-0 w-full h-full object-cover scale-105" />
+            ? <img src={heroBg} srcSet={imageSrcSet(heroBg, [640, 960, 1280])} sizes="100vw" decoding="async" fetchPriority="high" className="absolute inset-0 w-full h-full object-cover scale-105" />
             : <div className="absolute inset-0 bg-gradient-to-br from-brand-900 to-ink-950" />}
           <div className="absolute inset-0 bg-gradient-to-t from-ink-950 via-ink-950/60 to-transparent" />
           <div className="absolute inset-0 bg-gradient-to-r from-ink-950/90 via-ink-950/30 to-transparent" />
@@ -427,7 +428,7 @@ export default function Movies() {
           <div className="-m-5 sm:-m-6 w-[calc(100vw-2rem)] sm:w-auto max-h-[90vh] sm:max-h-[85vh] overflow-y-auto overflow-x-hidden">
             <div className="relative h-52 sm:h-72 overflow-hidden rounded-t-2xl">
               {(selected.backdropUrl || selected.posterUrl)
-                ? <img src={selected.backdropUrl || selected.posterUrl} className="w-full h-full object-cover" />
+                ? <img src={selected.backdropUrl || selected.posterUrl} srcSet={imageSrcSet(selected.backdropUrl || selected.posterUrl, [640, 960, 1280])} sizes="(max-width: 640px) 100vw, 896px" decoding="async" className="w-full h-full object-cover" />
                 : <div className="w-full h-full bg-gradient-to-br from-brand-900 to-ink-900" />}
               <div className="absolute inset-0 bg-gradient-to-t from-ink-900 via-ink-900/40 to-transparent" />
               <button
@@ -439,7 +440,7 @@ export default function Movies() {
             <div className="px-5 sm:px-8 pb-7 -mt-20 sm:-mt-24 relative flex flex-col sm:flex-row gap-5 sm:gap-6">
               <div className="w-28 sm:w-44 shrink-0 rounded-xl overflow-hidden shadow-float bg-ink-800 aspect-[2/3]">
                 {(selected.posterUrl || selected.thumbUrl)
-                  ? <img src={selected.posterUrl || selected.thumbUrl} className="w-full h-full object-cover" />
+                  ? <img src={selected.posterUrl || selected.thumbUrl} srcSet={imageSrcSet(selected.posterUrl || selected.thumbUrl, [240, 480])} sizes="(max-width: 640px) 112px, 176px" decoding="async" className="w-full h-full object-cover" />
                   : <div className="w-full h-full grid place-items-center text-slate-600"><Icon.Movie size={32} /></div>}
               </div>
               <div className="flex-1 min-w-0 sm:pt-24">

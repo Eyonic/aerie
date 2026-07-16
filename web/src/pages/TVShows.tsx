@@ -7,6 +7,7 @@ import { toast } from '../lib/store';
 import { Spinner, PageLoader, EmptyState, PageHeader, Modal, Badge, Menu } from '../components/ui';
 import { PosterCard, VideoPlayer } from '../components/media';
 import type { MediaItem } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 function runtimeLabel(m?: number) {
   if (!m) return '';
@@ -49,7 +50,8 @@ function EpisodeRow({ ep, index, onPlay, forceWatched }: { ep: MediaItem; index:
     >
       <div className="relative w-32 sm:w-48 shrink-0 aspect-video rounded-lg overflow-hidden bg-ink-800 shadow-card">
         {thumb ? (
-          <img src={thumb} loading="lazy" className="w-full h-full object-cover" />
+          <img src={thumb} srcSet={imageSrcSet(thumb, [320, 640])} sizes="(max-width: 640px) 128px, 192px"
+            loading="lazy" decoding="async" className="w-full h-full object-cover" />
         ) : (
           <div className="w-full h-full grid place-items-center text-slate-600"><Icon.TV size={22} /></div>
         )}
@@ -166,7 +168,7 @@ function SeriesDetail({ series, onClose, onPlay, watched, onToggleWatched, isWat
         {/* Cinematic header */}
         <div className="relative h-56 sm:h-72 overflow-hidden">
           {backdrop ? (
-            <img src={backdrop} className="w-full h-full object-cover" />
+            <img src={backdrop} srcSet={imageSrcSet(backdrop, [640, 960, 1280])} sizes="(max-width: 640px) 100vw, 896px" decoding="async" className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full grid place-items-center bg-ink-800 text-slate-700"><Icon.TV size={48} /></div>
           )}
@@ -418,7 +420,7 @@ export default function TVShows() {
                   >
                     <div className="relative aspect-video rounded-xl overflow-hidden bg-ink-800 shadow-card card-hover">
                       {(ep.thumbUrl || ep.backdropUrl || ep.posterUrl) ? (
-                        <img src={ep.thumbUrl || ep.backdropUrl || ep.posterUrl} loading="lazy" className="w-full h-full object-cover" />
+                        <img src={ep.thumbUrl || ep.backdropUrl || ep.posterUrl} srcSet={imageSrcSet(ep.thumbUrl || ep.backdropUrl || ep.posterUrl, [320, 640])} sizes="256px" loading="lazy" decoding="async" className="w-full h-full object-cover" />
                       ) : (
                         <div className="w-full h-full grid place-items-center text-slate-600"><Icon.TV size={26} /></div>
                       )}

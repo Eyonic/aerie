@@ -18,8 +18,9 @@
     "check": "tsc -p tsconfig.check.json"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
     "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.8.1",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "express": "^4.21.2",
@@ -30,8 +31,9 @@
     "tsx": "^4.19.2"
   },
   "devDependencies": {
-    "typescript": "^6.0.3",
+    "@types/compression": "^1.8.1",
+    "@types/express": "^5",
     "@types/node": "^24",
-    "@types/express": "^5"
+    "typescript": "^6.0.3"
   }
 }

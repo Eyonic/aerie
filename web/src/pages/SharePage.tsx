@@ -40,7 +40,7 @@ export default function SharePage() {
     <div className="min-h-full grid place-items-center p-4 bg-ink-950">
       <div className="w-full max-w-2xl">
         <div className="flex items-center gap-2.5 mb-6 justify-center">
-          <div className="w-9 h-9 rounded-xl bg-ink-900 border border-white/10 overflow-hidden grid place-items-center"><img src="/logo.png" alt="Aerie" className="w-full h-full object-contain" /></div>
+          <div className="w-9 h-9 rounded-xl bg-ink-900 border border-white/10 overflow-hidden grid place-items-center"><img src="/logo.svg" alt="Aerie" className="w-full h-full object-contain" /></div>
           <span className="font-bold text-white text-lg">Aerie</span>
         </div>
 

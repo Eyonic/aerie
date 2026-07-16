@@ -4,6 +4,7 @@ import { type AuthedRequest } from '../lib/auth.js';
 import { audit, db } from '../lib/db.js';
 import * as js from '../services/jellyseerr.js';
 import * as lidarr from '../services/lidarr.js';
+import { cachedWebp, imageWidth } from '../services/image-cache.js';
 
 const r = Router();
 
@@ -107,11 +108,22 @@ r.post('/', async (req: AuthedRequest, res, next) => {
 
 r.get('/image', async (req, res, next) => {
   try {
-    const img = await js.imageProxy(String(req.query.p || ''));
-    if (!img) return res.status(404).end();
-    res.setHeader('Content-Type', img.type);
+    const p = String(req.query.p || '');
+    if (!p) return res.status(400).end();
+    const width = imageWidth(req.query.w, 480, 1280);
+    const cached = await cachedWebp({
+      namespace: 'requests', key: p, width, quality: 80,
+      maxAgeMs: 30 * 86400_000,
+      source: async () => {
+        const img = await js.imageProxy(p, width);
+        if (!img) throw Object.assign(new Error('image_not_found'), { status: 404 });
+        return img.buf;
+      },
+    });
+    res.setHeader('Content-Type', 'image/webp');
     res.setHeader('Cache-Control', 'public, max-age=604800');
-    res.end(img.buf);
+    res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+    res.sendFile(cached.file);
   } catch (e) { next(e); }
 });
 

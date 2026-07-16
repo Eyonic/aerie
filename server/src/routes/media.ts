@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { type AuthedRequest } from '../lib/auth.js';
 import * as jf from '../services/jellyfin.js';
 import * as progress from '../services/progress.js';
+import { cachedWebp, fetchImage, imageWidth } from '../services/image-cache.js';
 import type { MediaItem } from '../lib/model.js';
 
 const r = Router();
@@ -101,13 +102,24 @@ r.get('/search', async (req, res, next) => {
 // Image proxy
 r.get('/image/:id/:type', async (req, res, next) => {
   try {
-    const url = jf.directImageUrl(String(req.params.id), String(req.params.type));
-    const upstream = await fetch(url);
-    if (!upstream.ok || !upstream.body) return res.status(404).end();
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    res.end(buf);
+    const id = String(req.params.id);
+    const type = String(req.params.type);
+    if (!/^(Primary|Backdrop|Thumb|Logo|Banner|Art)$/i.test(type)) return res.status(400).end();
+    const fallback = type.toLowerCase() === 'backdrop' ? 1280 : type.toLowerCase() === 'thumb' ? 640 : 480;
+    const width = imageWidth(req.query.w, fallback, type.toLowerCase() === 'backdrop' ? 1920 : 960);
+    const tag = String(req.query.tag || '').slice(0, 160);
+    const cached = await cachedWebp({
+      namespace: 'jellyfin',
+      key: `${id}:${type}:${tag || 'untagged'}`,
+      width,
+      quality: type.toLowerCase() === 'backdrop' ? 76 : 80,
+      maxAgeMs: tag ? undefined : 7 * 86400_000,
+      source: () => fetchImage(jf.directImageUrl(id, type, width)),
+    });
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', tag ? 'private, max-age=604800, immutable' : 'private, max-age=86400');
+    res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+    res.sendFile(cached.file);
   } catch (e) { next(e); }
 });
 

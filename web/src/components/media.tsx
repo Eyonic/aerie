@@ -9,6 +9,7 @@ import { toast } from '../lib/store';
 import { Spinner } from './ui';
 import { VideoUpscaler, upscaleSupported } from '../lib/upscaler';
 import { publicUrlSync, translateLangSync } from '../lib/serverinfo';
+import { imageSrcSet } from '../lib/images';
 
 // 2K GPU upscaling is desktop-only (Windows/Linux): phone GPUs and Android's
 // WebView can't sustain per-frame FSR at 1440p, and macOS stays on AirPlay.
@@ -19,10 +20,12 @@ const UPSCALE_PLATFORM = typeof navigator !== 'undefined'
 export function PosterCard({ item, onClick, aspect = 'portrait' }: { item: MediaItem; onClick?: () => void; aspect?: 'portrait' | 'landscape' | 'square' }) {
   const ar = aspect === 'portrait' ? 'aspect-[2/3]' : aspect === 'landscape' ? 'aspect-video' : 'aspect-square';
   const img = item.posterUrl || item.thumbUrl || item.backdropUrl;
+  const widths = aspect === 'landscape' ? [320, 640, 960] : [240, 480];
+  const sizes = aspect === 'landscape' ? '(max-width: 640px) 80vw, 256px' : '(max-width: 640px) 44vw, 144px';
   return (
     <button onClick={onClick} className="group text-left w-full">
       <div className={cx('relative rounded-xl overflow-hidden bg-ink-800 shadow-card card-hover', ar)}>
-        {img ? <img src={img} loading="lazy" className="w-full h-full object-cover" /> :
+        {img ? <img src={img} srcSet={imageSrcSet(img, widths)} sizes={sizes} loading="lazy" decoding="async" className="w-full h-full object-cover" /> :
           <div className="w-full h-full grid place-items-center text-slate-600"><Icon.Movie size={30} /></div>}
         <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
         <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity">

@@ -17,8 +17,8 @@ async function js(path: string, opts: RequestInit = {}): Promise<any> {
   return res.json();
 }
 
-function posterUrl(p?: string): string | undefined {
-  return p ? `/api/requests/image?p=${encodeURIComponent(p)}` : undefined;
+function posterUrl(p?: string, width = 480): string | undefined {
+  return p ? `/api/requests/image?p=${encodeURIComponent(p)}&w=${width}` : undefined;
 }
 
 export async function status(): Promise<boolean> {
@@ -37,8 +37,8 @@ export async function search(query: string): Promise<any[]> {
       title: r.title || r.name,
       overview: r.overview,
       year: (r.releaseDate || r.firstAirDate || '').slice(0, 4),
-      posterUrl: posterUrl(r.posterPath),
-      backdropUrl: posterUrl(r.backdropPath),
+      posterUrl: posterUrl(r.posterPath, 480),
+      backdropUrl: posterUrl(r.backdropPath, 1280),
       rating: r.voteAverage,
       status: r.mediaInfo?.status,        // 0 unknown,1 pending,2 processing,3 partial,4 partially avail,5 available
     }));
@@ -52,7 +52,7 @@ export async function trending(): Promise<any[]> {
       .map((r: any) => ({
         id: r.id, tmdbId: r.id, mediaType: r.mediaType, title: r.title || r.name,
         overview: r.overview, year: (r.releaseDate || r.firstAirDate || '').slice(0, 4),
-        posterUrl: posterUrl(r.posterPath), backdropUrl: posterUrl(r.backdropPath),
+        posterUrl: posterUrl(r.posterPath, 480), backdropUrl: posterUrl(r.backdropPath, 1280),
         rating: r.voteAverage, status: r.mediaInfo?.status,
       }));
   } catch { return []; }
@@ -108,7 +108,7 @@ export async function listRequests(): Promise<any[]> {
 // proxy can't be aimed at the LAN or arbitrary internet hosts.
 const IMAGE_HOSTS = ['lidarr.audio', 'fanart.tv', 'coverartarchive.org', 'dzcdn.net'];
 
-export async function imageProxy(p: string): Promise<{ buf: Buffer; type: string } | null> {
+export async function imageProxy(p: string, width = 480): Promise<{ buf: Buffer; type: string } | null> {
   // TMDB images (relative paths) and allowlisted artist-art URLs are public;
   // proxy them same-origin so browsers never hotlink external hosts.
   try {
@@ -119,7 +119,8 @@ export async function imageProxy(p: string): Promise<{ buf: Buffer; type: string
       url = u.toString();
     } else {
       const clean = p.startsWith('/') ? p : `/${p}`;
-      url = `https://image.tmdb.org/t/p/w500${clean}`;
+      const tmdbSize = width <= 320 ? 'w342' : width <= 480 ? 'w500' : width <= 960 ? 'w780' : 'w1280';
+      url = `https://image.tmdb.org/t/p/${tmdbSize}${clean}`;
     }
     const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) return null;

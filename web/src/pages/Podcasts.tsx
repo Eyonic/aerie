@@ -5,6 +5,7 @@ import { usePlayer, toast } from '../lib/store';
 import { cx, formatDuration } from '../lib/utils';
 import { PageLoader, EmptyState, PageHeader, Modal, ProgressBar, Badge, Spinner } from '../components/ui';
 import type { Book, Chapter } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 type ShowDetail = Book & { chapters: Chapter[]; overview?: string };
 
@@ -40,7 +41,8 @@ function Cover({ url, className = '', size = 22 }: { url?: string; className?: s
   return (
     <div className={cx('bg-ink-700 overflow-hidden grid place-items-center text-slate-600', className)}>
       {url ? (
-        <img src={api.books.coverUrl(url)} loading="lazy" className="w-full h-full object-cover" />
+        <img src={api.books.coverUrl(url)} srcSet={imageSrcSet(api.books.coverUrl(url), [240, 480])}
+          sizes="(max-width: 640px) 46vw, 220px" loading="lazy" decoding="async" className="w-full h-full object-cover" />
       ) : (
         <Icon.Podcast size={size} />
       )}

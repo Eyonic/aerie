@@ -3,11 +3,11 @@ import multer from 'multer';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import sharp from 'sharp';
 import { type AuthedRequest } from '../lib/auth.js';
 import { db, audit, notify } from '../lib/db.js';
 import { config } from '../config.js';
 import * as storage from '../services/storage.js';
+import { cachedWebp, imageWidth } from '../services/image-cache.js';
 
 const r = Router();
 // temp dir lives under FILES_ROOT so the final move is a same-mount rename
@@ -221,10 +221,15 @@ r.get('/thumb', async (req: AuthedRequest, res, next) => {
     const { real, stat } = storage.statReal(u(req).username, p);
     const kind = storage.kindOf(path.basename(p), false);
     if (kind === 'image') {
+      const width = imageWidth(req.query.w, 480, 960);
+      const cached = await cachedWebp({
+        namespace: 'files', key: `${u(req).id}:${p}`, source: real,
+        sourceMtimeMs: stat.mtimeMs, width, quality: 78,
+      });
       res.setHeader('Content-Type', 'image/webp');
       res.setHeader('Cache-Control', 'private, max-age=86400');
-      const buf = await sharp(real, { failOn: 'none' }).rotate().resize(400, 400, { fit: 'inside' }).webp({ quality: 78 }).toBuffer();
-      return res.end(buf);
+      res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+      return res.sendFile(cached.file);
     }
     // videos: no thumb extraction here (ffmpeg optional) -> 204
     res.status(204).end();

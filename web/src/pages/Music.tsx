@@ -6,6 +6,7 @@ import { usePlayer, useAuth, toast } from '../lib/store';
 import type { Track } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, Spinner } from '../components/ui';
 import type { MediaItem } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 type Tab = 'albums' | 'artists' | 'songs' | 'playlists';
 
@@ -106,7 +107,8 @@ function CoverArt({ src, title, className, shape = 'square', textClass = 'text-2
   return (
     <div className={cx('relative w-full h-full overflow-hidden bg-ink-800', shape === 'circle' ? 'rounded-full' : '', className)}>
       {show ? (
-        <img src={src!} loading="lazy" onError={() => setFailed(true)} className="w-full h-full object-cover" />
+        <img src={src!} srcSet={imageSrcSet(src!, [160, 320, 480])} sizes="(max-width: 640px) 45vw, 240px"
+          loading="lazy" decoding="async" onError={() => setFailed(true)} className="w-full h-full object-cover" />
       ) : (
         <div
           className="w-full h-full grid place-items-center"

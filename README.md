@@ -18,6 +18,7 @@
 - **TV casting** — server-side Google Cast: send any movie to a Chromecast straight from the web app, with pause/seek controls
 - **Music** — albums, artists, AI "made for you" mixes, and a phone-friendly player with media-session controls
 - **Audiobooks & Podcasts** — multi-file books, resume across devices, backed by [Audiobookshelf](https://www.audiobookshelf.org)
+- **Optimized artwork** — responsive WebP posters, covers and thumbnails with a persistent server-side cache under the Aerie data directory
 - **Requests** — family members request movies/TV via [Jellyseerr](https://github.com/Fallenbagel/jellyseerr) and music via [Lidarr](https://lidarr.audio), right from the app
 - **AI suite** — chat assistant with tool use (search your files, storage reports, playlists), image generation & inpainting (ComfyUI), music generation (ACE-Step), and voice input (Whisper) — using a cloud API (DeepSeek) or fully local (Ollama)
 - **Apps everywhere** — installable PWA plus native Windows/Linux desktop apps and an Android APK with media notifications and LAN/cloud auto-failover
@@ -166,5 +167,4 @@ Movies stored in 1080p can be rendered at 2560×1440 by the *viewing* machine: t
 ## License
 
 MIT — see [LICENSE](LICENSE). Includes a port of AMD FidelityFX Super Resolution 1.0 and OpenStreetMap-based maps; attributions in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
 

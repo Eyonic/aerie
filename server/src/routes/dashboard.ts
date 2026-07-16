@@ -109,7 +109,7 @@ r.get('/', async (req: AuthedRequest, res) => {
     continueWatching,
     continueListening,
     aiJobs: aiJobs.map(j => ({ id: j.id, type: j.type, status: j.status, prompt: j.prompt, progress: j.progress, createdAt: j.created_at, finishedAt: j.finished_at, resultUrls: j.result_urls ? JSON.parse(j.result_urls) : [] })),
-    generatedImages: genImages.map(g => ({ id: g.id, prompt: g.prompt, url: `/api/images/file/${g.filename}`, thumbUrl: `/api/images/file/${g.filename}`, createdAt: g.created_at, width: g.width, height: g.height, workflow: g.workflow })),
+    generatedImages: genImages.map(g => ({ id: g.id, prompt: g.prompt, url: `/api/images/file/${g.filename}`, thumbUrl: `/api/images/thumb/${g.filename}?w=640`, createdAt: g.created_at, width: g.width, height: g.height, workflow: g.workflow })),
     backups,
     health,
     services,
