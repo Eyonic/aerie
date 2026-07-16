@@ -15,6 +15,15 @@ type JobTask = { id: string; userId: number; run: (jobId: string) => Promise<str
 const queue: JobTask[] = [];
 let active = false;
 
+// Work is held in this process, so a queued/running row left in SQLite at boot
+// belongs to a worker that no longer exists. Mark it clearly instead of letting
+// the player's recovered progress bar sit at the same percentage forever.
+db.prepare(`
+  UPDATE jobs
+  SET status='error', error='Interrupted by a server restart. Start the subtitle job again.', finished_at=datetime('now')
+  WHERE type='subtitles' AND status IN ('queued','running')
+`).run();
+
 const uid = (p: string) => `${p}_${Date.now().toString(36)}${crypto.randomBytes(4).toString('hex')}`;
 const full = (filename: string) => path.join(config.subtitlesDir, path.basename(filename));
 const now = () => new Date().toISOString();
