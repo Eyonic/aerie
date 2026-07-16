@@ -690,6 +690,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           tools={[
             { key: 'gen', label: subJob?.action === 'Generating' ? `Generating… ${Math.round(subJob.progress * 100)}%` : 'Generate English (AI)', disabled: !!subJob, onClick: () => startSubJob('Generating', () => api.subtitles.generate(item.id)) },
             { key: 'tr', label: subJob?.action === 'Translating' ? `Translating… ${Math.round(subJob.progress * 100)}%` : `Translate current${translateLangSync() ? ` to ${translateLangSync()}` : ''}`, disabled: !!subJob || subIdx == null, onClick: () => { const s = currentSource(); if (s) startSubJob('Translating', () => api.subtitles.translate(item.id, s)); } },
+            { key: 'tr-en', label: 'Translate current to English', disabled: !!subJob || subIdx == null, onClick: () => { const s = currentSource(); if (s) startSubJob('Translating', () => api.subtitles.translate(item.id, s, 'en')); } },
             { key: 'sync', label: subJob?.action === 'Syncing' ? `Syncing… ${Math.round(subJob.progress * 100)}%` : 'Sync current to audio', disabled: !!subJob || subIdx == null, onClick: () => { const s = currentSource(); if (s) startSubJob('Syncing', () => api.subtitles.sync(item.id, s)); } },
             { key: 'clean', label: 'Clean up current', disabled: !!subJob || subIdx == null, onClick: () => { setCcOpen(false); cleanCurrent(); } },
           ]} />
