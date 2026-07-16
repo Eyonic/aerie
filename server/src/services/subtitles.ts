@@ -167,7 +167,9 @@ function toVtt(cues: Cue[]) {
 
 async function generate(jobId: string, itemId: string, userId: number) {
   const src = await resolveMediaPath(itemId);
+  progress(jobId, 0.01);
   const dur = await durationSec(itemId, src);
+  progress(jobId, 0.02);
   const proc = ffmpegPcm(src);
   const cues: Cue[] = [];
   let carry = Buffer.alloc(0), frames: { b: Buffer; r: number; t: number }[] = [], frameNo = 0;
@@ -183,7 +185,7 @@ async function generate(jobId: string, itemId: string, userId: number) {
       catch { if (attempt) return; }
     }
     if (!garbage(text)) cues.push(...cuesForSegment(start, end, text));
-    if (dur) progress(jobId, end / dur);
+    if (dur) progress(jobId, 0.02 + (end / dur) * 0.96);
   };
   for await (const chunk of proc.stdout) {
     carry = Buffer.concat([carry, chunk as Buffer]);
@@ -204,6 +206,7 @@ async function generate(jobId: string, itemId: string, userId: number) {
   if (frames.length >= 50) await cut(frames.length);
   if (proc.exitCode && proc.exitCode !== 0) throw new Error('ffmpeg failed');
   if (!cues.length) throw new Error('no speech detected in the audio');
+  progress(jobId, 0.99);
   const row = insertSubtitle(itemId, 'en', 'English (AI)', 'generated', userId, toVtt(cues));
   return row.id;
 }
@@ -273,14 +276,16 @@ async function translateBatch(batch: { i: number; text: string }[], lang: string
 
 async function translate(jobId: string, itemId: string, source: SubtitleSource, targetLang: string, userId: number) {
   const src = await sourceBytes(itemId, source);
+  progress(jobId, 0.02);
   const cues = parseSubs(decodeSubtitle(src.bytes));
   const total = Math.max(1, Math.ceil(cues.length / 40));
   for (let b = 0; b < total; b++) {
     const slice = cues.slice(b * 40, b * 40 + 40).map((c, i) => ({ i, text: c.text }));
     const translated = await translateBatch(slice, targetLang);
     translated.forEach((t, i) => { cues[b * 40 + i].text = t; });
-    progress(jobId, (b + 1) / total);
+    progress(jobId, 0.05 + ((b + 1) / total) * 0.93);
   }
+  progress(jobId, 0.99);
   return insertSubtitle(itemId, targetLang, `${languageName(targetLang)} (AI)`, 'translated', userId, toVtt(cues)).id;
 }
 
@@ -317,7 +322,7 @@ async function audioEnvelope(itemId: string, jobId: string) {
     carry = Buffer.concat([carry, chunk as Buffer]);
     while (carry.length >= 640) {
       frame = Buffer.concat([frame, carry.subarray(0, 640)]); carry = carry.subarray(640);
-      if (frame.length >= 3200) { energy.push(rms(frame)); frame = Buffer.alloc(0); idx++; if (dur && idx % 50 === 0) progress(jobId, (idx / 10) / dur * 0.5); }
+      if (frame.length >= 3200) { energy.push(rms(frame)); frame = Buffer.alloc(0); idx++; if (dur && idx % 50 === 0) progress(jobId, 0.05 + ((idx / 10) / dur) * 0.65); }
     }
   }
   const n = energy.length, half = 50; // 100-frame (10 s) rolling window
@@ -380,9 +385,12 @@ const FPS_RATIOS = [1, 23.976 / 25, 25 / 23.976, 23.976 / 24, 24 / 23.976];
 
 async function sync(jobId: string, itemId: string, source: SubtitleSource, userId: number) {
   const src = await sourceBytes(itemId, source);
+  progress(jobId, 0.02);
   const cues = parseSubs(decodeSubtitle(src.bytes));
   if (!cues.length) throw new Error('subtitle has no readable cues');
+  progress(jobId, 0.05);
   const a = await audioEnvelope(itemId, jobId);
+  progress(jobId, 0.72);
   const maxEnd = Math.max(...cues.map(c => c.end), 0);
   const envFor = (ratio: number) => {
     const len = Math.max(a.length, Math.ceil(maxEnd * ratio * 10) + 1);
@@ -391,10 +399,11 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
   };
   // Pick the framerate ratio whose best offset gives the most prominent peak.
   let best = { score: -Infinity, off: 0, median: 0, ratio: 1 };
-  for (const ratio of FPS_RATIOS) {
+  for (const [index, ratio] of FPS_RATIOS.entries()) {
     const { aP, s } = envFor(ratio);
     const r = correlate(aP, s);
     if (r.score - r.median > best.score - best.median) best = { ...r, ratio };
+    progress(jobId, 0.75 + ((index + 1) / FPS_RATIOS.length) * 0.17);
   }
   // Energy↔subtitle correlation tops out around 0.1 even on a perfect match, so
   // gate on the peak's prominence over the landscape, not an absolute r.
@@ -404,6 +413,7 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
   const { aP, s } = envFor(best.ratio);
   const mid = Math.floor(a.length / 2);
   const h1 = correlate(aP, s, 0, mid), h2 = correlate(aP, s, mid, a.length);
+  progress(jobId, 0.96);
   const shifted = cues.map(c => ({ ...c }));
   // Residual drift after ratio scaling: if the two halves disagree by >2s and both
   // are confident, fit a line through their centres; otherwise a constant offset.
@@ -419,6 +429,7 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
     const off = best.off / 10;
     shifted.forEach(c => { c.start = Math.max(0, c.start * best.ratio + off); c.end = Math.max(c.start + 0.1, c.end * best.ratio + off); });
   }
+  progress(jobId, 0.99);
   return insertSubtitle(itemId, src.lang, `${src.label} (synced)`, 'synced', userId, toVtt(shifted)).id;
 }
 

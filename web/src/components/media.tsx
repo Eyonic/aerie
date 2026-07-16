@@ -167,7 +167,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
   const [subTracks, setSubTracks] = useState<any[]>([]);
   const [audioIdx, setAudioIdx] = useState<number | null>(null);
   const [subIdx, setSubIdx] = useState<SubSel>(null); // null = Off
-  const [subJob, setSubJob] = useState<{ id: string; action: string; progress: number } | null>(null);
+  const [subJob, setSubJob] = useState<{ id: string; action: string; status: string; progress: number } | null>(null);
   const [ccOpen, setCcOpen] = useState(false);
   const [audioOpen, setAudioOpen] = useState(false);
   // Refs so the (re)load path can re-apply the chosen subtitle after an audio swap
@@ -437,7 +437,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     return s.custom ? { type: 'custom', id: s.id } : { type: 'jf', mediaSourceId, index: s.index };
   };
   const startSubJob = async (action: string, fn: () => Promise<{ jobId: string }>) => {
-    try { const r = await fn(); setSubJob({ id: r.jobId, action, progress: 0 }); setCcOpen(false); }
+    try { const r = await fn(); setSubJob({ id: r.jobId, action, status: 'queued', progress: 0 }); setCcOpen(false); }
     catch (e: any) { toast(`${action} failed`, 'error', String(e?.message || 'Could not start subtitle job.')); }
   };
   const cleanCurrent = async () => {
@@ -449,20 +449,36 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     } catch (e: any) { toast('Cleanup failed', 'error', String(e?.message || 'Could not clean subtitles.')); }
   };
   useEffect(() => {
+    let alive = true;
+    setSubJob(null);
+    api.subtitles.active(item.id).then(({ job }) => {
+      if (alive && job) setSubJob(current => current || job);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [item.id]);
+  useEffect(() => {
     if (!subJob) return;
-    const t = setInterval(() => {
-      api.subtitles.job(subJob.id).then(async j => {
+    let settled = false;
+    let t: ReturnType<typeof setInterval> | undefined;
+    const poll = async () => {
+      try {
+        const j = await api.subtitles.job(subJob.id);
+        if (settled) return;
         if (j.status === 'done') {
-          clearInterval(t); setSubJob(null);
+          settled = true; if (t) clearInterval(t); setSubJob(null);
           await refreshCustomSubs(j.subtitleId);
           toast(`${subJob.action} complete`, 'success', item.name);
         } else if (j.status === 'error') {
-          clearInterval(t); setSubJob(null);
+          settled = true; if (t) clearInterval(t); setSubJob(null);
           toast(`${subJob.action} failed`, 'error', j.error || 'Subtitle job failed.');
-        } else setSubJob(s => s ? { ...s, progress: j.progress || 0 } : s);
-      }).catch(() => {});
-    }, 3000);
-    return () => clearInterval(t);
+        } else {
+          setSubJob(s => s ? { ...s, action: j.action || s.action, status: j.status, progress: Math.max(s.progress, j.progress || 0) } : s);
+        }
+      } catch { /* keep polling through brief network interruptions */ }
+    };
+    poll();
+    t = setInterval(poll, 2000);
+    return () => { settled = true; if (t) clearInterval(t); };
   }, [subJob?.id]);
   const chooseAudio = (index: number | null) => {
     setAudioIdx(index); setAudioOpen(false);
@@ -629,6 +645,14 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     else el.requestFullscreen?.().catch(() => {});
   };
+  const subJobPct = subJob ? Math.max(0, Math.min(99, Math.round(subJob.progress * 100))) : 0;
+  const subJobDetail = subJob?.status === 'queued'
+    ? 'Waiting for the subtitle worker…'
+    : subJob?.action === 'Generating'
+      ? (subJobPct < 2 ? 'Preparing movie audio…' : 'Transcribing movie audio…')
+      : subJob?.action === 'Translating'
+        ? 'Translating subtitle lines…'
+        : 'Matching subtitles to the dialogue…';
 
   return (
     <div ref={containerRef} className="fixed inset-0 z-[300] bg-black flex flex-col animate-fade-in"
@@ -706,6 +730,26 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           </>
         )}
       </div>
+      {subJob && (
+        <div className="absolute left-1/2 -translate-x-1/2 top-[calc(env(safe-area-inset-top)+4.75rem)] z-20 w-[calc(100%-2rem)] max-w-md rounded-2xl border border-white/10 bg-black/80 backdrop-blur-xl px-4 py-3 shadow-float pointer-events-none"
+          role="progressbar" aria-label={`${subJob.action} AI subtitles`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={subJobPct}>
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-brand-500/20 text-brand-300 grid place-items-center shrink-0"><Icon.Sparkles size={18} /></div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-white truncate">{subJob.action} AI subtitles</p>
+                <span className="text-sm font-semibold text-brand-300 tabular-nums shrink-0">{subJobPct}%</span>
+              </div>
+              <p className="text-xs text-slate-400 truncate mt-0.5">{subJobDetail}</p>
+            </div>
+          </div>
+          <div className="relative h-2 mt-3 rounded-full overflow-hidden bg-white/10">
+            <div className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-brand-600 to-brand-400 transition-[width] duration-500"
+              style={{ width: `${subJobPct}%` }} />
+            {subJobPct === 0 && <div className="absolute inset-y-0 left-0 w-1/4 rounded-full bg-brand-400/70 animate-pulse" />}
+          </div>
+        </div>
+      )}
       {loading && <div className="absolute inset-0 z-[3] grid place-items-center text-white"><Spinner size={40} /></div>}
       {error && <div className="absolute inset-0 z-[3] grid place-items-center text-center p-6"><div><p className="text-white mb-2">{error}</p><button className="btn-secondary" onClick={onClose}>Close</button></div></div>}
       {/* Casting overlay: the TV is playing, the local video stays paused */}

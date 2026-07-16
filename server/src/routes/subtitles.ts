@@ -8,6 +8,21 @@ import * as subs from '../services/subtitles.js';
 
 const r = Router();
 
+function jobJson(row: any) {
+  let subtitleId: string | undefined;
+  try { subtitleId = JSON.parse(row.result_urls || '[]')?.[0]; } catch { /* */ }
+  const kind = String(row.prompt || '').split(':', 1)[0];
+  const action = kind === 'translate' ? 'Translating' : kind === 'sync' ? 'Syncing' : 'Generating';
+  return {
+    id: row.id,
+    action,
+    status: row.status,
+    progress: Number(row.progress || 0),
+    error: row.error || undefined,
+    subtitleId,
+  };
+}
+
 r.get('/item/:itemId', (req, res) => {
   res.json({ subtitles: subs.list(req.params.itemId) });
 });
@@ -41,9 +56,20 @@ r.post('/cleanup', async (req: AuthedRequest, res, next) => {
 r.get('/job/:id', (req: AuthedRequest, res) => {
   const row = db.prepare('SELECT * FROM jobs WHERE id=? AND user_id=? AND type=?').get(req.params.id, req.user!.id, 'subtitles') as any;
   if (!row) return res.status(404).json({ error: 'not_found' });
-  let subtitleId: string | undefined;
-  try { subtitleId = JSON.parse(row.result_urls || '[]')?.[0]; } catch { /* */ }
-  res.json({ status: row.status, progress: Number(row.progress || 0), error: row.error || undefined, subtitleId });
+  res.json(jobJson(row));
+});
+
+// Let the player recover a long-running job after it is closed/reopened or the
+// page is refreshed. Subtitle generation can take a while for a full movie.
+r.get('/active/:itemId', (req: AuthedRequest, res) => {
+  const itemId = String(req.params.itemId);
+  const row = db.prepare(`
+    SELECT * FROM jobs
+    WHERE user_id=? AND type='subtitles' AND status IN ('queued','running')
+      AND (prompt=? OR prompt LIKE ? OR prompt=?)
+    ORDER BY created_at DESC LIMIT 1
+  `).get(req.user!.id, `generate:${itemId}`, `translate:${itemId}:%`, `sync:${itemId}`) as any;
+  res.json({ job: row ? jobJson(row) : null });
 });
 
 r.get('/file/:id', (req, res) => {
