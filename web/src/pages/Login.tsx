@@ -34,7 +34,7 @@ export default function Login() {
         <div className="absolute -top-40 -right-40 w-[500px] h-[500px] rounded-full bg-brand-400/20 blur-3xl" />
         <div className="absolute -bottom-40 -left-20 w-[400px] h-[400px] rounded-full bg-accent-pink/20 blur-3xl" />
         <div className="relative flex items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl bg-black/40 border border-white/20 backdrop-blur overflow-hidden grid place-items-center"><img src="/logo.svg" alt="Aerie" className="w-full h-full object-contain" /></div>
+          <div className="w-11 h-11 rounded-2xl bg-black/40 border border-white/20 backdrop-blur overflow-hidden grid place-items-center"><img src="/logo.svg?v=2" alt="Aerie" className="w-full h-full object-contain" /></div>
           <span className="text-2xl font-bold text-white tracking-tight">Aerie</span>
         </div>
         <div className="relative">
@@ -53,7 +53,7 @@ export default function Login() {
       <div className="flex items-center justify-center p-6 min-h-screen lg:min-h-full">
         <form onSubmit={submit} className="w-full max-w-sm animate-fade-in">
           <div className="lg:hidden flex items-center gap-3 mb-8 justify-center">
-            <div className="w-11 h-11 rounded-2xl bg-ink-950 border border-white/10 overflow-hidden grid place-items-center"><img src="/logo.svg" alt="Aerie" className="w-full h-full object-contain" /></div>
+            <div className="w-11 h-11 rounded-2xl bg-ink-950 border border-white/10 overflow-hidden grid place-items-center"><img src="/logo.svg?v=2" alt="Aerie" className="w-full h-full object-contain" /></div>
             <span className="text-2xl font-bold text-white">Aerie</span>
           </div>
           <h2 className="text-2xl font-bold text-white">Welcome back</h2>
