@@ -12,10 +12,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Keep Gradle's debug keystore outside the disposable build container. Without
+# this mount every build gets a new signing certificate and Android refuses to
+# install the APK as an update. Override the directory for CI if desired.
+SIGNING_DIR="${AERIE_ANDROID_SIGNING_DIR:-$PWD/android/.signing}"
+mkdir -p "$SIGNING_DIR"
+chmod 700 "$SIGNING_DIR"
+
 docker run --rm \
   -e AERIE_DEFAULT_URL \
   -e AERIE_LAN_URL \
   -v "$PWD/android:/project" \
+  -v "$SIGNING_DIR:/root/.android" \
   -w /project \
   gradle:8.7-jdk17 \
   bash -c '

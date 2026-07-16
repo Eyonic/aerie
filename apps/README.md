@@ -63,6 +63,9 @@ properties (`-PaerieDefaultUrl=… -PaerieLanUrl=…`) if you build without
 the script.
 
 The artifact lands in `apps/android/app/build/outputs/apk/debug/app-debug.apk`.
+The build script persists its debug signing key under `apps/android/.signing/`
+(gitignored), so later APKs can be installed over earlier builds. Back up that
+directory; losing it requires uninstalling the existing app before reinstalling.
 
 ## Publishing the apps on your server
 
