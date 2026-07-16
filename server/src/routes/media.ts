@@ -42,6 +42,28 @@ async function libraryItems(req: AuthedRequest, type: string, params: Record<str
   return jf.listAllByType(type, params);
 }
 
+function pageParams(req: AuthedRequest, defaults: Record<string, any>) {
+  const sort = String(req.query.sort || '');
+  const sortMap: Record<string, [string, string]> = {
+    recent: ['DateCreated', 'Descending'], title: ['SortName', 'Ascending'],
+    rating: ['CommunityRating', 'Descending'], year: ['ProductionYear', 'Descending'],
+  };
+  const pair = sortMap[sort];
+  return {
+    ...defaults,
+    ...(pair ? { SortBy: pair[0], SortOrder: pair[1] } : {}),
+    ...(req.query.q ? { SearchTerm: String(req.query.q).slice(0, 120) } : {}),
+    ...(req.query.genre && req.query.genre !== 'all' ? { Genres: String(req.query.genre).slice(0, 120) } : {}),
+  };
+}
+
+async function pagedLibrary(req: AuthedRequest, type: string, defaults: Record<string, any>) {
+  const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+  const limit = Math.min(100, Math.max(1, Math.floor(Number(req.query.limit) || 50)));
+  const page = await jf.pageByType(type, offset, limit, pageParams(req, defaults));
+  return { items: overlayItems(req.user!.id, page.items), total: page.total, offset, limit, hasMore: offset + page.items.length < page.total };
+}
+
 async function resumeItems(userId: number, media: 'video' | 'audio', limit = 20): Promise<MediaItem[]> {
   const rows = progress.resume(userId, media, limit);
   const items = await Promise.all(rows.map(async row => {
@@ -55,28 +77,37 @@ async function resumeItems(userId: number, media: 'video' | 'audio', limit = 20)
 
 // Movies
 r.get('/movies', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Movie', { SortBy: 'DateCreated', SortOrder: 'Descending' }))); }
+  try { res.json(req.query.paged ? await pagedLibrary(req, 'Movie', { SortBy: 'DateCreated', SortOrder: 'Descending' }) : overlayItems(req.user!.id, await libraryItems(req, 'Movie', { SortBy: 'DateCreated', SortOrder: 'Descending' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 
 // Series
 r.get('/series', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Series', { SortBy: 'SortName' }))); }
+  try { res.json(req.query.paged ? await pagedLibrary(req, 'Series', { SortBy: 'SortName' }) : overlayItems(req.user!.id, await libraryItems(req, 'Series', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 
 // Music: artists / albums / songs
 r.get('/music/albums', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'MusicAlbum', { SortBy: 'SortName' }))); }
+  try { res.json(req.query.paged ? await pagedLibrary(req, 'MusicAlbum', { SortBy: 'SortName' }) : overlayItems(req.user!.id, await libraryItems(req, 'MusicAlbum', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 r.get('/music/artists', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'MusicArtist', { SortBy: 'SortName' }))); }
+  try { res.json(req.query.paged ? await pagedLibrary(req, 'MusicArtist', { SortBy: 'SortName' }) : overlayItems(req.user!.id, await libraryItems(req, 'MusicArtist', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 r.get('/music/songs', async (req: AuthedRequest, res, next) => {
-  try { res.json(overlayItems(req.user!.id, await libraryItems(req, 'Audio', { SortBy: 'SortName' }))); }
+  try { res.json(req.query.paged ? await pagedLibrary(req, 'Audio', { SortBy: 'SortName' }) : overlayItems(req.user!.id, await libraryItems(req, 'Audio', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
+});
+
+r.get('/genres/:type', async (req, res, next) => {
+  try {
+    const types: Record<string, string> = { movies: 'Movie', series: 'Series' };
+    const type = types[String(req.params.type)];
+    if (!type) return res.status(400).json({ error: 'invalid_media_type' });
+    res.json({ genres: await jf.genres(type) });
+  } catch (e) { next(e); }
 });
 
 // Personal videos (Home videos / everything with MediaType Video not Movie/Episode)

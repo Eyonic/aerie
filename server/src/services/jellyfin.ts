@@ -91,6 +91,39 @@ export async function listByType(includeItemTypes: string, params: Record<string
   return (data.Items || []).map(mapItem);
 }
 
+const pageCache = new Map<string, { expires: number; value: { items: MediaItem[]; total: number } }>();
+
+export async function pageByType(includeItemTypes: string, offset: number, limit: number, params: Record<string, any> = {}) {
+  const uid = await jellyUserId();
+  const cacheKey = `${uid}:${includeItemTypes}:${offset}:${limit}:${JSON.stringify(params)}`;
+  const cached = pageCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.value;
+  const data = await jf(`/Users/${uid}/Items`, {
+    IncludeItemTypes: includeItemTypes,
+    Recursive: true,
+    Fields: 'Overview,Genres,ProductionYear,RunTimeTicks',
+    SortBy: params.SortBy || 'SortName',
+    SortOrder: params.SortOrder || 'Ascending',
+    ...params,
+    StartIndex: Math.max(0, offset),
+    Limit: Math.min(100, Math.max(1, limit)),
+  });
+  const value = { items: (data.Items || []).map(mapItem), total: Number(data.TotalRecordCount || 0) };
+  pageCache.set(cacheKey, { expires: Date.now() + 60_000, value });
+  return value;
+}
+
+const genreCache = new Map<string, { expires: number; items: string[] }>();
+export async function genres(includeItemTypes: string): Promise<string[]> {
+  const uid = await jellyUserId();
+  const cached = genreCache.get(includeItemTypes);
+  if (cached && cached.expires > Date.now()) return cached.items;
+  const data = await jf('/Genres', { UserId: uid, IncludeItemTypes: includeItemTypes, Recursive: true, Limit: 300, SortBy: 'SortName' });
+  const items = (data.Items || []).map((g: any) => String(g.Name || '')).filter(Boolean);
+  genreCache.set(includeItemTypes, { expires: Date.now() + 300_000, items });
+  return items;
+}
+
 const fullLibraryCache = new Map<string, { expires: number; items: MediaItem[] }>();
 
 // Full-library variant for screens that must show every title. Jellyfin caps a

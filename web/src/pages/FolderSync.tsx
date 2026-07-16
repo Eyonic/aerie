@@ -129,6 +129,19 @@ function PhoneSyncSection() {
   const progressText = progress && typeof progress.done === 'number' && typeof progress.total === 'number'
     ? `Uploading ${progress.done} of ${progress.total}${progress.folder ? ` — ${progress.folder}` : ''}`
     : '';
+  const pct = progress?.total ? Math.round((progress.done / progress.total) * 100) : 0;
+  const resultCode = String(status?.lastResult || '');
+  const resultText = resultCode.startsWith('uploaded ') ? `${resultCode.slice(9)} files uploaded`
+    : resultCode === 'unauthorized' ? 'Sign in again — the saved session expired'
+      : resultCode === 'deadline' ? 'Paused overnight; remaining files continue next run'
+        : resultCode === 'cancelled' ? 'Last sync was cancelled'
+          : resultCode === 'not_configured' ? 'Server or login is not configured'
+            : resultCode === 'schedule_failed' ? 'Android could not schedule the nightly job'
+              : resultCode === 'sync_failed' ? 'Last sync failed'
+                : resultCode || 'Waiting for the first run';
+  const resultError = ['unauthorized', 'not_configured', 'schedule_failed', 'sync_failed'].includes(resultCode);
+  const lastRun = Number(status?.lastRun || 0);
+  const nextRun = Number(status?.nextRun || 0);
   const load = () => {
     if (!hasSync) return;
     setFolders(parseNativeJson(native?.syncList?.(), { folders: [] }).folders || []);
@@ -143,9 +156,25 @@ function PhoneSyncSection() {
   if (!hasSync) return null;
   return (
     <Section title="Folder sync — this phone" subtitle="Selected folders upload every night while charging on Wi-Fi. Deletes are never synced.">
+      <div className="grid sm:grid-cols-3 gap-2 mb-4">
+        <div className="rounded-xl bg-white/[0.025] border border-white/[0.05] p-3">
+          <p className="text-[10px] uppercase tracking-wider muted">Status</p>
+          <p className={cx('text-sm mt-1', status.running ? 'text-brand-300' : resultError ? 'text-accent-red' : 'text-slate-200')}>{status.running ? 'Syncing now' : resultText}</p>
+        </div>
+        <div className="rounded-xl bg-white/[0.025] border border-white/[0.05] p-3">
+          <p className="text-[10px] uppercase tracking-wider muted">Last run</p>
+          <p className="text-sm text-slate-200 mt-1">{lastRun ? formatRelative(new Date(lastRun).toISOString()) : 'Never'}</p>
+        </div>
+        <div className="rounded-xl bg-white/[0.025] border border-white/[0.05] p-3">
+          <p className="text-[10px] uppercase tracking-wider muted">Next eligible run</p>
+          <p className="text-sm text-slate-200 mt-1">{nextRun ? new Date(nextRun).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : 'After a folder is added'}</p>
+          <p className="text-[11px] muted mt-0.5">Waits for charging + Wi-Fi</p>
+        </div>
+      </div>
       {progressText && (
-        <div className="mb-3 text-sm text-brand-300 flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse" /> {progressText}
+        <div className="mb-4">
+          <div className="text-sm text-brand-300 flex items-center gap-1.5 mb-2"><span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse" /> {progressText}</div>
+          <div className="h-2 rounded-full bg-white/[0.07] overflow-hidden"><div className="h-full bg-brand-500 transition-all" style={{ width: `${pct}%` }} /></div>
         </div>
       )}
       <div className="space-y-2">

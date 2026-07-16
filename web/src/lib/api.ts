@@ -54,6 +54,13 @@ const tokUrl = (u?: string) => (u && TOKEN && !u.includes('token=')) ? `${u}${u.
 const tokMedia = <T extends { posterUrl?: string; backdropUrl?: string; thumbUrl?: string }>(it: T): T =>
   ({ ...it, posterUrl: tokUrl(it.posterUrl), backdropUrl: tokUrl(it.backdropUrl), thumbUrl: tokUrl(it.thumbUrl) });
 const tokMediaList = (arr: MediaItem[]) => (arr || []).map(tokMedia);
+export type Paged<T> = { items: T[]; total: number; offset: number; limit: number; hasMore: boolean };
+const pageQuery = (offset = 0, limit = 50, opts: { q?: string; genre?: string; sort?: string } = {}) => {
+  const p = new URLSearchParams({ paged: '1', offset: String(offset), limit: String(limit) });
+  if (opts.q) p.set('q', opts.q); if (opts.genre && opts.genre !== 'all') p.set('genre', opts.genre); if (opts.sort) p.set('sort', opts.sort);
+  return p.toString();
+};
+const tokPage = (p: Paged<MediaItem>) => ({ ...p, items: tokMediaList(p.items) });
 
 export const api = {
   // token-appended URL for <img>/<video>/<audio> src that hit protected routes
@@ -61,6 +68,10 @@ export const api = {
 
   sync: {
     bases: () => req<{ bases: { base: string; files: number; bytes: number; lastChange: number }[] }>('GET', '/api/sync/bases'),
+  },
+
+  jobs: {
+    list: (limit = 100) => req<{ items: { id: string; type: string; status: string; prompt?: string; progress: number; error?: string; createdAt: string; finishedAt?: string; result?: any }[]; active: number }>('GET', `/api/jobs?limit=${limit}`),
   },
 
   dedup: {
@@ -135,6 +146,12 @@ export const api = {
     albums: (limit?: number) => req<MediaItem[]>('GET', `/api/media/music/albums${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
     artists: (limit?: number) => req<MediaItem[]>('GET', `/api/media/music/artists${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
     songs: (limit?: number) => req<MediaItem[]>('GET', `/api/media/music/songs${limit ? `?limit=${limit}` : ''}`).then(tokMediaList),
+    moviesPage: (offset = 0, limit = 50, opts: { q?: string; genre?: string; sort?: string } = {}) => req<Paged<MediaItem>>('GET', `/api/media/movies?${pageQuery(offset, limit, opts)}`).then(tokPage),
+    seriesPage: (offset = 0, limit = 50, opts: { q?: string; genre?: string; sort?: string } = {}) => req<Paged<MediaItem>>('GET', `/api/media/series?${pageQuery(offset, limit, opts)}`).then(tokPage),
+    albumsPage: (offset = 0, limit = 50, q = '') => req<Paged<MediaItem>>('GET', `/api/media/music/albums?${pageQuery(offset, limit, { q })}`).then(tokPage),
+    artistsPage: (offset = 0, limit = 50, q = '') => req<Paged<MediaItem>>('GET', `/api/media/music/artists?${pageQuery(offset, limit, { q })}`).then(tokPage),
+    songsPage: (offset = 0, limit = 50, q = '') => req<Paged<MediaItem>>('GET', `/api/media/music/songs?${pageQuery(offset, limit, { q })}`).then(tokPage),
+    genres: (type: 'movies' | 'series') => req<{ genres: string[] }>('GET', `/api/media/genres/${type}`),
     resumeVideo: () => req<MediaItem[]>('GET', '/api/media/resume/video').then(tokMediaList),
     resumeAudio: () => req<MediaItem[]>('GET', '/api/media/resume/audio').then(tokMediaList),
     item: (id: string) => req<MediaItem>('GET', `/api/media/item/${id}`).then(tokMedia),
@@ -202,6 +219,7 @@ export const api = {
   books: {
     status: () => req<{ configured: boolean }>('GET', '/api/books/status'),
     audiobooks: (limit?: number) => req<Book[]>('GET', `/api/books/audiobooks${limit ? `?limit=${limit}` : ''}`),
+    audiobooksPage: (offset = 0, limit = 50, q = '') => req<Paged<Book>>('GET', `/api/books/audiobooks?${pageQuery(offset, limit, { q })}`),
     podcasts: () => req<Book[]>('GET', '/api/books/podcasts'),
     item: (id: string) => req<Book & { chapters: Chapter[]; overview?: string }>('GET', `/api/books/item/${id}`),
     tracks: (id: string) => req<{ ino: string; index: number; title: string; durationSec: number; mimeType: string; streamUrl: string }[]>('GET', `/api/books/tracks/${id}`),

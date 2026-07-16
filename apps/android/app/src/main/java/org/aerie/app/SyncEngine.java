@@ -84,9 +84,10 @@ public class SyncEngine {
                     .setConstraints(constraints)
                     .addTag(WORK_NAME)
                     .build();
-            // KEEP makes this safe to call on every app launch: it repairs a
-            // missing job without moving an already scheduled night's run.
-            wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, work);
+            // UPDATE preserves the original enqueue time while repairing the
+            // constraints and schedule of older installed versions. KEEP left
+            // some phones attached to a stale one-shot/old periodic job.
+            wm.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, work);
             p.edit().putLong("sync_next_run", System.currentTimeMillis() + delay).apply();
         } catch (Exception e) {
             context.getSharedPreferences("aerie", Context.MODE_PRIVATE).edit()

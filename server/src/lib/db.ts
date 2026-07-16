@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   type TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued',
   prompt TEXT,
+  payload TEXT,
   progress REAL DEFAULT 0,
   result_urls TEXT,
   error TEXT,
@@ -241,6 +242,9 @@ addColumn('users', 'features', "TEXT NOT NULL DEFAULT '{}'");
 // Uploaded profile picture: 0 = none (fall back to colour+initials); otherwise a
 // version stamp used to cache-bust the avatar image URL after each upload.
 addColumn('users', 'avatar_version', 'INTEGER NOT NULL DEFAULT 0');
+// Background jobs keep enough input to be safely restarted after a deploy or
+// container restart. Older rows remain valid and are shown as interrupted.
+addColumn('jobs', 'payload', 'TEXT');
 
 // ---------- Seed default admin + demo automations/devices ----------
 function seed() {

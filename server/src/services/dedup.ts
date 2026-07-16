@@ -109,7 +109,8 @@ function progress(id: string, p: number) {
 
 function enqueue(userId: number, prompt: 'scan' | 'remove', run: (jobId: string) => Promise<any>) {
   const id = uid('job');
-  db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,progress) VALUES (?,?,?,?,?,0)').run(id, userId, 'dedup', 'queued', prompt);
+  db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,payload,progress) VALUES (?,?,?,?,?,?,0)')
+    .run(id, userId, 'dedup', 'queued', prompt, JSON.stringify({ kind: prompt }));
   queue.push({ id, userId, run, done: result => {
     db.prepare("UPDATE jobs SET status='done', progress=1, result_urls=?, finished_at=datetime('now') WHERE id=?").run(JSON.stringify(result), id);
   } });
@@ -135,8 +136,8 @@ async function drain() {
   }
 }
 
-export function scan(user: User) {
-  return enqueue(user.id, 'scan', async jobId => {
+async function execute(user: User, kind: 'scan' | 'remove', jobId: string) {
+  if (kind === 'scan') {
     const r = await groupsFor(user, p => progress(jobId, p));
     notify(user.id, 'Duplicate scan complete', `Found ${r.sets} duplicate sets.`, 'success');
     return {
@@ -149,12 +150,8 @@ export function scan(user: User) {
         size: g.size,
       })),
     };
-  });
-}
-
-export function remove(user: User) {
-  return enqueue(user.id, 'remove', async jobId => {
-    const r = await groupsFor(user);
+  }
+  const r = await groupsFor(user);
     const total = r.removable;
     let removed = 0, bytesFreed = 0;
     for (const g of r.groups) {
@@ -170,7 +167,14 @@ export function remove(user: User) {
     }
     notify(user.id, 'Duplicates removed', `Removed ${removed} duplicate files, freed ${bytesFreed} bytes.`, 'success');
     return { removed, bytesFreed };
-  });
+}
+
+export function scan(user: User) {
+  return enqueue(user.id, 'scan', jobId => execute(user, 'scan', jobId));
+}
+
+export function remove(user: User) {
+  return enqueue(user.id, 'remove', jobId => execute(user, 'remove', jobId));
 }
 
 export function jobStatus(user: User, id: string) {
@@ -198,3 +202,25 @@ export function clearTombstone(userId: number, vpath: string) {
   const rel = String(vpath || '').replace(/^\/+/, '');
   db.prepare('DELETE FROM dedup_removed WHERE user_id=? AND rel_path=?').run(userId, rel);
 }
+
+function recoverJobs() {
+  const rows = db.prepare(`SELECT j.id,j.user_id userId,j.prompt,u.username FROM jobs j
+    JOIN users u ON u.id=j.user_id WHERE j.type='dedup' AND j.status IN ('queued','running')
+    ORDER BY j.created_at,j.rowid`).all() as any[];
+  for (const row of rows) {
+    const kind = row.prompt === 'remove' ? 'remove' : row.prompt === 'scan' ? 'scan' : null;
+    if (!kind) {
+      db.prepare("UPDATE jobs SET status='error',error='Interrupted job cannot be resumed.',finished_at=datetime('now') WHERE id=?").run(row.id);
+      continue;
+    }
+    const user = { id: row.userId, username: row.username } as User;
+    db.prepare("UPDATE jobs SET status='queued',progress=0,error=NULL,finished_at=NULL WHERE id=?").run(row.id);
+    queue.push({ id: row.id, userId: row.userId, run: id => execute(user, kind, id), done: result => {
+      db.prepare("UPDATE jobs SET status='done',progress=1,result_urls=?,finished_at=datetime('now') WHERE id=?")
+        .run(JSON.stringify(result), row.id);
+    } });
+  }
+  drain();
+}
+
+recoverJobs();

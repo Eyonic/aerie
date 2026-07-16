@@ -33,6 +33,12 @@ function overlayBooks(userId: number, books: Book[]): Book[] {
 
 r.get('/audiobooks', async (req: AuthedRequest, res, next) => {
   try {
+    if (req.query.paged) {
+      const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+      const pageLimit = Math.min(100, Math.max(1, Math.floor(Number(req.query.limit) || 50)));
+      const page = await abs.allBooksPage('book', offset, pageLimit, String(req.query.q || ''));
+      return res.json({ items: overlayBooks(req.user!.id, page.items), total: page.total, offset, limit: pageLimit, hasMore: offset + page.items.length < page.total });
+    }
     const raw = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
     const limit = Math.min(500, Math.max(0, Math.floor(Number(raw) || 0)));
     const books = await abs.allBooks('book');

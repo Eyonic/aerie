@@ -538,6 +538,11 @@ export default function Music() {
   const [albums, setAlbums] = useState<MediaItem[]>([]);
   const [artists, setArtists] = useState<MediaItem[]>([]);
   const [songs, setSongs] = useState<MediaItem[]>([]);
+  const [albumTotal, setAlbumTotal] = useState(0);
+  const [artistTotal, setArtistTotal] = useState(0);
+  const [artistOffset, setArtistOffset] = useState(0);
+  const [songTotal, setSongTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [resume, setResume] = useState<MediaItem[]>([]);
   const [recentAdded, setRecentAdded] = useState<MediaItem[]>([]);
 
@@ -559,17 +564,17 @@ export default function Music() {
         if (!alive) return;
         setConfigured(!!st?.configured);
         const [al, ar, so, rs, rec, se] = await Promise.all([
-          api.media.albums().catch(() => []),
-          api.media.artists().catch(() => []),
-          api.media.songs().catch(() => []),
+          api.media.albumsPage().catch(() => ({ items: [], total: 0, offset: 0, limit: 50, hasMore: false })),
+          api.media.artistsPage().catch(() => ({ items: [], total: 0, offset: 0, limit: 50, hasMore: false })),
+          api.media.songsPage().catch(() => ({ items: [], total: 0, offset: 0, limit: 50, hasMore: false })),
           api.media.resumeAudio().catch(() => []),
           api.media.recommendations().catch(() => null),
           api.settings.get().catch(() => null),
         ]);
         if (!alive) return;
-        setAlbums(al || []);
-        setArtists((ar || []).filter(a => !isSystemArtist(a.name)));
-        setSongs(so || []);
+        setAlbums(al.items || []); setAlbumTotal(al.total || 0);
+        setArtists((ar.items || []).filter(a => !isSystemArtist(a.name))); setArtistTotal(ar.total || 0); setArtistOffset(ar.items?.length || 0);
+        setSongs(so.items || []); setSongTotal(so.total || 0);
         setResume((rs || []).filter(x => x.type === 'Audio'));
         // Prefer server-side "recently added" albums when it surfaces music.
         const recAlbums = (rec?.recentlyAdded || []).filter(x => x.type === 'MusicAlbum');
@@ -632,22 +637,62 @@ export default function Music() {
 
   const likedSongs = useMemo(() => songs.filter(s => favIds.has(s.id)), [songs, favIds]);
   const visibleTotal = searching
-    ? Math.max(filteredSongs.length, filteredAlbums.length, filteredArtists.length)
-    : tab === 'albums' ? albums.length
-      : tab === 'artists' ? artists.length
-        : tab === 'songs' ? songs.length
-          : likedSongs.length;
+    ? Math.max(songTotal, albumTotal, artistTotal)
+    : tab === 'albums' ? albumTotal
+      : tab === 'artists' ? artistTotal
+        : songTotal;
 
-  useEffect(() => { setVisibleCount(50); }, [tab, query]);
+  const firstQuery = useRef(true);
+  useEffect(() => {
+    if (firstQuery.current) { firstQuery.current = false; return; }
+    let alive = true;
+    const timer = setTimeout(async () => {
+      setLoadingMore(true);
+      try {
+        const [al, ar, so] = await Promise.all([api.media.albumsPage(0, 50, query.trim()), api.media.artistsPage(0, 50, query.trim()), api.media.songsPage(0, 50, query.trim())]);
+        if (!alive) return;
+        setAlbums(al.items); setAlbumTotal(al.total);
+        setArtists(ar.items.filter(a => !isSystemArtist(a.name))); setArtistTotal(ar.total); setArtistOffset(ar.items.length);
+        setSongs(so.items); setSongTotal(so.total); setVisibleCount(50);
+      } catch { if (alive) toast('Could not search music', 'error'); }
+      finally { if (alive) setLoadingMore(false); }
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query]);
+
+  useEffect(() => { setVisibleCount(50); }, [tab]);
+
+  const loadMore = async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const search = query.trim();
+      if (searching) {
+        const calls: Promise<any>[] = [];
+        if (albums.length < albumTotal) calls.push(api.media.albumsPage(albums.length, 50, search).then(p => { setAlbums(v => [...v, ...p.items]); setAlbumTotal(p.total); }));
+        if (artistOffset < artistTotal) calls.push(api.media.artistsPage(artistOffset, 50, search).then(p => { setArtists(v => [...v, ...p.items.filter(a => !isSystemArtist(a.name))]); setArtistTotal(p.total); setArtistOffset(v => v + p.items.length); }));
+        if (songs.length < songTotal) calls.push(api.media.songsPage(songs.length, 50, search).then(p => { setSongs(v => [...v, ...p.items]); setSongTotal(p.total); }));
+        await Promise.all(calls);
+      } else if (tab === 'albums' && albums.length < albumTotal) {
+        const p = await api.media.albumsPage(albums.length); setAlbums(v => [...v, ...p.items]); setAlbumTotal(p.total);
+      } else if (tab === 'artists' && artistOffset < artistTotal) {
+        const p = await api.media.artistsPage(artistOffset); setArtists(v => [...v, ...p.items.filter(a => !isSystemArtist(a.name))]); setArtistTotal(p.total); setArtistOffset(v => v + p.items.length);
+      } else if (songs.length < songTotal) {
+        const p = await api.media.songsPage(songs.length); setSongs(v => [...v, ...p.items]); setSongTotal(p.total);
+      }
+      setVisibleCount(n => n + 50);
+    } finally { setLoadingMore(false); }
+  };
   useEffect(() => {
     const node = loadMoreRef.current;
-    if (!node || visibleCount >= visibleTotal || typeof IntersectionObserver === 'undefined') return;
+    const loaded = searching ? Math.max(albums.length, artistOffset, songs.length) : tab === 'albums' ? albums.length : tab === 'artists' ? artistOffset : songs.length;
+    if (!node || loaded >= visibleTotal || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, visibleTotal));
+      if (entries.some(entry => entry.isIntersecting)) loadMore();
     }, { rootMargin: '600px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [visibleCount, visibleTotal]);
+  }, [visibleTotal, albums.length, artistOffset, songs.length, loadingMore, tab, query]);
   // Only the server's recommendations feed carries a real "date added" ordering.
   // When it doesn't surface music albums we fall back to the plain album list —
   // in that case label the rail "Albums" instead of falsely claiming recency.
@@ -689,10 +734,22 @@ export default function Music() {
     player.playTrack(toTrack(s, art), queue.map(t => toTrack(t, t.posterUrl || t.thumbUrl)));
   };
 
-  const shuffleAll = () => {
-    if (!songs.length) return;
-    player.playQueue(shuffled(songs).map(s => toTrack(s, s.posterUrl || s.thumbUrl)), 0);
-    toast('Shuffling your library', 'success', plural(songs.length, 'song'));
+  const shuffleAll = async () => {
+    let all = songs;
+    if (songs.length < songTotal) {
+      setLoadingMore(true);
+      try {
+        while (all.length < songTotal) {
+          const p = await api.media.songsPage(all.length, 100);
+          if (!p.items.length) break;
+          all = [...all, ...p.items];
+        }
+        setSongs(all);
+      } finally { setLoadingMore(false); }
+    }
+    if (!all.length) return;
+    player.playQueue(shuffled(all).map(s => toTrack(s, s.posterUrl || s.thumbUrl)), 0);
+    toast('Shuffling your library', 'success', plural(all.length, 'song'));
   };
 
   if (loading) return <PageLoader />;
@@ -703,7 +760,7 @@ export default function Music() {
     <div className="animate-fade-in">
       <PageHeader
         title="Music"
-        subtitle={anyContent ? `${plural(songs.length, 'song')} · ${plural(albums.length, 'album')} · ${plural(artists.length, 'artist')}` : 'Your private music library'}
+        subtitle={anyContent ? `${plural(songTotal, 'song')} · ${plural(albumTotal, 'album')} · ${plural(artistTotal, 'artist')}` : 'Your private music library'}
         icon={<Icon.Music size={22} />}
         actions={
           songs.length ? (
@@ -963,10 +1020,10 @@ export default function Music() {
               )}
             </>
           )}
-          {visibleCount < visibleTotal && (
-            <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, visibleTotal))}
+          {(searching ? Math.max(albums.length, artistOffset, songs.length) : tab === 'albums' ? albums.length : tab === 'artists' ? artistOffset : songs.length) < visibleTotal && (
+            <button ref={loadMoreRef} type="button" onClick={loadMore} disabled={loadingMore}
               className="btn-secondary mx-auto mt-6">
-              Show more <span className="muted text-xs">({visibleTotal - visibleCount} remaining)</span>
+              {loadingMore ? 'Loading…' : 'Show more'}
             </button>
           )}
         </>

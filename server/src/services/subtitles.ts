@@ -11,18 +11,13 @@ import { instruct } from './ai.js';
 export type SubtitleSource = { type: 'jf'; mediaSourceId: string; index: number } | { type: 'custom'; id: string };
 type Cue = { start: number; end: number; text: string };
 type JobTask = { id: string; userId: number; run: (jobId: string) => Promise<string> };
+type JobPayload =
+  | { kind: 'generate'; itemId: string }
+  | { kind: 'translate'; itemId: string; source: SubtitleSource; targetLang: string }
+  | { kind: 'sync'; itemId: string; source: SubtitleSource };
 
 const queue: JobTask[] = [];
 let active = false;
-
-// Work is held in this process, so a queued/running row left in SQLite at boot
-// belongs to a worker that no longer exists. Mark it clearly instead of letting
-// the player's recovered progress bar sit at the same percentage forever.
-db.prepare(`
-  UPDATE jobs
-  SET status='error', error='Interrupted by a server restart. Start the subtitle job again.', finished_at=datetime('now')
-  WHERE type='subtitles' AND status IN ('queued','running')
-`).run();
 
 const uid = (p: string) => `${p}_${Date.now().toString(36)}${crypto.randomBytes(4).toString('hex')}`;
 const full = (filename: string) => path.join(config.subtitlesDir, path.basename(filename));
@@ -47,9 +42,10 @@ function insertSubtitle(itemId: string, lang: string, label: string, origin: str
   return { id, lang: lang || 'und', label, origin, createdAt: now() };
 }
 
-function enqueue(userId: number, prompt: string, run: (jobId: string) => Promise<string>) {
+function enqueue(userId: number, prompt: string, payload: JobPayload, run: (jobId: string) => Promise<string>) {
   const id = uid('job');
-  db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,progress) VALUES (?,?,?,?,?,0)').run(id, userId, 'subtitles', 'queued', prompt);
+  db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,payload,progress) VALUES (?,?,?,?,?,?,0)')
+    .run(id, userId, 'subtitles', 'queued', prompt, JSON.stringify(payload));
   queue.push({ id, userId, run });
   drain();
   return id;
@@ -221,7 +217,7 @@ async function generate(jobId: string, itemId: string, userId: number) {
 }
 
 export function generateSubtitles(itemId: string, userId: number) {
-  return enqueue(userId, `generate:${itemId}`, jobId => generate(jobId, itemId, userId));
+  return enqueue(userId, `generate:${itemId}`, { kind: 'generate', itemId }, jobId => generate(jobId, itemId, userId));
 }
 
 function parseTime(t: string) {
@@ -300,7 +296,7 @@ async function translate(jobId: string, itemId: string, source: SubtitleSource, 
 
 export function translateSubtitles(itemId: string, source: SubtitleSource, targetLang: string | undefined, userId: number) {
   const lang = targetLang || config.translateLang;
-  return enqueue(userId, `translate:${itemId}:${lang}`, jobId => translate(jobId, itemId, source, lang, userId));
+  return enqueue(userId, `translate:${itemId}:${lang}`, { kind: 'translate', itemId, source, targetLang: lang }, jobId => translate(jobId, itemId, source, lang, userId));
 }
 
 function audioChannels(src: string): Promise<number> {
@@ -443,7 +439,7 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
 }
 
 export function syncSubtitles(itemId: string, source: SubtitleSource, userId: number) {
-  return enqueue(userId, `sync:${itemId}`, jobId => sync(jobId, itemId, source, userId));
+  return enqueue(userId, `sync:${itemId}`, { kind: 'sync', itemId, source }, jobId => sync(jobId, itemId, source, userId));
 }
 
 function mojibakeCount(s: string) {
@@ -499,3 +495,29 @@ export async function cleanSubtitles(itemId: string, source: SubtitleSource, use
   for (let i = 0; i < cues.length - 1; i++) if (cues[i].end > cues[i + 1].start) cues[i].end = cues[i + 1].start;
   return insertSubtitle(itemId, src.lang, `${src.label} (cleaned)`, 'cleaned', userId, toVtt(cues.filter(c => c.end > c.start)));
 }
+
+// Re-queue durable work left behind by a deploy. The operation restarts from
+// the beginning (safe and deterministic) instead of leaving a frozen progress
+// bar or requiring the user to notice and submit it again.
+function recoverJobs() {
+  const rows = db.prepare(`SELECT id,user_id userId,payload FROM jobs
+    WHERE type='subtitles' AND status IN ('queued','running') ORDER BY created_at,rowid`).all() as any[];
+  for (const row of rows) {
+    try {
+      const p = JSON.parse(String(row.payload || '')) as JobPayload;
+      let run: ((jobId: string) => Promise<string>) | null = null;
+      if (p.kind === 'generate' && p.itemId) run = id => generate(id, p.itemId, row.userId);
+      if (p.kind === 'translate' && p.itemId && p.source && p.targetLang) run = id => translate(id, p.itemId, p.source, p.targetLang, row.userId);
+      if (p.kind === 'sync' && p.itemId && p.source) run = id => sync(id, p.itemId, p.source, row.userId);
+      if (!run) throw new Error('invalid payload');
+      db.prepare("UPDATE jobs SET status='queued',progress=0,error=NULL,finished_at=NULL WHERE id=?").run(row.id);
+      queue.push({ id: row.id, userId: row.userId, run });
+    } catch {
+      db.prepare(`UPDATE jobs SET status='error',error=?,finished_at=datetime('now') WHERE id=?`)
+        .run('Interrupted by a server restart. This older job cannot be resumed.', row.id);
+    }
+  }
+  drain();
+}
+
+recoverJobs();

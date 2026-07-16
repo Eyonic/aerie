@@ -34,6 +34,7 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
     { to: '/assistant', label: 'AI Assistant', icon: <Icon.Robot size={19} /> },
   ] },
   { section: 'System', items: [
+    { to: '/jobs', label: 'Jobs', icon: <Icon.Bolt size={19} /> },
     { to: '/automations', label: 'Automations', icon: <Icon.Bolt size={19} /> },
     { to: '/backups', label: 'Backups', icon: <Icon.Backup size={19} /> },
     { to: '/sync', label: 'Folder Sync', icon: <Icon.Refresh size={19} /> },

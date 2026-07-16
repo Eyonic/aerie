@@ -500,6 +500,8 @@ function BookDetail({ book, onClose }: { book: Book; onClose: () => void }) {
 
 export default function Audiobooks() {
   const [books, setBooks] = useState<Book[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [err, setErr] = useState(false);
   const [disabled, setDisabled] = useState(false);
   const [selected, setSelected] = useState<Book | null>(null);
@@ -510,8 +512,8 @@ export default function Audiobooks() {
   useEffect(() => {
     let alive = true;
     setDisabled(false);
-    api.books.audiobooks()
-      .then((b) => { if (alive) setBooks(b || []); })
+    api.books.audiobooksPage()
+      .then((p) => { if (alive) { setBooks(p.items || []); setTotal(p.total || 0); } })
       .catch((e: any) => {
         if (!alive) return;
         setBooks([]); setErr(true);
@@ -534,24 +536,43 @@ export default function Audiobooks() {
       .sort((a, b) => (b.progressPct || 0) - (a.progressPct || 0));
   }, [books, query]);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return books || [];
-    return (books || []).filter((b) => matchesQuery(b, q));
-  }, [books, query]);
+  const filtered = books || [];
 
   // Keep the full library searchable, but only mount cards in batches. Rendering
   // thousands of image cards at once was expensive even with native lazy-loading.
-  useEffect(() => { setVisibleCount(50); }, [books, query]);
+  const firstQuery = useRef(true);
+  useEffect(() => {
+    if (firstQuery.current) { firstQuery.current = false; return; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      setLoadingMore(true);
+      api.books.audiobooksPage(0, 50, query.trim()).then(page => {
+        if (alive) { setBooks(page.items); setTotal(page.total); setVisibleCount(page.items.length); }
+      }).catch(() => { if (alive) toast('Could not search audiobooks', 'error'); })
+        .finally(() => { if (alive) setLoadingMore(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query]);
+
+  const loadMore = async () => {
+    const current = books || [];
+    if (loadingMore || current.length >= total) return;
+    setLoadingMore(true);
+    try {
+      const page = await api.books.audiobooksPage(current.length, 50, query.trim());
+      setBooks(prev => [...(prev || []), ...page.items.filter(x => !(prev || []).some(p => p.id === x.id))]);
+      setTotal(page.total); setVisibleCount(n => n + page.items.length);
+    } finally { setLoadingMore(false); }
+  };
   useEffect(() => {
     const node = loadMoreRef.current;
-    if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
+    if (!node || filtered.length >= total || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, filtered.length));
+      if (entries.some(entry => entry.isIntersecting)) loadMore();
     }, { rootMargin: '600px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [filtered.length, visibleCount]);
+  }, [filtered.length, total, loadingMore, query]);
 
   if (books === null) return <PageLoader />;
 
@@ -559,10 +580,10 @@ export default function Audiobooks() {
     <div className="animate-fade-in">
       <PageHeader
         title="Audiobooks"
-        subtitle={books.length ? `${books.length} in your library` : 'Cozy up with a good listen'}
+        subtitle={total ? `${total} in your library` : 'Cozy up with a good listen'}
         icon={<Icon.Book size={22} />}
         actions={
-          books.length > 0 ? (
+          (books.length > 0 || query) ? (
             <div className="relative w-full sm:w-56 max-w-full">
               <Icon.Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
               <input
@@ -576,7 +597,7 @@ export default function Audiobooks() {
         }
       />
 
-      {books.length === 0 ? (
+      {books.length === 0 && !query ? (
         <EmptyState
           icon={<Icon.Book size={30} />}
           title={disabled ? 'Not available on this account' : err ? 'Library unavailable' : 'No audiobooks yet'}
@@ -599,7 +620,7 @@ export default function Audiobooks() {
           )}
 
           <section>
-            <h2 className="section-title mb-3">{query ? `Results (${filtered.length})` : 'Your library'}</h2>
+            <h2 className="section-title mb-3">{query ? `Results (${total})` : 'Your library'}</h2>
             {filtered.length === 0 ? (
               <EmptyState icon={<Icon.Search size={26} />} title="No matches" subtitle="Try a different title or author." />
             ) : (
@@ -609,10 +630,10 @@ export default function Audiobooks() {
                     <BookCard key={b.id} book={b} onOpen={() => setSelected(b)} />
                   ))}
                 </div>
-                {visibleCount < filtered.length && (
-                  <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, filtered.length))}
+                {filtered.length < total && (
+                  <button ref={loadMoreRef} type="button" onClick={loadMore} disabled={loadingMore}
                     className="btn-secondary mx-auto mt-6">
-                    Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
+                    {loadingMore ? 'Loading…' : 'Show more'} <span className="muted text-xs">({total - filtered.length} remaining)</span>
                   </button>
                 )}
               </>

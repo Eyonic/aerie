@@ -41,6 +41,7 @@ import historyRouter from './routes/history.js';
 import subtitlesRouter from './routes/subtitles.js';
 import syncRouter from './routes/sync.js';
 import dedupRouter from './routes/dedup.js';
+import jobsRouter from './routes/jobs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -103,6 +104,7 @@ app.use('/api/history', historyRouter);
 app.use('/api/subtitles', subtitlesRouter);
 app.use('/api/sync', syncRouter);
 app.use('/api/dedup', dedupRouter);
+app.use('/api/jobs', jobsRouter);
 
 // Serve built web app (SPA)
 const webDist = path.resolve(__dirname, '../../web/dist');

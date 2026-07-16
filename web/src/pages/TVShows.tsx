@@ -289,6 +289,9 @@ function SeriesDetail({ series, onClose, onPlay, watched, onToggleWatched, isWat
 
 export default function TVShows() {
   const [series, setSeries] = useState<MediaItem[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [genres, setGenres] = useState<string[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [resume, setResume] = useState<MediaItem[]>([]);
   const [recs, setRecs] = useState<MediaItem[]>([]);
   const [configured, setConfigured] = useState(true);
@@ -325,12 +328,14 @@ export default function TVShows() {
         if (!alive) return;
         if (!st.configured) { setConfigured(false); setSeries([]); return; }
         const [list, res, rec] = await Promise.all([
-          api.media.series().catch(() => [] as MediaItem[]),
+          api.media.seriesPage(0, 50, { sort: 'recent' }).catch(() => ({ items: [] as MediaItem[], total: 0, offset: 0, limit: 50, hasMore: false })),
           api.media.resumeVideo().catch(() => [] as MediaItem[]),
           api.media.recommendations().catch(() => ({ nextUp: [], suggestions: [], recentlyAdded: [] })),
         ]);
         if (!alive) return;
-        setSeries(list);
+        setSeries(list.items);
+        setTotal(list.total);
+        api.media.genres('series').then(g => { if (alive) setGenres(g.genres || []); }).catch(() => {});
         setResume(res.filter(r => r.type === 'Episode'));
         setRecs((rec?.suggestions || []).filter(s => s.type === 'Series').slice(0, 18));
       } catch {
@@ -360,43 +365,52 @@ export default function TVShows() {
     }
   };
 
-  const showCount = series?.length ?? 0;
+  const showCount = total;
 
-  const allGenres = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of series || []) for (const g of s.genres || []) set.add(g);
-    return Array.from(set).sort();
-  }, [series]);
+  const allGenres = genres;
 
   const filtering = query.trim() !== '' || genre !== 'all' || sort !== 'recent';
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    let list = (series || []).filter(s => {
-      if (genre !== 'all' && !(s.genres || []).includes(genre)) return false;
-      if (q && !(s.name || '').toLowerCase().includes(q)) return false;
-      return true;
-    });
-    if (sort === 'title') list = [...list].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    else if (sort === 'rating') list = [...list].sort((a, b) => (b.communityRating || 0) - (a.communityRating || 0));
-    else if (sort === 'year') list = [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
-    return list;
-  }, [series, query, genre, sort]);
+  const filtered = series || [];
 
-  useEffect(() => { setVisibleCount(50); }, [query, genre, sort]);
+  const firstFilter = useRef(true);
+  useEffect(() => {
+    if (firstFilter.current) { firstFilter.current = false; return; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      setLoadingMore(true);
+      api.media.seriesPage(0, 50, { q: query.trim(), genre, sort }).then(page => {
+        if (!alive) return;
+        setSeries(page.items); setTotal(page.total); setVisibleCount(page.items.length);
+      }).catch(() => { if (alive) toast('Could not update shows', 'error'); })
+        .finally(() => { if (alive) setLoadingMore(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query, genre, sort]);
+
+  const loadMore = async () => {
+    const current = series || [];
+    if (loadingMore || current.length >= total) return;
+    setLoadingMore(true);
+    try {
+      const page = await api.media.seriesPage(current.length, 50, { q: query.trim(), genre, sort });
+      setSeries(prev => [...(prev || []), ...page.items.filter(x => !(prev || []).some(p => p.id === x.id))]);
+      setTotal(page.total); setVisibleCount(n => n + page.items.length);
+    } finally { setLoadingMore(false); }
+  };
   useEffect(() => {
     const node = loadMoreRef.current;
-    if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
+    if (!node || (series || []).length >= total || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, filtered.length));
+      if (entries.some(entry => entry.isIntersecting)) loadMore();
     }, { rootMargin: '600px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [filtered.length, visibleCount]);
+  }, [series?.length, total, loadingMore, query, genre, sort]);
 
   if (series === null) return <PageLoader />;
 
-  const hasLibrary = configured && series.length > 0;
+  const hasLibrary = configured && (series.length > 0 || filtering);
 
   return (
     <div className="animate-fade-in">
@@ -476,7 +490,7 @@ export default function TVShows() {
           {/* All series */}
           <div className="flex items-center justify-between mb-3">
             <h2 className="section-title">{filtering ? 'Results' : 'All shows'}</h2>
-            <span className="muted text-sm">{filtered.length} series</span>
+            <span className="muted text-sm">{total} series</span>
           </div>
 
           {/* Search / filter toolbar */}
@@ -544,10 +558,10 @@ export default function TVShows() {
                   <CheckPoster key={s.id} item={s} aspect="portrait" watched={isWatched(s)} onClick={() => setSelected(s)} />
                 ))}
               </div>
-              {visibleCount < filtered.length && (
-                <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, filtered.length))}
+              {series.length < total && (
+                <button ref={loadMoreRef} type="button" onClick={loadMore} disabled={loadingMore}
                   className="btn-secondary mx-auto mt-6">
-                  Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
+                  {loadingMore ? 'Loading…' : 'Show more'} <span className="muted text-xs">({total - series.length} remaining)</span>
                 </button>
               )}
             </>

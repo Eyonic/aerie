@@ -34,6 +34,7 @@ const Settings = lazy(() => import('./pages/Settings'));
 const GetApps = lazy(() => import('./pages/GetApps'));
 const Requests = lazy(() => import('./pages/Requests'));
 const Downloads = lazy(() => import('./pages/Downloads'));
+const Jobs = lazy(() => import('./pages/Jobs'));
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -77,6 +78,7 @@ export default function App() {
           <Route path="/get-apps" element={<GetApps />} />
           <Route path="/requests" element={<Requests />} />
           <Route path="/downloads" element={<Downloads />} />
+          <Route path="/jobs" element={<Jobs />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

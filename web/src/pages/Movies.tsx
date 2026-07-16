@@ -101,6 +101,9 @@ export default function Movies() {
   const [loading, setLoading] = useState(true);
   const [configured, setConfigured] = useState(true);
   const [movies, setMovies] = useState<MediaItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [genres, setGenres] = useState<string[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [resume, setResume] = useState<MediaItem[]>([]);
   const [recs, setRecs] = useState<MediaItem[]>([]);
   const [selected, setSelected] = useState<MediaItem | null>(null);
@@ -143,14 +146,16 @@ export default function Movies() {
         }
         setConfigured(true);
         const [mv, rv, rec] = await Promise.all([
-          api.media.movies().catch(() => [] as MediaItem[]),
+          api.media.moviesPage().catch(() => ({ items: [] as MediaItem[], total: 0, offset: 0, limit: 50, hasMore: false })),
           api.media.resumeVideo().catch(() => [] as MediaItem[]),
           api.media.recommendations().catch(() => ({ nextUp: [], suggestions: [], recentlyAdded: [] })),
         ]);
         if (cancelled) return;
-        setMovies(mv || []);
+        setMovies(mv.items || []);
+        setTotal(mv.total || 0);
+        api.media.genres('movies').then(g => { if (!cancelled) setGenres(g.genres || []); }).catch(() => {});
         // Prefer true movies in the resume rail, but fall back to whatever resume returns.
-        const movieIds = new Set((mv || []).map(m => m.id));
+        const movieIds = new Set((mv.items || []).map(m => m.id));
         const resumeMovies = (rv || []).filter(r => r.type === 'Movie' || movieIds.has(r.id));
         setResume(resumeMovies.length ? resumeMovies : (rv || []));
         // Recommendations, restricted to movies for this page.
@@ -202,11 +207,7 @@ export default function Movies() {
 
   const recentlyAdded = useMemo(() => movies.slice(0, 18), [movies]);
 
-  const allGenres = useMemo(() => {
-    const set = new Set<string>();
-    for (const m of movies) for (const g of m.genres || []) set.add(g);
-    return Array.from(set).sort();
-  }, [movies]);
+  const allGenres = genres;
 
   const genreRails = useMemo(() => {
     const map = new Map<string, MediaItem[]>();
@@ -225,29 +226,41 @@ export default function Movies() {
 
   const filtering = query.trim() !== '' || genre !== 'all' || sort !== 'recent';
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    let list = movies.filter(m => {
-      if (genre !== 'all' && !(m.genres || []).includes(genre)) return false;
-      if (q && !(m.name || '').toLowerCase().includes(q)) return false;
-      return true;
-    });
-    if (sort === 'title') list = [...list].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    else if (sort === 'rating') list = [...list].sort((a, b) => (b.communityRating || 0) - (a.communityRating || 0));
-    else if (sort === 'year') list = [...list].sort((a, b) => (b.year || 0) - (a.year || 0));
-    return list;
-  }, [movies, query, genre, sort]);
+  const filtered = movies;
 
-  useEffect(() => { setVisibleCount(50); }, [query, genre, sort]);
+  const firstFilter = useRef(true);
+  useEffect(() => {
+    if (firstFilter.current) { firstFilter.current = false; return; }
+    let alive = true;
+    const timer = setTimeout(() => {
+      setLoadingMore(true);
+      api.media.moviesPage(0, 50, { q: query.trim(), genre, sort }).then(page => {
+        if (!alive) return;
+        setMovies(page.items); setTotal(page.total); setVisibleCount(page.items.length);
+      }).catch(() => { if (alive) toast('Could not update movies', 'error'); })
+        .finally(() => { if (alive) setLoadingMore(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [query, genre, sort]);
+
+  const loadMore = async () => {
+    if (loadingMore || movies.length >= total) return;
+    setLoadingMore(true);
+    try {
+      const page = await api.media.moviesPage(movies.length, 50, { q: query.trim(), genre, sort });
+      setMovies(prev => [...prev, ...page.items.filter(x => !prev.some(p => p.id === x.id))]);
+      setTotal(page.total); setVisibleCount(n => n + page.items.length);
+    } finally { setLoadingMore(false); }
+  };
   useEffect(() => {
     const node = loadMoreRef.current;
-    if (!node || visibleCount >= filtered.length || typeof IntersectionObserver === 'undefined') return;
+    if (!node || movies.length >= total || typeof IntersectionObserver === 'undefined') return;
     const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) setVisibleCount(n => Math.min(n + 50, filtered.length));
+      if (entries.some(entry => entry.isIntersecting)) loadMore();
     }, { rootMargin: '600px 0px' });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [filtered.length, visibleCount]);
+  }, [movies.length, total, loadingMore, query, genre, sort]);
 
   const hero = useMemo<MediaItem | null>(() => {
     const withBackdrop = (arr: MediaItem[]) => arr.find(m => m.backdropUrl || m.posterUrl);
@@ -256,7 +269,7 @@ export default function Movies() {
 
   if (loading) return <LoadingSkeleton />;
 
-  if (!configured || movies.length === 0) {
+  if (!configured || (!filtering && total === 0)) {
     return (
       <div className="animate-fade-in">
         <div className="flex items-center gap-3 mb-6">
@@ -395,7 +408,7 @@ export default function Movies() {
       <div className="mt-4">
         <div className="flex items-center justify-between mb-4">
           <h2 className="section-title">{filtering ? 'Results' : 'All movies'}</h2>
-          <span className="muted text-sm">{filtered.length} title{filtered.length === 1 ? '' : 's'}</span>
+          <span className="muted text-sm">{total} title{total === 1 ? '' : 's'}</span>
         </div>
         {filtered.length === 0 ? (
           <EmptyState
@@ -409,10 +422,10 @@ export default function Movies() {
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3 sm:gap-4">
               {filtered.slice(0, visibleCount).map(m => <CheckPoster key={m.id} item={m} aspect="portrait" watched={isWatched(m)} onClick={() => setSelected(m)} />)}
             </div>
-            {visibleCount < filtered.length && (
-              <button ref={loadMoreRef} type="button" onClick={() => setVisibleCount(n => Math.min(n + 50, filtered.length))}
+            {movies.length < total && (
+              <button ref={loadMoreRef} type="button" onClick={loadMore} disabled={loadingMore}
                 className="btn-secondary mx-auto mt-6">
-                Show more <span className="muted text-xs">({filtered.length - visibleCount} remaining)</span>
+                {loadingMore ? 'Loading…' : 'Show more'} <span className="muted text-xs">({total - movies.length} remaining)</span>
               </button>
             )}
           </>

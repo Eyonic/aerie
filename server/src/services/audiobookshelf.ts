@@ -88,6 +88,14 @@ export async function listLibraryItems(libraryId: string): Promise<Book[]> {
   return items.map((it: any) => mapItem(it, progs));
 }
 
+export async function listLibraryItemsPage(libraryId: string, offset: number, limit: number) {
+  const pageSize = Math.min(100, Math.max(1, limit));
+  const page = Math.floor(Math.max(0, offset) / pageSize);
+  const data = await abs(`/api/libraries/${libraryId}/items`, { limit: pageSize, page, sort: 'media.metadata.title' });
+  const progs = await progressMap();
+  return { items: (data.results || []).map((it: any) => mapItem(it, progs)), total: Number(data.total || 0) };
+}
+
 const libraryCache = new Map<'book' | 'podcast', { expires: number; items: Book[] }>();
 
 export async function allBooks(mediaType: 'book' | 'podcast'): Promise<Book[]> {
@@ -101,6 +109,16 @@ export async function allBooks(mediaType: 'book' | 'podcast'): Promise<Book[]> {
   }
   libraryCache.set(mediaType, { expires: Date.now() + 60_000, items: out });
   return out;
+}
+
+export async function allBooksPage(mediaType: 'book' | 'podcast', offset: number, limit: number, query = '') {
+  const libs = (await libraries()).filter(l => l.mediaType === mediaType);
+  // ABS can page one library efficiently. Multi-library and text searches are
+  // uncommon, and fall back to the complete cached list for correct ordering.
+  if (libs.length === 1 && !query) return listLibraryItemsPage(libs[0].id, offset, limit);
+  const q = query.trim().toLowerCase();
+  const all = (await allBooks(mediaType)).filter(b => !q || b.title.toLowerCase().includes(q) || (b.author || '').toLowerCase().includes(q) || (b.series || '').toLowerCase().includes(q));
+  return { items: all.slice(offset, offset + limit), total: all.length };
 }
 
 export async function itemDetail(id: string): Promise<Book & { chapters: Chapter[]; tracks?: any[]; overview?: string }> {
