@@ -8,12 +8,14 @@ import { db, audit, notify } from '../lib/db.js';
 import { config } from '../config.js';
 import * as storage from '../services/storage.js';
 import { cachedWebp, imageWidth } from '../services/image-cache.js';
+import { videoFrame } from '../services/video-thumbnail.js';
 
 const r = Router();
 // temp dir lives under FILES_ROOT so the final move is a same-mount rename
 const uploadTmp = path.join(config.filesRoot, '.uploads-tmp');
 fs.mkdirSync(uploadTmp, { recursive: true });
 const upload = multer({ dest: uploadTmp, limits: { fileSize: 20 * 1024 * 1024 * 1024 } });
+const VIDEO_THUMB_EXT = /\.(mp4|mov|m4v|webm|mkv|avi|wmv|flv|mpg|mpeg|3gp|ogv|ts)$/i;
 
 function u(req: AuthedRequest) { return req.user!; }
 
@@ -231,7 +233,19 @@ r.get('/thumb', async (req: AuthedRequest, res, next) => {
       res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
       return res.sendFile(cached.file);
     }
-    // videos: no thumb extraction here (ffmpeg optional) -> 204
+    // Opt-in is used by the Videos page. The general Files browser keeps its
+    // lightweight file-type tile instead of starting frame extraction there.
+    if ((kind === 'video' || VIDEO_THUMB_EXT.test(p)) && req.query.videoFrame === '1') {
+      const width = imageWidth(req.query.w, 480, 960);
+      const cached = await cachedWebp({
+        namespace: 'file-videos', key: `${u(req).id}:${p}`, source: () => videoFrame(real),
+        sourceMtimeMs: stat.mtimeMs, width, height: Math.round(width * 9 / 16), fit: 'cover', quality: 76,
+      });
+      res.setHeader('Content-Type', 'image/webp');
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+      return res.sendFile(cached.file);
+    }
     res.status(204).end();
   } catch (e) { res.status(204).end(); }
 });

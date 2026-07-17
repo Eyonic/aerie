@@ -119,6 +119,7 @@ export const api = {
     create: (path: string, name: string, content = '') => req<{ path: string }>('POST', '/api/files/create', { path, name, content }),
     rawUrl: (path: string, download = false) => api.url(`/api/files/raw?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`),
     thumbUrl: (path: string) => api.url(`/api/files/thumb?path=${encodeURIComponent(path)}`),
+    videoThumbUrl: (path: string) => api.url(`/api/files/thumb?path=${encodeURIComponent(path)}&videoFrame=1`),
     versions: (path: string) => req<any[]>('GET', `/api/files/versions?path=${encodeURIComponent(path)}`),
     restoreVersion: (path: string, versionId: string) => req('POST', '/api/files/versions/restore', { path, versionId }),
     upload: (path: string, files: File[], relativePaths?: string[], onProgress?: (pct: number) => void) => {

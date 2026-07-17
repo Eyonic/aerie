@@ -6,6 +6,7 @@ import { cx, formatBytes, formatRelative, formatDuration } from '../lib/utils';
 import { PageLoader, EmptyState, PageHeader, Badge, Spinner } from '../components/ui';
 import { VideoPlayer } from '../components/media';
 import type { MediaItem, FileEntry } from '../lib/model';
+import { imageSrcSet } from '../lib/images';
 
 // ------------------------------------------------------------------
 // Unified "personal video" — sourced from the user's Drive (Files) and,
@@ -108,7 +109,7 @@ function Thumb({ src, name }: { src?: string; name: string }) {
   const [failed, setFailed] = useState(false);
   if (!src || failed) return <ThumbPlaceholder name={name} />;
   return (
-    <img src={src} alt={name} loading="lazy" onError={() => setFailed(true)}
+    <img src={src} srcSet={imageSrcSet(src, [320, 640])} sizes="(max-width: 640px) 50vw, 320px" alt={name} loading="lazy" decoding="async" onError={() => setFailed(true)}
       className="w-full h-full object-cover" />
   );
 }
@@ -316,7 +317,7 @@ export default function Videos() {
           name: cleanName(f.name),
           folder: f.parent || '/',
           folderName: folderLabel(f.parent || '/'),
-          thumbUrl: api.files.thumbUrl(f.path),
+          thumbUrl: api.files.videoThumbUrl(f.path),
           streamUrl: api.files.rawUrl(f.path),
           downloadUrl: api.files.rawUrl(f.path, true),
           size: f.size,

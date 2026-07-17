@@ -48,15 +48,18 @@ export function directImageUrl(id: string, type = 'Primary', maxWidth?: number):
 }
 
 function mapItem(it: any): MediaItem {
+  const primary = it.ImageTags?.Primary ? imageUrl(it.Id, 'Primary', it.ImageTags.Primary) : undefined;
+  const thumb = it.ImageTags?.Thumb ? imageUrl(it.Id, 'Thumb', it.ImageTags.Thumb) : undefined;
+  const backdrop = it.BackdropImageTags?.[0] ? imageUrl(it.Id, 'Backdrop', it.BackdropImageTags[0]) : undefined;
   return {
     id: it.Id,
     type: it.Type,
     name: it.Name,
     overview: it.Overview,
     year: it.ProductionYear,
-    posterUrl: it.ImageTags?.Primary ? imageUrl(it.Id, 'Primary', it.ImageTags.Primary) : undefined,
-    backdropUrl: it.BackdropImageTags?.[0] ? imageUrl(it.Id, 'Backdrop', it.BackdropImageTags[0]) : undefined,
-    thumbUrl: it.ImageTags?.Thumb ? imageUrl(it.Id, 'Thumb', it.ImageTags.Thumb) : undefined,
+    posterUrl: primary,
+    backdropUrl: backdrop,
+    thumbUrl: thumb || (!primary && !backdrop && it.Type === 'Video' ? `/api/media/video-thumbnail/${it.Id}?w=480` : undefined),
     runtimeTicks: it.RunTimeTicks,
     runtimeMinutes: it.RunTimeTicks ? Math.round(it.RunTimeTicks / 600000000) : undefined,
     // Per-user progress/played state is Aerie-owned (playback_progress) and

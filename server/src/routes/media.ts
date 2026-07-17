@@ -5,6 +5,7 @@ import { type AuthedRequest } from '../lib/auth.js';
 import * as jf from '../services/jellyfin.js';
 import * as progress from '../services/progress.js';
 import { cachedWebp, fetchImage, imageWidth } from '../services/image-cache.js';
+import { jellyfinSource, videoFrame } from '../services/video-thumbnail.js';
 import type { MediaItem } from '../lib/model.js';
 
 const r = Router();
@@ -161,6 +162,26 @@ r.get('/image/:id/:type', async (req, res, next) => {
     res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
     res.sendFile(cached.file);
   } catch (e) { next(e); }
+});
+
+// Artwork fallback for home/personal videos that Jellyfin has not generated a
+// Primary/Thumb image for. The extracted frame is persisted as a responsive
+// WebP by the same cache used for normal artwork.
+r.get('/video-thumbnail/:id', async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const width = imageWidth(req.query.w, 480, 960);
+    const src = await jellyfinSource(id);
+    const cached = await cachedWebp({
+      namespace: 'jellyfin-videos', key: id, source: () => videoFrame(src.source),
+      sourceMtimeMs: src.mtimeMs, maxAgeMs: src.mtimeMs ? undefined : 7 * 86400_000,
+      width, height: Math.round(width * 9 / 16), fit: 'cover', quality: 76,
+    });
+    res.setHeader('Content-Type', 'image/webp');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    res.setHeader('X-Aerie-Image-Cache', cached.hit ? 'HIT' : 'MISS');
+    res.sendFile(cached.file);
+  } catch { res.status(204).end(); }
 });
 
 // Rewrite every URL in an HLS playlist so sub-playlists + segments route back
