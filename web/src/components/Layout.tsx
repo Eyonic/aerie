@@ -59,6 +59,7 @@ const PATH_FEATURE: Partial<Record<string, Exclude<keyof UserFeatures, 'autoRequ
   '/ai-images': 'ai', '/music-studio': 'ai', '/assistant': 'ai',
 };
 const canOpen = (features: UserFeatures | undefined, path: string) => {
+  if (path === '/collections') return (['videos', 'movies', 'tv', 'music'] as const).some(key => features?.[key] !== false);
   const key = PATH_FEATURE[path];
   return !key || features?.[key] !== false;
 };

@@ -38,7 +38,7 @@ r.use(async (req: AuthedRequest, res, next) => {
   }
   try {
     const parts = p.split('/').filter(Boolean);
-    const dynamic = ['item', 'stream', 'offline', 'streams', 'hls', 'image', 'preview'].includes(parts[0]);
+    const dynamic = ['item', 'stream', 'offline', 'streams', 'hls', 'image', 'preview', 'similar', 'subtitle'].includes(parts[0]);
     const id = dynamic ? parts[1] : (p === '/progress' || p === '/played') ? String(req.body?.id || '') : '';
     if (id && !await itemAllowed(req, id)) return res.status(403).json({ error: 'feature_disabled' });
     next();
@@ -142,6 +142,8 @@ r.get('/genres/:type', async (req, res, next) => {
     const types: Record<string, string> = { movies: 'Movie', series: 'Series' };
     const type = types[String(req.params.type)];
     if (!type) return res.status(400).json({ error: 'invalid_media_type' });
+    const feature = type === 'Movie' ? 'movies' : 'tv';
+    if ((req as AuthedRequest).user!.features?.[feature] === false) return res.status(403).json({ error: 'feature_disabled' });
     res.json({ genres: await jf.genres(type) });
   } catch (e) { next(e); }
 });
@@ -171,8 +173,8 @@ r.get('/item/:id/children', async (req: AuthedRequest, res, next) => {
   try { res.json(overlayItems(req.user!.id, await jf.children(String(req.params.id)))); } catch (e) { next(e); }
 });
 
-r.get('/search', async (req, res, next) => {
-  try { res.json(await jf.search(String(req.query.q || ''))); } catch (e) { if (!jf.configured()) return res.json([]); next(e); }
+r.get('/search', async (req: AuthedRequest, res, next) => {
+  try { res.json((await jf.search(String(req.query.q || ''))).filter(i => req.user!.features?.[featureForType(i.type)] !== false)); } catch (e) { if (!jf.configured()) return res.json([]); next(e); }
 });
 
 // Image proxy
@@ -332,6 +334,7 @@ r.get('/collections/:id/items', async (req: AuthedRequest, res, next) => {
     const page = await jf.pageByType(types, 0, 50, params);
     let items = overlayItems(req.user!.id, page.items);
     if (rule.unwatched) items = items.filter(i => !i.played && (i.progressPct || 0) < 95);
+    items = items.filter(i => req.user!.features?.[featureForType(i.type)] !== false);
     res.json({ items, total: items.length });
   } catch (e) { next(e); }
 });
