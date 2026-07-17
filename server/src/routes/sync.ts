@@ -3,11 +3,14 @@ import multer from 'multer';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import mime from 'mime-types';
 import { type AuthedRequest } from '../lib/auth.js';
 import { config } from '../config.js';
 import * as storage from '../services/storage.js';
 import * as dedup from '../services/dedup.js';
+import * as photolib from '../services/photolib.js';
+import { db, audit } from '../lib/db.js';
 
 const r = Router();
 const uploadTmp = path.join(config.filesRoot, '.sync-uploads-tmp');
@@ -17,6 +20,9 @@ const TOLERANCE_MS = 2000;
 const basesCache = new Map<number, { ts: number; data: any }>();
 
 function u(req: AuthedRequest) { return req.user!; }
+function conflictId(userId: number, base: string, rel: string) {
+  return crypto.createHash('sha256').update(`${userId}:${base}:${rel}`).digest('hex').slice(0, 32);
+}
 
 function cleanPart(v: string, name: string): string {
   if (typeof v !== 'string') throw Object.assign(new Error(`invalid_${name}`), { status: 400 });
@@ -29,7 +35,7 @@ function cleanPart(v: string, name: string): string {
 
 function cleanBase(v: string): string {
   const s = cleanPart(v, 'base');
-  if (!s.startsWith('Sync/')) throw Object.assign(new Error('invalid_base'), { status: 400 });
+  if (!s.startsWith('Sync/') && !s.startsWith('Photos/Camera/')) throw Object.assign(new Error('invalid_base'), { status: 400 });
   return s;
 }
 
@@ -80,10 +86,23 @@ r.post('/check', (req: AuthedRequest, res, next) => {
         if (dedup.isTombstoned(u(req).id, vpath, size)) continue;
         dedup.clearTombstone(u(req).id, vpath);
         needed.push(rel);
+        db.prepare('DELETE FROM sync_conflicts WHERE id=?').run(conflictId(u(req).id, base, rel));
         continue;
       }
       if (mtimeMs > st.mtimeMs + TOLERANCE_MS) needed.push(rel);
-      else if (st.mtimeMs > mtimeMs + TOLERANCE_MS && st.size !== size) conflicts.push(rel);
+      else if (st.mtimeMs > mtimeMs + TOLERANCE_MS && st.size !== size) {
+        const id = conflictId(u(req).id, base, rel);
+        const existing = db.prepare('SELECT resolution,status FROM sync_conflicts WHERE id=?').get(id) as any;
+        if (existing?.resolution === 'device') needed.push(rel);
+        else if (existing?.resolution !== 'server') {
+          conflicts.push(rel);
+          db.prepare(`INSERT INTO sync_conflicts (id,user_id,base,rel_path,device_size,device_mtime,server_size,server_mtime,status,resolution)
+            VALUES (?,?,?,?,?,?,?,?, 'open',NULL)
+            ON CONFLICT(id) DO UPDATE SET device_size=excluded.device_size,device_mtime=excluded.device_mtime,
+              server_size=excluded.server_size,server_mtime=excluded.server_mtime,status='open',updated_at=datetime('now')`)
+            .run(id, u(req).id, base, rel, size, mtimeMs, st.size, st.mtimeMs);
+        }
+      } else db.prepare('DELETE FROM sync_conflicts WHERE id=?').run(conflictId(u(req).id, base, rel));
     }
     res.json({ needed, conflicts });
   } catch (e) { next(e); }
@@ -103,9 +122,31 @@ r.post('/upload', upload.single('file'), async (req: AuthedRequest, res, next) =
       const t = new Date(mtimeMs);
       await fsp.utimes(dest, t, t).catch(() => {});
     }
+    if (base.startsWith('Photos/Camera/') && photolib.IMAGE_EXT.has(path.extname(rel).toLowerCase())) {
+      await photolib.indexFile(u(req), path.posix.join(base, rel)).catch(() => null);
+    }
     basesCache.delete(u(req).id);
+    db.prepare('DELETE FROM sync_conflicts WHERE id=?').run(conflictId(u(req).id, base, rel));
     res.json({ ok: true });
   } catch (e) { next(e); }
+});
+
+r.get('/conflicts', (req: AuthedRequest, res) => {
+  const items = db.prepare(`SELECT id,base,rel_path relPath,device_size deviceSize,device_mtime deviceMtime,
+    server_size serverSize,server_mtime serverMtime,status,resolution,created_at createdAt,updated_at updatedAt
+    FROM sync_conflicts WHERE user_id=? AND status='open' ORDER BY updated_at DESC`).all(u(req).id);
+  res.json({ items });
+});
+
+r.post('/conflicts/:id/resolve', (req: AuthedRequest, res) => {
+  const id = String(req.params.id); const action = String(req.body?.action || '');
+  if (!['device', 'server', 'dismiss'].includes(action)) return res.status(400).json({ error: 'invalid_resolution' });
+  const result = action === 'dismiss'
+    ? db.prepare("UPDATE sync_conflicts SET status='dismissed',resolution=NULL,updated_at=datetime('now') WHERE id=? AND user_id=?").run(id, u(req).id)
+    : db.prepare("UPDATE sync_conflicts SET status='resolved',resolution=?,updated_at=datetime('now') WHERE id=? AND user_id=?").run(action, id, u(req).id);
+  if (!result.changes) return res.status(404).json({ error: 'not_found' });
+  audit(u(req).id, u(req).username, 'sync_conflict_resolved', id, undefined, { action });
+  res.json({ ok: true });
 });
 
 r.get('/list', (req: AuthedRequest, res, next) => {

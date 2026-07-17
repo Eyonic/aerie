@@ -41,6 +41,7 @@ export function SearchOverlay() {
   const [q, setQ] = useState('');
   const [res, setRes] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [kind, setKind] = useState('all');
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -57,12 +58,12 @@ export function SearchOverlay() {
 
   useEffect(() => { if (searchOpen) setTimeout(() => inputRef.current?.focus(), 50); else { setQ(''); setRes(null); setSel(0); } }, [searchOpen]);
 
-  const run = useRef(debounce(async (query: string) => {
+  const run = useRef(debounce(async (query: string, category: string) => {
     if (!query.trim()) { setRes(null); setLoading(false); return; }
-    try { setRes(await api.search(query)); } catch { setRes(null); } finally { setLoading(false); }
+    try { setRes(await api.search(query, category)); } catch { setRes(null); } finally { setLoading(false); }
   }, 260)).current;
 
-  useEffect(() => { setSel(0); if (q.trim()) { setLoading(true); run(q); } else { setRes(null); } }, [q]);
+  useEffect(() => { setSel(0); if (q.trim()) { setLoading(true); run(q, kind); } else { setRes(null); } }, [q, kind]);
 
   const close = () => setSearchOpen(false);
   const go = (link: string) => { close(); nav(link); };
@@ -102,7 +103,7 @@ export function SearchOverlay() {
     // Search results
     if (res) {
       for (const g of res.groups) {
-        const its = g.results.map<Item>(r => ({ id: `r-${r.id}`, label: r.title, subtitle: r.subtitle, thumbUrl: r.thumbUrl, run: () => go(r.link) }));
+        const its = g.results.map<Item>(r => ({ id: `r-${r.id}`, label: r.title, subtitle: r.subtitle, thumbUrl: r.thumbUrl ? api.url(r.thumbUrl) : undefined, run: () => go(r.link) }));
         if (its.length) sections.push({ section: g.label, items: its });
       }
     }
@@ -136,6 +137,15 @@ export function SearchOverlay() {
           {loading && <Spinner size={18} className="text-brand-400" />}
           <kbd className="text-[10px] text-slate-500 border border-white/10 rounded px-1.5 py-0.5 hidden sm:block">ESC</kbd>
         </div>
+        {!!q.trim() && <div className="flex gap-1.5 px-3 py-2 border-b border-white/[0.05] overflow-x-auto">
+          {[
+            ['all', 'All'],
+            ...(user?.features?.files !== false ? [['file', 'Files']] : []),
+            ...((user?.features?.movies !== false || user?.features?.tv !== false || user?.features?.music !== false) ? [['media', 'Media']] : []),
+            ...(user?.features?.photos !== false ? [['photo', 'Photos']] : []),
+            ...(user?.features?.audiobooks !== false ? [['book', 'Audiobooks']] : []),
+          ].map(([value, label]) => <button key={value} onClick={() => setKind(value)} className={kind === value ? 'chip !bg-brand-500/25 !text-brand-200' : 'chip'}>{label}</button>)}
+        </div>}
         <div ref={listRef} className="max-h-[60vh] overflow-y-auto p-2">
           {flat.length === 0 && q.trim() && !loading && <p className="text-center text-sm muted py-10">No results for “{q}”.</p>}
           {items.map(sec => (

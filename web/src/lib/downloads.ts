@@ -11,7 +11,8 @@ export interface DownloadMeta {
   title: string;
   subtitle?: string;
   artUrl?: string;
-  kind: 'music' | 'audiobook' | 'podcast';
+  kind: 'music' | 'audiobook' | 'podcast' | 'video';
+  mediaItem?: any;
   sizeBytes: number;
   savedAt: number;
 }
@@ -34,24 +35,26 @@ export const downloads = {
     const res = await fetch(meta.url);
     if (!res.ok || !res.body) throw new Error(`download_failed_${res.status}`);
     const total = Number(res.headers.get('content-length')) || 0;
-    const reader = res.body.getReader();
-    const chunks: Uint8Array[] = [];
+    const cache = await caches.open(CACHE);
+    const u = new URL(meta.url, location.origin);
+    const key = u.origin + u.pathname;
+    const [progressBody, cacheBody] = res.body.tee();
+    const reader = progressBody.getReader();
     let received = 0;
+    const headers = new Headers({ 'Content-Type': res.headers.get('content-type') || (meta.kind === 'video' ? 'video/mp4' : 'audio/mpeg'), 'Accept-Ranges': 'bytes' });
+    if (total) headers.set('Content-Length', String(total));
+    const put = cache.put(key, new Response(cacheBody, { status: 200, headers }));
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(value); received += value.length;
+      received += value.length;
       if (onProgress) onProgress(total ? received / total : -1);
     }
-    const blob = new Blob(chunks as BlobPart[], { type: res.headers.get('content-type') || 'audio/mpeg' });
-    const cache = await caches.open(CACHE);
+    await put;
     // Cache under the token-free PATH so playback still resolves after re-login
     // (the ?token= changes, the path doesn't). The SW matches by path.
-    const u = new URL(meta.url, location.origin);
-    const key = u.origin + u.pathname;
-    await cache.put(key, new Response(blob, { status: 200, headers: { 'Content-Type': blob.type, 'Content-Length': String(blob.size), 'Accept-Ranges': 'none' } }));
     const list = readMeta().filter(d => d.id !== meta.id);
-    list.push({ ...meta, url: key, sizeBytes: blob.size, savedAt: Date.now() });
+    list.push({ ...meta, url: key, sizeBytes: total || received, savedAt: Date.now() });
     writeMeta(list);
   },
 

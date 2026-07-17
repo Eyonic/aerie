@@ -4,7 +4,17 @@
 export type Role = 'admin' | 'user';
 
 export interface UserFeatures {
+  files?: boolean;
+  photos?: boolean;
+  videos?: boolean;
+  movies?: boolean;
+  tv?: boolean;
+  music?: boolean;
   audiobooks?: boolean;
+  requests?: boolean;
+  create?: boolean;
+  ai?: boolean;
+  sync?: boolean;
   autoRequest?: boolean;
 }
 
@@ -289,6 +299,9 @@ export interface Device {
   lastSeen: string;
   backupStatus?: string;
   trusted: boolean;
+  current?: boolean;
+  ip?: string;
+  createdAt?: string;
 }
 
 export interface Automation {

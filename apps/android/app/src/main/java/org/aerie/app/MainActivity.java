@@ -47,6 +47,7 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> filePathCallback;
     private static final int FILECHOOSER_RESULT = 1;
     private static final int SYNC_TREE_RESULT = 2;
+    private boolean syncCameraPending;
     private SharedPreferences prefs;
     // Optional baked-in endpoints, set at build time (see apps/build-android.sh):
     // a public/cloud address and a LAN address. On home WiFi often only the LAN
@@ -468,10 +469,12 @@ public class MainActivity extends Activity {
                 Uri uri = data.getData();
                 int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                 try { getContentResolver().takePersistableUriPermission(uri, flags); } catch (Exception ignored) { }
-                SyncEngine.addTree(this, uri, labelForTree(uri));
+                SyncEngine.addTree(this, uri, syncCameraPending ? "Camera backup" : labelForTree(uri));
+                syncCameraPending = false;
                 SyncEngine.schedule(this);
                 SyncForegroundService.start(this, activeBase);
             }
+            syncCameraPending = false;
         } else {
             super.onActivityResult(requestCode, resultCode, data);
         }
@@ -596,6 +599,22 @@ public class MainActivity extends Activity {
                             | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
                     startActivityForResult(i, SYNC_TREE_RESULT);
                 } catch (Exception ignored) { }
+            });
+        }
+
+        @JavascriptInterface
+        public void syncAddCamera() {
+            if (!trusted()) return;
+            runOnUiThread(() -> {
+                try {
+                    syncCameraPending = true;
+                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                    if (Build.VERSION.SDK_INT >= 26) i.putExtra("android.provider.extra.INITIAL_URI",
+                            Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADCIM%2FCamera"));
+                    startActivityForResult(i, SYNC_TREE_RESULT);
+                } catch (Exception ignored) { syncCameraPending = false; }
             });
         }
 

@@ -15,6 +15,7 @@ interface Window {
     authToken?: (token: string) => void;
     syncList?: () => string;
     syncAdd?: () => void;
+    syncAddCamera?: () => void;
     syncRemove?: (uri: string) => void;
     syncNow?: () => void;
     syncStatus?: () => string;

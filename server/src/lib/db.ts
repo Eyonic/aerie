@@ -229,6 +229,81 @@ CREATE TABLE IF NOT EXISTS dedup_removed (
   removed_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (user_id, rel_path)
 );
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  device_name TEXT NOT NULL DEFAULT 'Web browser',
+  device_type TEXT NOT NULL DEFAULT 'web',
+  ip TEXT,
+  user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS skip_segments (
+  item_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  start_sec REAL NOT NULL,
+  end_sec REAL NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',
+  updated_by INTEGER,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (item_id, kind)
+);
+
+CREATE TABLE IF NOT EXISTS smart_collections (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  rule TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_smart_collections_user ON smart_collections(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS sync_conflicts (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  base TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  device_size INTEGER,
+  device_mtime INTEGER,
+  server_size INTEGER,
+  server_mtime INTEGER,
+  status TEXT NOT NULL DEFAULT 'open',
+  resolution TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_user ON sync_conflicts(user_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS upload_sessions (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  dest_path TEXT NOT NULL,
+  display_path TEXT NOT NULL,
+  total_size INTEGER NOT NULL,
+  received_size INTEGER NOT NULL DEFAULT 0,
+  last_modified INTEGER,
+  status TEXT NOT NULL DEFAULT 'uploading',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_upload_sessions_user ON upload_sessions(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS alert_events (
+  id TEXT PRIMARY KEY,
+  service TEXT NOT NULL,
+  level TEXT NOT NULL DEFAULT 'warning',
+  title TEXT NOT NULL,
+  body TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_alert_events_created ON alert_events(created_at DESC);
 `);
 
 // ---------- Migrations (add columns to existing DBs) ----------

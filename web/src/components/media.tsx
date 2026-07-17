@@ -10,6 +10,7 @@ import { Spinner } from './ui';
 import { VideoUpscaler, upscaleSupported } from '../lib/upscaler';
 import { publicUrlSync, translateLangSync } from '../lib/serverinfo';
 import { imageSrcSet } from '../lib/images';
+import { downloads } from '../lib/downloads';
 
 // 2K GPU upscaling is desktop-only (Windows/Linux): phone GPUs and Android's
 // WebView can't sustain per-frame FSR at 1440p, and macOS stays on AirPlay.
@@ -147,6 +148,9 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
   const [canPip, setCanPip] = useState(false);
   const [casting, setCasting] = useState(false);
   const [isFs, setIsFs] = useState(false);
+  const [segments, setSegments] = useState<{ kind: 'intro' | 'credits'; startSec: number; endSec: number; source: string }[]>([]);
+  const [seekPreview, setSeekPreview] = useState<{ sec: number; leftPct: number } | null>(null);
+  const [downloadPct, setDownloadPct] = useState<number | null>(null);
 
   // Server-side Google Cast (works everywhere, incl. the Android app's WebView,
   // where the Remote Playback API never fires).
@@ -254,9 +258,9 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
     return () => { setUpRes(null); u.destroy(); };
   }, [upscale]);
 
-  // Mirror playback state for the custom controls shown in upscale mode.
+  // Mirror playback state for custom controls, skip markers and hover previews.
   useEffect(() => {
-    const v = videoRef.current; if (!v || !upscale) return;
+    const v = videoRef.current; if (!v) return;
     const tu = () => setCurTime(v.currentTime || 0);
     const du = () => { if (isFinite(v.duration) && v.duration > 0) setDur(v.duration); };
     const pp = () => setPlaying(!v.paused);
@@ -274,7 +278,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
       v.removeEventListener('pause', pp);
       v.removeEventListener('volumechange', vo);
     };
-  }, [upscale, item.id]);
+  }, [item.id]);
 
   // Flip subtitle rendering between native ('showing') and overlay ('hidden').
   useEffect(() => {
@@ -371,6 +375,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
       if (da) setAudioIdx(da.index);
     };
     loadSubs().catch(() => {});
+    api.media.segments(item.id).then(r => setSegments(r.segments || [])).catch(() => setSegments([]));
     // Only save a position once playback has meaningfully advanced (>5s) so we never
     // clobber a real saved position with a near-zero value before the seek lands.
     // While casting, the local video is paused/detached — its stale position must
@@ -653,6 +658,25 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
       : subJob?.action === 'Translating'
         ? 'Translating subtitle lines…'
         : 'Matching subtitles to the dialogue…';
+  const playerSec = tvCast ? (tvState?.currentTime || 0) + tvOffset.current : curTime;
+  const activeSegment = !audio ? segments.find(s => playerSec >= s.startSec && playerSec < s.endSec - 0.5) : undefined;
+  const skipActiveSegment = () => {
+    if (!activeSegment) return;
+    if (tvCast) {
+      if (!tvCanSeek) return;
+      const target = Math.max(0, activeSegment.endSec - tvOffset.current);
+      setTvState(s => s ? { ...s, currentTime: target } : s);
+      api.cast.control(tvCast.ip, 'seek', target).catch(() => {});
+    } else if (videoRef.current) videoRef.current.currentTime = activeSegment.endSec;
+  };
+  const saveOffline = async () => {
+    if (downloads.has(`video:${item.id}`)) { toast('Already downloaded', 'info', item.name); return; }
+    setDownloadPct(0);
+    try {
+      await downloads.save({ id: `video:${item.id}`, url: api.media.offlineUrl(item.id), title: item.name, subtitle: item.seriesName || (item.year ? String(item.year) : 'Video'), artUrl: item.posterUrl || item.thumbUrl, kind: 'video', mediaItem: item }, p => setDownloadPct(p < 0 ? 0 : Math.round(p * 100)));
+      toast('Saved for offline', 'success', item.name);
+    } catch (e: any) { toast('Download failed', 'error', e?.message); } finally { setDownloadPct(null); }
+  };
 
   return (
     <div ref={containerRef} className="fixed inset-0 z-[300] bg-black flex flex-col animate-fade-in"
@@ -665,6 +689,7 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           {casting && <p className="text-xs text-brand-400 truncate">Casting to TV…</p>}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {!audio && downloads.supported() && <CtrlBtn onClick={saveOffline} title={downloadPct == null ? 'Download for offline' : `Downloading ${downloadPct}%`} active={downloads.has(`video:${item.id}`)}><Icon.Download size={20} /></CtrlBtn>}
           {upscaleOk && (
             <CtrlBtn onClick={toggleUpscale} active={upscale}
               title={upscale ? '2K GPU upscaling on — click to turn off' : 'Upscale to 2K using your GPU'}>
@@ -751,6 +776,9 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
           </div>
         </div>
       )}
+      {activeSegment && (!tvCast || tvCanSeek) && <button type="button" onClick={skipActiveSegment}
+        className="absolute right-5 sm:right-10 bottom-24 z-[20] rounded-xl bg-white text-black font-semibold px-5 py-3 shadow-float hover:bg-slate-100 active:scale-95 transition"
+        aria-label={`Skip ${activeSegment.kind}`}>Skip {activeSegment.kind}</button>}
       {loading && <div className="absolute inset-0 z-[3] grid place-items-center text-white"><Spinner size={40} /></div>}
       {error && <div className="absolute inset-0 z-[3] grid place-items-center text-center p-6"><div><p className="text-white mb-2">{error}</p><button className="btn-secondary" onClick={onClose}>Close</button></div></div>}
       {/* Casting overlay: the TV is playing, the local video stays paused */}
@@ -783,6 +811,24 @@ export function VideoPlayer({ item, audio = false, onClose }: { item: MediaItem;
         onDoubleClick={() => { if (upscaleRef.current) toggleFs(); }}
         className={cx('w-full h-full object-contain bg-black', upscale && 'opacity-0')}
         poster={item.backdropUrl || item.posterUrl} />
+      {!audio && !tvCast && !error && <div className="absolute inset-x-3 bottom-12 z-[6] h-4 cursor-pointer group"
+        onPointerLeave={() => setSeekPreview(null)}
+        onPointerMove={e => {
+          const rect = e.currentTarget.getBoundingClientRect(); const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          const total = (videoRef.current?.duration && isFinite(videoRef.current.duration) ? videoRef.current.duration : (item.runtimeTicks || 0) / 1e7) || 0;
+          if (total) setSeekPreview({ sec: pct * total, leftPct: pct * 100 });
+        }}
+        onClick={e => {
+          const rect = e.currentTarget.getBoundingClientRect(); const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          const v = videoRef.current; const total = (v?.duration && isFinite(v.duration) ? v.duration : (item.runtimeTicks || 0) / 1e7) || 0;
+          if (v && total) v.currentTime = pct * total;
+        }}>
+        <div className="absolute inset-x-0 top-1.5 h-1 rounded bg-white/0 group-hover:bg-white/25 transition-colors" />
+        {seekPreview && <div className="absolute bottom-5 -translate-x-1/2 pointer-events-none" style={{ left: `${seekPreview.leftPct}%` }}>
+          <img src={api.media.previewUrl(item.id, seekPreview.sec)} className="w-40 aspect-video object-cover rounded-lg border border-white/20 bg-black shadow-float" />
+          <p className="text-center text-xs text-white bg-black/80 rounded px-1.5 py-0.5 w-fit mx-auto -mt-6 relative">{formatDuration(seekPreview.sec)}</p>
+        </div>}
+      </div>}
       {/* 2K upscale output: FSR-rendered frames from the (invisible) video */}
       {upscale && (
         <canvas ref={canvasRef} className="absolute inset-0 z-[2] w-full h-full object-contain bg-black pointer-events-none" />

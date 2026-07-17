@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx } from '../lib/utils';
-import { toast } from '../lib/store';
+import { toast, useAuth } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Badge } from '../components/ui';
 import type { SystemHealth, ServiceStatus } from '../lib/model';
 
@@ -81,21 +81,29 @@ function BarStat({ icon, label, value, sub, pct, color }: { icon: React.ReactNod
 }
 
 export default function Monitoring() {
+  const { user } = useAuth();
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [services, setServices] = useState<ServiceStatus[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [error, setError] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [transcoding, setTranscoding] = useState<any>(null);
+  const [alerts, setAlerts] = useState<any>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const mounted = useRef(true);
 
   const load = async (initial = false) => {
     try {
-      const [h, s] = await Promise.all([api.monitoring.health(), api.monitoring.services()]);
+      const [h, s, t, a] = await Promise.all([
+        api.monitoring.health(), api.monitoring.services(), api.monitoring.transcoding().catch(() => null),
+        user?.role === 'admin' ? api.monitoring.alerts().catch(() => null) : Promise.resolve(null),
+      ]);
       if (!mounted.current) return;
       setHealth(h);
       setServices(s || []);
+      setTranscoding(t);
+      setAlerts(a);
       setLastUpdate(new Date());
       setError(false);
     } catch (e) {
@@ -243,6 +251,50 @@ export default function Monitoring() {
           )}
 
           {/* ---- Services grid ---- */}
+          {transcoding?.configured && <div className="card p-5">
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-xl bg-brand-500/15 text-brand-300 grid place-items-center"><Icon.Video size={20} /></div>
+                <div><h2 className="section-title">Video transcoding</h2><p className="text-xs muted">Jellyfin {transcoding.serverVersion || ''}</p></div>
+              </div>
+              <div className="flex gap-2">
+                <Badge color={transcoding.hardwareAcceleration && transcoding.hardwareAcceleration !== 'none' ? 'green' : 'amber'}>
+                  {transcoding.hardwareAcceleration && transcoding.hardwareAcceleration !== 'none' ? `${transcoding.hardwareAcceleration} hardware` : 'Software encoding'}
+                </Badge>
+                <Badge color={transcoding.transcoding ? 'brand' : 'slate'}>{transcoding.transcoding || 0} transcoding</Badge>
+                <Badge color="slate">{transcoding.directPlaying || 0} direct</Badge>
+              </div>
+            </div>
+            {!!transcoding.active?.length && <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-4">
+              {transcoding.active.map((s: any) => <div key={s.id} className="rounded-xl bg-white/[0.03] border border-white/[0.05] p-3">
+                <p className="text-sm text-white truncate">{s.title}</p><p className="text-xs muted truncate">{s.device} · {s.method}</p>
+                {(s.videoCodec || s.hardwareAcceleration) && <p className="text-[11px] text-slate-500 mt-1">{[s.videoCodec, s.hardwareAcceleration].filter(Boolean).join(' · ')}</p>}
+              </div>)}
+            </div>}
+          </div>}
+
+          {alerts && <div className="card p-5">
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+              <div><h2 className="section-title">Service alerts</h2><p className="text-xs muted mt-1">Notifications use two failed checks to avoid false alarms.</p></div>
+              <label className="flex items-center gap-2 text-sm text-slate-300"><input type="checkbox" checked={alerts.settings.enabled}
+                onChange={async e => { const settings = { ...alerts.settings, enabled: e.target.checked }; setAlerts({ ...alerts, settings }); await api.monitoring.saveAlerts(settings); }} /> Enabled</label>
+            </div>
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              {([['storagePct', 'Storage'], ['cpuPct', 'CPU'], ['memoryPct', 'Memory']] as const).map(([key, label]) => <label key={key} className="text-xs muted">{label} threshold
+                <div className="flex items-center mt-1"><input className="input !py-1.5" type="number" min={50} max={100} value={alerts.settings[key]}
+                  onChange={e => setAlerts({ ...alerts, settings: { ...alerts.settings, [key]: Number(e.target.value) } })}
+                  onBlur={() => api.monitoring.saveAlerts(alerts.settings).catch(() => {})} /><span className="-ml-7">%</span></div>
+              </label>)}
+            </div>
+            <div className="space-y-2 max-h-44 overflow-y-auto">
+              {(alerts.events || []).slice(0, 10).map((e: any) => <div key={e.id} className="flex items-center gap-3 text-xs border-t border-white/[0.04] pt-2">
+                <span className={cx('w-2 h-2 rounded-full shrink-0', e.level === 'error' ? 'bg-accent-red' : e.level === 'success' ? 'bg-accent-green' : 'bg-accent-amber')} />
+                <span className="text-slate-300">{e.title}</span><span className="muted truncate flex-1">{e.body}</span><span className="text-slate-600">{new Date(`${e.created_at}Z`).toLocaleString()}</span>
+              </div>)}
+              {!alerts.events?.length && <p className="text-xs muted">No alert events yet.</p>}
+            </div>
+          </div>}
+
           <div className="card !p-0 overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.05]">
               <div className="flex items-center gap-3">

@@ -7,7 +7,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
-import { authMiddleware } from './lib/auth.js';
+import { authMiddleware, requireFeature } from './lib/auth.js';
 import './lib/db.js'; // init + seed
 
 import authRouter from './routes/auth.js';
@@ -76,14 +76,14 @@ app.use('/downloads', express.static(config.downloadsDir));
 // Everything below requires auth
 app.use('/api', authMiddleware);
 app.use('/api/dashboard', dashboardRouter);
-app.use('/api/files', filesRouter);
-app.use('/api/photos', photosRouter);
+app.use('/api/files', requireFeature('files'), filesRouter);
+app.use('/api/photos', requireFeature('photos'), photosRouter);
 app.use('/api/media', mediaRouter);
 app.use('/api/books', booksRouter);
-app.use('/api/docs', docsRouter);
-app.use('/api/sheets', sheetsRouter);
-app.use('/api/ai', aiRouter);
-app.use('/api/images', imagesRouter);
+app.use('/api/docs', requireFeature('create'), docsRouter);
+app.use('/api/sheets', requireFeature('create'), sheetsRouter);
+app.use('/api/ai', requireFeature('ai'), aiRouter);
+app.use('/api/images', requireFeature('ai'), imagesRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/monitoring', monitoringRouter);
@@ -96,14 +96,14 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/integrations', integrationsRouter);
 // Re-apply integration settings saved from the UI (override > env from here on).
 loadIntegrationOverrides();
-app.use('/api/requests', requestsRouter);
-app.use('/api/autorequest', autorequestRouter);
-app.use('/api/music-gen', musicGenRouter);
+app.use('/api/requests', requireFeature('requests'), requestsRouter);
+app.use('/api/autorequest', requireFeature('requests'), autorequestRouter);
+app.use('/api/music-gen', requireFeature('ai'), musicGenRouter);
 app.use('/api/cast', castRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/subtitles', subtitlesRouter);
-app.use('/api/sync', syncRouter);
-app.use('/api/dedup', dedupRouter);
+app.use('/api/sync', requireFeature('sync'), syncRouter);
+app.use('/api/dedup', requireFeature('sync'), dedupRouter);
 app.use('/api/jobs', jobsRouter);
 
 // Serve built web app (SPA)

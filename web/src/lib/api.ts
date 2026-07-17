@@ -68,6 +68,8 @@ export const api = {
 
   sync: {
     bases: () => req<{ bases: { base: string; files: number; bytes: number; lastChange: number }[] }>('GET', '/api/sync/bases'),
+    conflicts: () => req<{ items: any[] }>('GET', '/api/sync/conflicts'),
+    resolveConflict: (id: string, action: 'device' | 'server' | 'dismiss') => req('POST', `/api/sync/conflicts/${id}/resolve`, { action }),
   },
 
   jobs: {
@@ -82,7 +84,11 @@ export const api = {
   },
 
   // ---- auth ----
-  login: (username: string, password: string, code?: string) => req<AuthResponse | { needs2fa: true }>('POST', '/api/auth/login', { username, password, code }),
+  login: (username: string, password: string, code?: string) => req<AuthResponse | { needs2fa: true }>('POST', '/api/auth/login', {
+    username, password, code,
+    deviceName: /Android|iPhone|iPad/i.test(navigator.userAgent) ? `${navigator.platform || 'Mobile'} app` : navigator.platform || 'Web browser',
+    deviceType: /Android/i.test(navigator.userAgent) ? 'android' : /iPhone|iPad/i.test(navigator.userAgent) ? 'ios' : 'web',
+  }),
   logout: () => req('POST', '/api/auth/logout'),
   me: () => req<{ user: User }>('GET', '/api/auth/me'),
   users: () => req<{ id: number; username: string; displayName: string; avatarColor: string }[]>('GET', '/api/auth/users'),
@@ -123,6 +129,30 @@ export const api = {
     versions: (path: string) => req<any[]>('GET', `/api/files/versions?path=${encodeURIComponent(path)}`),
     restoreVersion: (path: string, versionId: string) => req('POST', '/api/files/versions/restore', { path, versionId }),
     upload: (path: string, files: File[], relativePaths?: string[], onProgress?: (pct: number) => void) => {
+      if (files.some(f => f.size >= 8 * 1024 * 1024)) return (async () => {
+        const total = files.reduce((sum, f) => sum + f.size, 0) || 1; let finished = 0; const saved: string[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i]; const relativePath = relativePaths?.[i] || file.name;
+          const resumeKey = `aerie_upload:${path}:${relativePath}:${file.size}:${file.lastModified}`;
+          const previous = localStorage.getItem(resumeKey) || undefined;
+          const init = await req<{ uploadId: string; offset: number }>('POST', '/api/files/upload-resumable/init', { path, relativePath, name: file.name, size: file.size, lastModified: file.lastModified, uploadId: previous });
+          localStorage.setItem(resumeKey, init.uploadId); let offset = init.offset;
+          const chunkSize = 8 * 1024 * 1024;
+          while (offset < file.size) {
+            const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
+            const headers: Record<string, string> = { 'Content-Type': 'application/octet-stream', 'X-Upload-Offset': String(offset) };
+            if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
+            const response = await fetch(`/api/files/upload-resumable/${init.uploadId}`, { method: 'PATCH', headers, body: chunk });
+            if (response.status === 409) { const state = await response.json(); offset = Number(state.offset) || 0; continue; }
+            if (!response.ok) throw new Error(`upload_failed_${response.status}`);
+            offset = Number((await response.json()).offset) || offset + chunk.size;
+            onProgress?.(Math.round(((finished + offset) / total) * 100));
+          }
+          const done = await req<{ saved: string[] }>('POST', `/api/files/upload-resumable/${init.uploadId}/complete`);
+          saved.push(...done.saved); localStorage.removeItem(resumeKey); finished += file.size;
+        }
+        onProgress?.(100); return { saved };
+      })();
       return new Promise<{ saved: string[] }>((resolve, reject) => {
         const form = new FormData();
         form.append('path', path);
@@ -161,6 +191,8 @@ export const api = {
     subtitleUrl: (url: string) => api.url(url),
     search: (q: string) => req<MediaItem[]>('GET', `/api/media/search?q=${encodeURIComponent(q)}`).then(tokMediaList),
     streamUrl: (id: string, audio = false) => api.url(`/api/media/stream/${id}${audio ? '?audio=1' : ''}`),
+    offlineUrl: (id: string) => api.url(`/api/media/offline/${id}`),
+    previewUrl: (id: string, sec: number, width = 240) => api.url(`/api/media/preview/${id}?t=${Math.max(0, Math.round(sec))}&w=${width}`),
     imageUrl: (id: string, type = 'Primary') => api.url(`/api/media/image/${id}/${type}`),
     progress: (id: string, positionTicks: number, durationTicks?: number, seriesId?: string) =>
       req('POST', '/api/media/progress', { id, positionTicks, durationTicks, seriesId }),
@@ -168,6 +200,18 @@ export const api = {
     recommendations: () => req<{ nextUp: MediaItem[]; suggestions: MediaItem[]; recentlyAdded: MediaItem[] }>('GET', '/api/media/recommendations')
       .then(r => ({ nextUp: tokMediaList(r.nextUp), suggestions: tokMediaList(r.suggestions), recentlyAdded: tokMediaList(r.recentlyAdded) })),
     similar: (id: string) => req<MediaItem[]>('GET', `/api/media/similar/${id}`).then(tokMediaList),
+    segments: (id: string) => req<{ segments: { kind: 'intro' | 'credits'; startSec: number; endSec: number; source: string }[] }>('GET', `/api/media/item/${id}/segments`),
+    saveSegments: (id: string, segments: any[]) => req('PUT', `/api/media/item/${id}/segments`, { segments }),
+    scanStatus: () => req<any>('GET', '/api/media/library-scan'),
+    startScan: () => req('POST', '/api/media/library-scan'),
+    metadata: (id: string) => req<any>('GET', `/api/media/item/${id}/metadata`),
+    saveMetadata: (id: string, data: any) => req('PATCH', `/api/media/item/${id}/metadata`, data),
+    refreshMetadata: (id: string) => req('POST', `/api/media/item/${id}/refresh`),
+    collections: () => req<{ items: any[] }>('GET', '/api/media/collections'),
+    collectionItems: (id: string) => req<{ items: MediaItem[]; total: number }>('GET', `/api/media/collections/${id}/items`).then(r => ({ ...r, items: tokMediaList(r.items) })),
+    createCollection: (data: any) => req<any>('POST', '/api/media/collections', data),
+    updateCollection: (id: string, data: any) => req<any>('PATCH', `/api/media/collections/${id}`, data),
+    removeCollection: (id: string) => req('DELETE', `/api/media/collections/${id}`),
   },
 
   // ---- subtitles ----
@@ -336,7 +380,7 @@ export const api = {
   },
 
   // ---- search ----
-  search: (q: string) => req<SearchResponse>('GET', `/api/search?q=${encodeURIComponent(q)}`)
+  search: (q: string, kind = 'all') => req<SearchResponse>('GET', `/api/search?q=${encodeURIComponent(q)}&kind=${encodeURIComponent(kind)}`)
     .then(r => ({ ...r, groups: (r.groups || []).map(g => ({ ...g, results: g.results.map(x => ({ ...x, thumbUrl: tokUrl(x.thumbUrl) })) })) })),
 
   // ---- shares ----
@@ -372,6 +416,9 @@ export const api = {
     all: () => req<{ health: SystemHealth; services: ServiceStatus[] }>('GET', '/api/monitoring'),
     health: () => req<SystemHealth>('GET', '/api/monitoring/health'),
     services: () => req<ServiceStatus[]>('GET', '/api/monitoring/services'),
+    transcoding: () => req<any>('GET', '/api/monitoring/transcoding'),
+    alerts: () => req<any>('GET', '/api/monitoring/alerts'),
+    saveAlerts: (settings: { enabled: boolean; storagePct: number; cpuPct: number; memoryPct: number }) => req('POST', '/api/monitoring/alerts/settings', settings),
   },
   backups: {
     list: () => req<BackupStatus[]>('GET', '/api/backups'),
@@ -391,6 +438,7 @@ export const api = {
     list: () => req<Device[]>('GET', '/api/devices'),
     heartbeat: (name: string, type: string) => req<Device>('POST', '/api/devices/heartbeat', { name, type }),
     revoke: (id: string) => req('DELETE', `/api/devices/${id}`),
+    revokeOthers: () => req('POST', '/api/devices/revoke-others'),
   },
   notifications: {
     list: () => req<Notification[]>('GET', '/api/notifications'),

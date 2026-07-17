@@ -64,9 +64,12 @@ async function buildContinueListening(userId: number): Promise<Book[]> {
 r.get('/', async (req: AuthedRequest, res) => {
   const user = req.user!;
   const audiobooksEnabled = user.features?.audiobooks !== false;
+  const filesEnabled = user.features?.files !== false;
+  const photosEnabled = user.features?.photos !== false;
+  const videoEnabled = user.features?.movies !== false || user.features?.tv !== false || user.features?.videos !== false;
 
   // recent files (shallow walk)
-  const recentFiles = (() => {
+  const recentFiles = filesEnabled ? (() => {
     try {
       const root = storage.userRoot(user.username);
       const out: any[] = [];
@@ -85,12 +88,12 @@ r.get('/', async (req: AuthedRequest, res) => {
       out.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
       return out.slice(0, 8);
     } catch { return []; }
-  })();
+  })() : [];
 
   const [storageUsage, recentPhotos, continueWatching, continueListening, services, health, backups] = await Promise.all([
-    safe(storage.computeUsage(user.username, user.id), { usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }),
-    safe(Promise.resolve(recentNativePhotos(user.id, 12)), [] as any[]),
-    safe(buildContinueWatching(user.id), [] as any[]),
+    filesEnabled ? safe(storage.computeUsage(user.username, user.id), { usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }) : Promise.resolve({ usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }),
+    photosEnabled ? safe(Promise.resolve(recentNativePhotos(user.id, 12)), [] as any[]) : Promise.resolve([]),
+    videoEnabled ? safe(buildContinueWatching(user.id), [] as any[]) : Promise.resolve([]),
     audiobooksEnabled ? safe(buildContinueListening(user.id), [] as any[]) : Promise.resolve([]),
     safe(serviceStatuses(), [] as any[]),
     safe(systemHealth(), null as any),

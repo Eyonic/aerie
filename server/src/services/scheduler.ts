@@ -5,7 +5,8 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { db, notify, audit } from '../lib/db.js';
+import crypto from 'node:crypto';
+import { db, notify, audit, getSetting } from '../lib/db.js';
 import { config } from '../config.js';
 import { serviceStatuses, systemHealth } from './monitoring.js';
 import * as autorequest from './autorequest.js';
@@ -20,6 +21,11 @@ function admins(): { id: number }[] {
 }
 function notifyAdmins(title: string, body: string, level = 'warning', link?: string) {
   for (const a of admins()) notify(a.id, title, body, level, link);
+}
+function alertEvent(service: string, title: string, body: string, level = 'warning') {
+  db.prepare('INSERT INTO alert_events (id,service,level,title,body) VALUES (?,?,?,?,?)')
+    .run(crypto.randomUUID(), service, level, title, body);
+  notifyAdmins(title, body, level, '/monitoring');
 }
 
 function autoUsers(): { id: number; features: string }[] {
@@ -59,20 +65,31 @@ function isEnabled(nameLike: string): boolean {
   return !row || !!row.enabled; // default on if not present
 }
 
-let prevOnline: Record<string, boolean> = {};
+const failureStreak: Record<string, number> = {};
+const serviceAlerted: Record<string, boolean> = {};
+const resourceAlerted: Record<string, boolean> = {};
 async function healthCheck() {
   try {
+    if (getSetting('service_alerts', 'true') !== 'true') return;
     const svcs = await serviceStatuses();
     for (const s of svcs) {
-      const was = prevOnline[s.key];
-      if (was === true && !s.online) notifyAdmins('Service down', `${s.name} is not responding.`, 'error', '/monitoring');
-      if (was === false && s.online) notifyAdmins('Service recovered', `${s.name} is back online.`, 'success', '/monitoring');
-      prevOnline[s.key] = s.online;
+      failureStreak[s.key] = s.online ? 0 : (failureStreak[s.key] || 0) + 1;
+      if (!s.online && failureStreak[s.key] === 2 && !serviceAlerted[s.key]) { alertEvent(s.key, 'Service down', `${s.name} has failed two consecutive checks.`, 'error'); serviceAlerted[s.key] = true; }
+      if (s.online && serviceAlerted[s.key]) { alertEvent(s.key, 'Service recovered', `${s.name} is back online.`, 'success'); serviceAlerted[s.key] = false; }
     }
     const h = await systemHealth();
     const pct = h.storageTotalTb ? (h.storageUsedTb / h.storageTotalTb) * 100 : 0;
-    if (pct >= 90 && !storageAlerted) { notifyAdmins('Storage almost full', `Storage is ${pct.toFixed(0)}% full.`, 'warning', '/monitoring'); storageAlerted = true; bumpAutomation('Storage'); }
-    if (pct < 85) storageAlerted = false;
+    const storageThreshold = Number(getSetting('storage_alert_pct', '90'));
+    if (pct >= storageThreshold && !storageAlerted) { alertEvent('storage', 'Storage almost full', `Storage is ${pct.toFixed(0)}% full.`, 'warning'); storageAlerted = true; bumpAutomation('Storage'); }
+    if (pct < storageThreshold - 5) storageAlerted = false;
+    const memPct = h.memTotalGb ? h.memUsedGb / h.memTotalGb * 100 : 0;
+    for (const [key, value, threshold] of [
+      ['cpu', h.cpuPct, Number(getSetting('cpu_alert_pct', '95'))],
+      ['memory', memPct, Number(getSetting('memory_alert_pct', '95'))],
+    ] as const) {
+      if (value >= threshold && !resourceAlerted[key]) { alertEvent(key, `${key === 'cpu' ? 'CPU' : 'Memory'} pressure`, `${key === 'cpu' ? 'CPU' : 'Memory'} usage reached ${value.toFixed(0)}%.`); resourceAlerted[key] = true; }
+      if (value < threshold - 10) resourceAlerted[key] = false;
+    }
     bumpAutomation('backup failure'); // health watcher counts as the alert automation
   } catch { /* best-effort */ }
 }

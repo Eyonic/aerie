@@ -35,7 +35,7 @@ r.patch('/profile', (req: AuthedRequest, res) => {
 // Upload a profile picture: re-encoded through sharp (256×256 webp, centre-cropped)
 // which also strips EXIF and neutralizes anything that isn't a real image.
 r.post('/avatar', avatarUpload.single('file'), async (req: AuthedRequest, res) => {
-  const f = req.file;
+  const f = (req as any).file;
   if (!f) return res.status(400).json({ error: 'no_file' });
   try {
     fs.mkdirSync(avatarsDir, { recursive: true });

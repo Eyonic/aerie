@@ -25,11 +25,22 @@ self.addEventListener('fetch', (e) => {
   // Offline media: if this stream/file was downloaded (cached by path, token
   // stripped), serve it from disk so it plays with no connection. Falls through
   // to the network when not downloaded.
-  if (/^\/api\/(books|media)\/(stream|file)\//.test(url.pathname)) {
+  if (/^\/api\/(books|media)\/(stream|file|offline)\//.test(url.pathname)) {
     e.respondWith(
       caches.open('cloudbox-media')
         .then((c) => c.match(url.origin + url.pathname))
-        .then((hit) => hit || fetch(e.request))
+        .then(async (hit) => {
+          if (!hit) return fetch(e.request);
+          const range = e.request.headers.get('range');
+          if (!range) return hit;
+          const blob = await hit.blob();
+          const match = /bytes=(\d+)-(\d*)/.exec(range);
+          if (!match) return hit;
+          const start = Number(match[1]); const end = match[2] ? Math.min(blob.size - 1, Number(match[2])) : blob.size - 1;
+          if (start >= blob.size || end < start) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${blob.size}` } });
+          const part = blob.slice(start, end + 1, blob.type);
+          return new Response(part, { status: 206, headers: { 'Content-Type': blob.type, 'Content-Length': String(part.size), 'Content-Range': `bytes ${start}-${end}/${blob.size}`, 'Accept-Ranges': 'bytes' } });
+        })
         .catch(() => fetch(e.request))
     );
     return;

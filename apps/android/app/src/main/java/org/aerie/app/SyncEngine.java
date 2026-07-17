@@ -194,7 +194,9 @@ public class SyncEngine {
                     o.put("mtimeMs", item.mtimeMs);
                     payload.put(o);
                 }
-                String base = "Sync/" + sanitize(Build.MODEL) + " " + sanitize(label);
+                String base = "Camera backup".equals(label)
+                        ? "Photos/Camera/" + sanitize(Build.MODEL)
+                        : "Sync/" + sanitize(Build.MODEL) + " " + sanitize(label);
                 HashSet<String> needed = check(server, token, base, payload);
                 WorkFolder wf = new WorkFolder(label, base);
                 for (FileItem item : files) {

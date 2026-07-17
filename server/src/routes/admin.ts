@@ -8,9 +8,9 @@ const r = Router();
 r.use(requireAdmin);
 
 function cleanFeatures(raw: any) {
-  const out: { audiobooks?: boolean; autoRequest?: boolean } = {};
-  if (raw && typeof raw === 'object' && raw.audiobooks !== undefined) out.audiobooks = !!raw.audiobooks;
-  if (raw && typeof raw === 'object' && raw.autoRequest !== undefined) out.autoRequest = !!raw.autoRequest;
+  const out: Record<string, boolean> = {};
+  const keys = ['files', 'photos', 'videos', 'movies', 'tv', 'music', 'audiobooks', 'requests', 'create', 'ai', 'sync', 'autoRequest'];
+  if (raw && typeof raw === 'object') for (const key of keys) if (raw[key] !== undefined) out[key] = !!raw[key];
   return out;
 }
 

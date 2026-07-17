@@ -85,7 +85,7 @@ export async function* chatStream(messages: AiChatMessage[], opts: { temperature
 }
 
 // ---- tool-calling (non-streaming) -> {content, toolCalls, rawMessage} ----
-export async function chatWithTools(messages: any[], tools: any[], opts: { temperature?: number } = {}): Promise<{ content: string; toolCalls: { id: string; name: string; args: any }[]; rawMessage: any }> {
+export async function chatWithTools(messages: any[], tools: readonly any[], opts: { temperature?: number } = {}): Promise<{ content: string; toolCalls: { id: string; name: string; args: any }[]; rawMessage: any }> {
   if (useDeepseek()) {
     const r = await fetch(`${ds().url}/chat/completions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ds().apiKey}` },

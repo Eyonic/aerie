@@ -1,10 +1,11 @@
-import { Router } from 'express';
+import express, { Router } from 'express';
+import crypto from 'node:crypto';
 import multer from 'multer';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { type AuthedRequest } from '../lib/auth.js';
-import { db, audit, notify } from '../lib/db.js';
+import { db, audit, notify, getSetting } from '../lib/db.js';
 import { config } from '../config.js';
 import * as storage from '../services/storage.js';
 import { cachedWebp, imageWidth } from '../services/image-cache.js';
@@ -255,7 +256,7 @@ r.post('/upload', upload.array('files'), async (req: AuthedRequest, res, next) =
   try {
     const dest = (req.body?.path as string) || '/';
     const relPaths: string[] = [].concat(req.body?.relativePaths || []);
-    const files = (req.files as Express.Multer.File[]) || [];
+    const files = ((req as any).files as any[]) || [];
     const saved: string[] = [];
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
@@ -269,6 +270,64 @@ r.post('/upload', upload.array('files'), async (req: AuthedRequest, res, next) =
     audit(u(req).id, u(req).username, 'upload', `${saved.length} files -> ${dest}`);
     if (saved.length) notify(u(req).id, 'Upload complete', `${saved.length} file(s) uploaded to ${dest}`, 'success', '/files');
     res.json({ ok: true, saved });
+  } catch (e) { next(e); }
+});
+
+// Chunked uploads survive a dropped mobile connection or browser restart. The
+// client keeps the session id and asks for the server offset before continuing.
+r.post('/upload-resumable/init', async (req: AuthedRequest, res, next) => {
+  try {
+    const total = Math.max(0, Math.floor(Number(req.body?.size)));
+    const max = Number(getSetting('max_upload_mb', '20480')) * 1024 * 1024;
+    if (!Number.isFinite(total) || total > max) return res.status(413).json({ error: 'upload_too_large' });
+    const parent = String(req.body?.path || '/');
+    const rel = String(req.body?.relativePath || req.body?.name || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!rel || rel.split('/').some(p => !p || p === '.' || p === '..')) return res.status(400).json({ error: 'invalid_path' });
+    const display = path.posix.join(parent, rel);
+    const dest = storage.resolve(u(req).username, display);
+    const wanted = String(req.body?.uploadId || '');
+    let row = wanted ? db.prepare(`SELECT * FROM upload_sessions WHERE id=? AND user_id=? AND status='uploading'`).get(wanted, u(req).id) as any : null;
+    if (row && (row.dest_path !== dest || row.total_size !== total || !fs.existsSync(path.join(uploadTmp, `resume-${row.id}`)))) row = null;
+    if (row) {
+      const actual = fs.statSync(path.join(uploadTmp, `resume-${row.id}`)).size;
+      if (actual !== row.received_size) db.prepare("UPDATE upload_sessions SET received_size=?,updated_at=datetime('now') WHERE id=?").run(actual, row.id);
+      return res.json({ uploadId: row.id, offset: actual, size: total });
+    }
+    const id = crypto.randomUUID(); const temp = path.join(uploadTmp, `resume-${id}`);
+    await fsp.writeFile(temp, Buffer.alloc(0));
+    db.prepare(`INSERT INTO upload_sessions (id,user_id,dest_path,display_path,total_size,last_modified) VALUES (?,?,?,?,?,?)`)
+      .run(id, u(req).id, dest, display, total, Number(req.body?.lastModified) || null);
+    res.json({ uploadId: id, offset: 0, size: total });
+  } catch (e) { next(e); }
+});
+
+r.patch('/upload-resumable/:id', express.raw({ type: 'application/octet-stream', limit: '9mb' }), async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id); const row = db.prepare(`SELECT * FROM upload_sessions WHERE id=? AND user_id=? AND status='uploading'`).get(id, u(req).id) as any;
+    if (!row) return res.status(404).json({ error: 'upload_session_not_found' });
+    const offset = Math.max(0, Math.floor(Number(req.headers['x-upload-offset'])));
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const temp = path.join(uploadTmp, `resume-${id}`); const actual = fs.statSync(temp).size;
+    if (offset !== actual) return res.status(409).json({ error: 'offset_mismatch', offset: actual });
+    if (actual + body.length > row.total_size) return res.status(400).json({ error: 'chunk_exceeds_size' });
+    await fsp.appendFile(temp, body); const received = actual + body.length;
+    db.prepare("UPDATE upload_sessions SET received_size=?,updated_at=datetime('now') WHERE id=?").run(received, id);
+    res.json({ uploadId: id, offset: received, complete: received === row.total_size });
+  } catch (e) { next(e); }
+});
+
+r.post('/upload-resumable/:id/complete', async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id); const row = db.prepare(`SELECT * FROM upload_sessions WHERE id=? AND user_id=? AND status='uploading'`).get(id, u(req).id) as any;
+    if (!row) return res.status(404).json({ error: 'upload_session_not_found' });
+    const temp = path.join(uploadTmp, `resume-${id}`); const actual = fs.statSync(temp).size;
+    if (actual !== row.total_size) return res.status(409).json({ error: 'upload_incomplete', offset: actual, size: row.total_size });
+    fs.mkdirSync(path.dirname(row.dest_path), { recursive: true }); await storage.safeMove(temp, row.dest_path);
+    if (row.last_modified) await fsp.utimes(row.dest_path, new Date(), new Date(row.last_modified)).catch(() => {});
+    db.prepare('DELETE FROM upload_sessions WHERE id=?').run(id);
+    audit(u(req).id, u(req).username, 'resumable_upload', row.display_path);
+    notify(u(req).id, 'Upload complete', `${path.posix.basename(row.display_path)} uploaded`, 'success', '/files');
+    res.json({ ok: true, saved: [row.display_path] });
   } catch (e) { next(e); }
 });
 

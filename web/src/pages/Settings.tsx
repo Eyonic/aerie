@@ -7,6 +7,7 @@ import { cx, formatRelative, initials, copyText } from '../lib/utils';
 import { useAuth, toast } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, ConfirmModal, Modal, Spinner, Badge } from '../components/ui';
 import type { User, Device, Notification, AiMode } from '../lib/model';
+import { applyAppearance, cacheAppearance, DEFAULT_APPEARANCE, type AppearancePrefs } from '../lib/preferences';
 
 type TabKey = 'profile' | 'security' | 'devices' | 'ai' | 'notifications' | 'preferences';
 
@@ -421,6 +422,7 @@ function DevicesTab() {
   const [error, setError] = useState(false);
   const [revoking, setRevoking] = useState<Device | null>(null);
   const [busy, setBusy] = useState(false);
+  const [revokingOthers, setRevokingOthers] = useState(false);
 
   const load = async () => {
     setError(false);
@@ -458,10 +460,11 @@ function DevicesTab() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-medium text-white truncate">{d.name}</p>
-                  {d.trusted && <Badge color="green">Trusted</Badge>}
+                  {d.current ? <Badge color="brand">Current</Badge> : d.trusted && <Badge color="green">Active</Badge>}
                 </div>
                 <p className="text-xs muted mt-0.5 flex items-center gap-1.5">
                   <Icon.Clock size={12} /> {formatRelative(d.lastSeen)}
+                  {d.ip && <span className="text-slate-600">· {d.ip}</span>}
                   {d.backupStatus && <span className="text-slate-600">· backup {d.backupStatus}</span>}
                 </p>
               </div>
@@ -473,6 +476,7 @@ function DevicesTab() {
           ))}
         </div>
       )}
+      {devices.some(d => !d.current) && <div className="mt-4 flex justify-end"><button className="btn-secondary" disabled={revokingOthers} onClick={async () => { setRevokingOthers(true); try { await api.devices.revokeOthers(); await load(); toast('Other sessions signed out', 'success'); } finally { setRevokingOthers(false); } }}><Icon.Logout size={15} /> {revokingOthers ? 'Signing out…' : 'Sign out all other devices'}</button></div>}
       <ConfirmModal open={!!revoking} onClose={() => !busy && setRevoking(null)} onConfirm={revoke} danger
         title="Sign out device" confirmLabel={busy ? 'Revoking…' : 'Sign out'}
         message={`"${revoking?.name}" will be signed out immediately and must re-authenticate to access your cloud.`} />
@@ -602,43 +606,8 @@ function NotificationsTab() {
 // Only controls that produce a real, observable effect live here. Both are applied
 // app-wide by toggling classes on <html> (persist across SPA navigation) backed by an
 // injected stylesheet, and are cached to localStorage in addition to the server.
-interface Prefs {
-  reduceMotion: boolean;
-  compact: boolean;
-}
-const DEFAULT_PREFS: Prefs = { reduceMotion: false, compact: false };
-const PREFS_LS_KEY = 'cloudbox:prefs'; // legacy storage key — keep (renaming resets saved prefs on installed clients)
-const PREFS_STYLE_ID = 'cloudbox-prefs-style';
-
-function ensurePrefStyle() {
-  if (typeof document === 'undefined' || document.getElementById(PREFS_STYLE_ID)) return;
-  const el = document.createElement('style');
-  el.id = PREFS_STYLE_ID;
-  el.textContent = [
-    'html.cb-reduce-motion *, html.cb-reduce-motion *::before, html.cb-reduce-motion *::after {',
-    '  animation-duration: 0.001ms !important; animation-delay: 0ms !important;',
-    '  animation-iteration-count: 1 !important; transition-duration: 0.001ms !important;',
-    '  transition-delay: 0ms !important; scroll-behavior: auto !important;',
-    '}',
-    'html.cb-compact { font-size: 14px; }',
-  ].join('\n');
-  document.head.appendChild(el);
-}
-
-function applyAppearance(p: Partial<Prefs>) {
-  if (typeof document === 'undefined') return;
-  ensurePrefStyle();
-  const root = document.documentElement;
-  root.classList.toggle('cb-reduce-motion', !!p.reduceMotion);
-  root.classList.toggle('cb-compact', !!p.compact);
-}
-
-function cacheAppearance(p: Prefs) {
-  try { localStorage.setItem(PREFS_LS_KEY, JSON.stringify({ reduceMotion: p.reduceMotion, compact: p.compact })); } catch { /* */ }
-}
-
-// Re-apply cached appearance as soon as this chunk loads so the effect survives reloads.
-try { applyAppearance(JSON.parse(localStorage.getItem(PREFS_LS_KEY) || '{}')); } catch { /* */ }
+type Prefs = AppearancePrefs & Record<string, any>;
+const DEFAULT_PREFS: Prefs = { ...DEFAULT_APPEARANCE };
 
 function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -731,6 +700,15 @@ function PreferencesTab() {
           </PrefRow>
           <PrefRow title="Reduce motion" desc="Minimize animations and transitions everywhere.">
             <Toggle on={prefs.reduceMotion} onChange={v => update({ reduceMotion: v })} />
+          </PrefRow>
+          <PrefRow title="High contrast" desc="Strengthen borders, focus indicators and text contrast.">
+            <Toggle on={prefs.highContrast} onChange={v => update({ highContrast: v })} />
+          </PrefRow>
+          <PrefRow title="Larger text" desc="Increase interface text and controls without browser zoom.">
+            <Toggle on={prefs.largeText} onChange={v => update({ largeText: v })} />
+          </PrefRow>
+          <PrefRow title="Interface language" desc="Use Aerie in English or Dutch.">
+            <select className="input !w-36" value={prefs.language} onChange={e => update({ language: e.target.value as 'en' | 'nl' })}><option value="en">English</option><option value="nl">Nederlands</option></select>
           </PrefRow>
           <PrefRow title="Auto-add movies, shows & music I'll like" desc="Up to 3 a week, based on your history. You'll get a notification for each.">
             {autoRequest === null ? <Spinner size={16} /> : (

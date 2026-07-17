@@ -10,7 +10,8 @@ import { takePendingHandoff } from '../lib/handoff';
 import { publicUrlSync, getPublicUrl } from '../lib/serverinfo';
 import { SearchOverlay } from './SearchOverlay';
 import { Toaster, Menu, PageLoader } from './ui';
-import type { Notification } from '../lib/model';
+import type { Notification, UserFeatures } from '../lib/model';
+import { useLanguage } from '../lib/i18n';
 
 const NAV: { section?: string; items: { to: string; label: string; icon: React.ReactNode }[] }[] = [
   { items: [{ to: '/', label: 'Dashboard', icon: <Icon.Dashboard size={19} /> }, { to: '/files', label: 'Files', icon: <Icon.Files size={19} /> }] },
@@ -23,6 +24,7 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
     { to: '/audiobooks', label: 'Audiobooks', icon: <Icon.Book size={19} /> },
     { to: '/requests', label: 'Request Movies', icon: <Icon.Plus size={19} /> },
     { to: '/downloads', label: 'Downloads', icon: <Icon.Download size={19} /> },
+    { to: '/collections', label: 'Collections', icon: <Icon.Star size={19} /> },
     { to: '/history', label: 'History', icon: <Icon.Clock size={19} /> },
   ] },
   { section: 'Create', items: [
@@ -39,6 +41,7 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
     { to: '/backups', label: 'Backups', icon: <Icon.Backup size={19} /> },
     { to: '/sync', label: 'Folder Sync', icon: <Icon.Refresh size={19} /> },
     { to: '/monitoring', label: 'Monitoring', icon: <Icon.Monitor size={19} /> },
+    { to: '/library-tools', label: 'Library Tools', icon: <Icon.Settings size={19} /> },
     { to: '/admin', label: 'Admin', icon: <Icon.Admin size={19} /> },
     { to: '/integrations', label: 'Integrations', icon: <Icon.Link size={19} /> },
     { to: '/settings', label: 'Settings', icon: <Icon.Settings size={19} /> },
@@ -48,14 +51,23 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
 
 // Admin-only destinations, hidden from regular members (the pages also guard
 // themselves client-side and the API returns 403 for non-admins).
-const ADMIN_ONLY = new Set(['/admin', '/integrations']);
-const AUDIOBOOKS_ONLY = new Set(['/audiobooks', '/podcasts']);
+const ADMIN_ONLY = new Set(['/admin', '/integrations', '/library-tools']);
+const PATH_FEATURE: Partial<Record<string, Exclude<keyof UserFeatures, 'autoRequest'>>> = {
+  '/files': 'files', '/photos': 'photos', '/videos': 'videos', '/movies': 'movies', '/tv': 'tv', '/music': 'music',
+  '/audiobooks': 'audiobooks', '/podcasts': 'audiobooks', '/requests': 'requests', '/sync': 'sync',
+  '/documents': 'create', '/spreadsheets': 'create', '/image-editor': 'create',
+  '/ai-images': 'ai', '/music-studio': 'ai', '/assistant': 'ai',
+};
+const canOpen = (features: UserFeatures | undefined, path: string) => {
+  const key = PATH_FEATURE[path];
+  return !key || features?.[key] !== false;
+};
 
 function Sidebar() {
   const { user } = useAuth();
   const { sidebarOpen, setSidebarOpen } = useUi();
   const isAdmin = user?.role === 'admin';
-  const audiobooksEnabled = user?.features?.audiobooks !== false;
+  const { t: tr } = useLanguage();
   return (
     <>
       {sidebarOpen && <div className="fixed inset-0 bg-black/50 z-40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
@@ -66,21 +78,21 @@ function Sidebar() {
           <img src="/logo.svg?v=2" alt="Aerie" className="w-12 h-12 object-contain shrink-0" />
           <div>
             <p className="font-bold text-white tracking-tight leading-none">Aerie</p>
-            <p className="text-[10px] text-slate-500 mt-0.5">private cloud</p>
+            <p className="text-[10px] text-slate-500 mt-0.5">{tr('private cloud')}</p>
           </div>
         </div>
         <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-4">
           {NAV.map((group, gi) => (
             <div key={gi}>
-              {group.section && <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-600 px-3 mb-1.5">{group.section}</p>}
+              {group.section && <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-600 px-3 mb-1.5">{tr(group.section)}</p>}
               <div className="space-y-0.5">
                 {group.items
                   .filter(it => !ADMIN_ONLY.has(it.to) || isAdmin)
-                  .filter(it => audiobooksEnabled || !AUDIOBOOKS_ONLY.has(it.to))
+                  .filter(it => canOpen(user?.features, it.to))
                   .map(it => (
                   <NavLink key={it.to} to={it.to} end={it.to === '/'} onClick={() => setSidebarOpen(false)}
                     className={({ isActive }) => cx('nav-item', isActive && 'nav-item-active')}>
-                    {it.icon}<span>{it.label}</span>
+                    {it.icon}<span>{tr(it.label)}</span>
                   </NavLink>
                 ))}
               </div>
@@ -126,12 +138,13 @@ function Topbar() {
   const { user, logout } = useAuth();
   const { setSearchOpen, setSidebarOpen } = useUi();
   const nav = useNavigate();
+  const { t: tr } = useLanguage();
   return (
     <header className="h-16 shrink-0 flex items-center gap-3 px-4 lg:px-6 border-b border-white/[0.06] glass z-30">
       <button className="icon-btn lg:hidden" onClick={() => setSidebarOpen(true)}><Icon.Menu size={20} /></button>
       <button onClick={() => setSearchOpen(true)}
         className="flex-1 max-w-md flex items-center gap-2.5 rounded-xl bg-ink-900/70 border border-white/[0.06] px-3.5 py-2 text-sm text-slate-500 hover:border-white/[0.12] transition">
-        <Icon.Search size={17} /><span>Search everything…</span>
+        <Icon.Search size={17} /><span>{tr('Search everything…')}</span>
         <kbd className="ml-auto text-[10px] border border-white/10 rounded px-1.5 py-0.5 hidden sm:block">⌘K</kbd>
       </button>
       <div className="flex-1" />
@@ -151,10 +164,10 @@ function Topbar() {
             <Icon.ChevronDown size={15} className="text-slate-500 hidden sm:block" />
           </button>}
         items={[
-          { label: 'Settings', icon: <Icon.Settings size={16} />, onClick: () => nav('/settings') },
-          { label: 'Devices', icon: <Icon.Device size={16} />, onClick: () => nav('/settings?tab=devices') },
+          { label: tr('Settings'), icon: <Icon.Settings size={16} />, onClick: () => nav('/settings') },
+          { label: tr('Devices'), icon: <Icon.Device size={16} />, onClick: () => nav('/settings?tab=devices') },
           { divider: true, label: '', onClick: () => {} },
-          { label: 'Sign out', icon: <Icon.Logout size={16} />, danger: true, onClick: async () => { await logout(); nav('/login'); } },
+          { label: tr('Sign out'), icon: <Icon.Logout size={16} />, danger: true, onClick: async () => { await logout(); nav('/login'); } },
         ]}
       />
     </header>
@@ -171,18 +184,20 @@ const TABS = [
   { to: '/assistant', label: 'AI', icon: <Icon.Robot size={22} /> },
 ];
 function BottomTabBar() {
+  const { user } = useAuth();
   const { pathname } = useLocation();
+  const { t: tr } = useLanguage();
   // The image editor has its own full-width bottom tool bar; the global tabs would
   // overlap it and hijack taps. Hide there.
   if (pathname.startsWith('/image-editor')) return null;
   return (
     <nav className="lg:hidden shrink-0 glass-strong border-t border-white/[0.07] flex items-stretch z-40"
       style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      {TABS.map(t => (
+      {TABS.filter(t => canOpen(user?.features, t.to)).map(t => (
         <NavLink key={t.to} to={t.to} end={t.to === '/'}
           className={({ isActive }) => cx('flex-1 flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] font-medium transition-colors',
             isActive ? 'text-brand-400' : 'text-slate-500 hover:text-slate-300')}>
-          {t.icon}<span>{t.label}</span>
+          {t.icon}<span>{tr(t.label)}</span>
         </NavLink>
       ))}
     </nav>
@@ -211,6 +226,13 @@ function InsecureBanner() {
 
 export function Layout() {
   const { current } = usePlayer();
+  const { user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  useEffect(() => {
+    const root = '/' + location.pathname.split('/').filter(Boolean)[0];
+    if ((ADMIN_ONLY.has(root) && user?.role !== 'admin') || !canOpen(user?.features, root)) navigate('/', { replace: true });
+  }, [location.pathname, user?.role, user?.features]);
   // heartbeat device presence
   useEffect(() => { const t = setInterval(() => api.devices.heartbeat(navigator.platform || 'Web', 'web').catch(() => {}), 120000); return () => clearInterval(t); }, []);
 
@@ -241,12 +263,14 @@ export function Layout() {
   }, []);
 
   return (
+    <>
+    <a href="#main-content" className="skip-link">Skip to main content</a>
     <div className="flex h-full overflow-hidden bg-ink-950">
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
         <InsecureBanner />
         <Topbar />
-        <main className="flex-1 overflow-y-auto">
+        <main id="main-content" className="flex-1 overflow-y-auto" tabIndex={-1}>
           <div className="max-w-[1400px] mx-auto px-4 lg:px-8 py-6">
             <Suspense fallback={<PageLoader />}>
               <Outlet />
@@ -260,5 +284,6 @@ export function Layout() {
       <Toaster />
       {handoffVideo && <VideoPlayer item={handoffVideo} onClose={() => setHandoffVideo(null)} />}
     </div>
+    </>
   );
 }

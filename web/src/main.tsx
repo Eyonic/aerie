@@ -4,6 +4,9 @@ import './styles/index.css';
 import App from './App';
 import { useAuth } from './lib/store';
 import { absorbHandoff, installHandoffProvider, syncSessionCookie } from './lib/handoff';
+import { bootAppearance } from './lib/preferences';
+
+bootAppearance();
 
 // Cross-origin handoff (native app network failover) — must run before the
 // auth init reads the token.

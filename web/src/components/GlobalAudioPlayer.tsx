@@ -6,6 +6,7 @@ import { usePlayer, toast, type Track } from '../lib/store';
 import { Icon } from '../lib/icons';
 import { formatDuration, cx } from '../lib/utils';
 import { api } from '../lib/api';
+import { downloads } from '../lib/downloads';
 
 // Skip-back-15 / skip-forward-30 glyphs (audiobooks/podcasts) — the shared icon
 // set ships no seek icons, so keep them local like the video player's controls.
@@ -39,6 +40,7 @@ export function GlobalAudioPlayer() {
   const [tvCast, setTvCast] = useState<CastDevice | null>(null);
   const [tvState, setTvState] = useState<CastState | null>(null);
   const [tvCanSeek, setTvCanSeek] = useState(true);
+  const [downloadPct, setDownloadPct] = useState<number | null>(null);
   const tvOffset = useRef(0);
   const tvGone = useRef(0);
 
@@ -279,6 +281,15 @@ export function GlobalAudioPlayer() {
       usePlayer.getState().setPlaying(true);
     }, 0);
   };
+  const saveCurrent = async () => {
+    const cur = p.current; if (!cur) return;
+    if (downloads.has(cur.id)) { toast('Already downloaded', 'info', cur.title); return; }
+    setDownloadPct(0);
+    try {
+      await downloads.save({ id: cur.id, url: cur.streamUrl, title: cur.title, subtitle: cur.subtitle, artUrl: cur.artUrl, kind: cur.kind }, n => setDownloadPct(n < 0 ? 0 : Math.round(n * 100)));
+      toast('Saved for offline', 'success', cur.title);
+    } catch (e: any) { toast('Download failed', 'error', e?.message); } finally { setDownloadPct(null); }
+  };
 
   // Keep the player bar in sync with the receiver, persist audiobook progress,
   // and advance album/book queues when the TV finishes the current file.
@@ -414,6 +425,7 @@ export function GlobalAudioPlayer() {
           <button className="icon-btn" onClick={nextTrack}><Icon.Next size={19} /></button>
           <button className={cx('icon-btn', p.repeat !== 'off' && 'text-brand-400')} onClick={p.cycleRepeat}><Icon.Repeat size={17} /></button>
           {p.current.cast && <button className={cx('icon-btn', (tvCast || castBusy) && 'text-brand-400')} onClick={() => setCastOpen(true)} title="Cast audio"><CastIcon /></button>}
+          {downloads.supported() && <button className={cx('icon-btn', downloads.has(p.current.id) && 'text-brand-400')} onClick={saveCurrent} title={downloadPct == null ? 'Download for offline' : `Downloading ${downloadPct}%`}><Icon.Download size={18} /></button>}
         </div>
         <div className="flex items-center gap-2 w-full">
           <span className="text-[11px] tabular-nums muted w-10 text-right">{formatDuration(shownTime)}</span>

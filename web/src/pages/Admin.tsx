@@ -4,7 +4,7 @@ import { Icon } from '../lib/icons';
 import { cx, formatRelative, initials, colorFor } from '../lib/utils';
 import { useAuth, toast } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, ConfirmModal, Badge, Spinner } from '../components/ui';
-import type { User, AuditEvent, Role, AiMode } from '../lib/model';
+import type { User, UserFeatures, AuditEvent, Role, AiMode } from '../lib/model';
 
 type Tab = 'users' | 'settings' | 'audit';
 
@@ -52,11 +52,26 @@ function Select({ value, onChange, options }: { value: string; onChange: (v: str
 // =============================================================================
 // USERS TAB
 // =============================================================================
-interface UserForm { username: string; displayName: string; email: string; password: string; role: Role; quotaGb: string; aiMode: AiMode; audiobooks: boolean; }
-const emptyForm: UserForm = { username: '', displayName: '', email: '', password: '', role: 'user', quotaGb: '', aiMode: 'ask_before_send', audiobooks: true };
+const ACCESS_FEATURES: { key: Exclude<keyof UserFeatures, 'autoRequest'>; label: string; desc: string }[] = [
+  { key: 'files', label: 'Files', desc: 'Personal files and folders' },
+  { key: 'photos', label: 'Photos', desc: 'Photo library and uploads' },
+  { key: 'videos', label: 'Personal videos', desc: 'Personal video library' },
+  { key: 'movies', label: 'Movies', desc: 'Movie library and playback' },
+  { key: 'tv', label: 'TV shows', desc: 'Series library and playback' },
+  { key: 'music', label: 'Music', desc: 'Albums, artists and songs' },
+  { key: 'audiobooks', label: 'Audiobooks', desc: 'Audiobooks and podcasts' },
+  { key: 'requests', label: 'Media requests', desc: 'Request movies and music' },
+  { key: 'create', label: 'Documents', desc: 'Documents and spreadsheets' },
+  { key: 'ai', label: 'AI tools', desc: 'Assistant and generation studios' },
+  { key: 'sync', label: 'Folder sync', desc: 'Device sync and deduplication' },
+];
+type AccessKey = typeof ACCESS_FEATURES[number]['key'];
+interface UserForm { username: string; displayName: string; email: string; password: string; role: Role; quotaGb: string; aiMode: AiMode; access: Record<AccessKey, boolean>; }
+const defaultAccess = () => Object.fromEntries(ACCESS_FEATURES.map(f => [f.key, true])) as Record<AccessKey, boolean>;
+const emptyForm = (): UserForm => ({ username: '', displayName: '', email: '', password: '', role: 'user', quotaGb: '', aiMode: 'ask_before_send', access: defaultAccess() });
 
 function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose: () => void; editing: User | null; onSaved: () => void }) {
-  const [form, setForm] = useState<UserForm>(emptyForm);
+  const [form, setForm] = useState<UserForm>(() => emptyForm());
   const [saving, setSaving] = useState(false);
   const isEdit = !!editing;
 
@@ -71,9 +86,9 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
         role: editing.role,
         quotaGb: editing.storageQuotaBytes == null ? '' : String(Math.round(editing.storageQuotaBytes / 1e9)),
         aiMode: editing.aiMode,
-        audiobooks: editing.features?.audiobooks !== false,
+        access: Object.fromEntries(ACCESS_FEATURES.map(f => [f.key, editing.features?.[f.key] !== false])) as Record<AccessKey, boolean>,
       });
-    } else setForm(emptyForm);
+    } else setForm(emptyForm());
   }, [open, editing]);
 
   const set = <K extends keyof UserForm>(k: K, v: UserForm[K]) => setForm(f => ({ ...f, [k]: v }));
@@ -91,7 +106,7 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
         role: form.role,
         storageQuotaBytes: quotaBytes,
         aiMode: form.aiMode,
-        features: { audiobooks: form.audiobooks },
+        features: form.access,
       };
       if (form.password) payload.password = form.password;
       if (isEdit) await api.admin.updateUser(editing!.id, payload);
@@ -136,12 +151,14 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
             <Select value={form.aiMode} onChange={v => set('aiMode', v as AiMode)} options={AI_MODES} />
           </Field>
         </div>
-        <div className="sm:col-span-2 flex items-center justify-between gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-          <div>
-            <p className="text-sm font-medium text-slate-200">Audiobooks & podcasts</p>
-            <p className="text-xs text-slate-500 mt-0.5">Show Audiobookshelf-backed pages and results.</p>
+        <div className="sm:col-span-2">
+          <p className="text-sm font-medium text-slate-200 mb-2">Library access</p>
+          <div className="grid sm:grid-cols-2 gap-2">
+            {ACCESS_FEATURES.map(feature => <div key={feature.key} className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
+              <div className="min-w-0"><p className="text-sm text-slate-200">{feature.label}</p><p className="text-[11px] text-slate-500 truncate">{feature.desc}</p></div>
+              <Toggle on={form.access[feature.key]} onChange={v => set('access', { ...form.access, [feature.key]: v })} />
+            </div>)}
           </div>
-          <Toggle on={form.audiobooks} onChange={v => set('audiobooks', v)} />
         </div>
       </div>
     </Modal>

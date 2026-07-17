@@ -7,13 +7,14 @@ import { formatBytes, cx } from '../lib/utils';
 import { PageHeader, EmptyState, Badge, ConfirmModal } from '../components/ui';
 
 const KIND_ICON: Record<string, React.ReactNode> = {
-  music: <Icon.Music size={18} />, audiobook: <Icon.Book size={18} />, podcast: <Icon.Podcast size={18} />,
+  music: <Icon.Music size={18} />, audiobook: <Icon.Book size={18} />, podcast: <Icon.Podcast size={18} />, video: <Icon.Video size={18} />,
 };
 
 export default function Downloads() {
   const [items, setItems] = useState<DownloadMeta[]>([]);
   const [online, setOnline] = useState(navigator.onLine);
   const [del, setDel] = useState<DownloadMeta | null>(null);
+  const [video, setVideo] = useState<DownloadMeta | null>(null);
   const player = usePlayer();
 
   const load = () => setItems(downloads.list());
@@ -25,8 +26,10 @@ export default function Downloads() {
   }, []);
 
   const play = (d: DownloadMeta, queue: DownloadMeta[]) => {
-    const toTrack = (x: DownloadMeta): Track => ({ id: x.id, title: x.title, subtitle: x.subtitle, artUrl: x.artUrl, streamUrl: api.url(x.url), kind: x.kind, durationSec: undefined });
-    player.playQueue(queue.map(toTrack), Math.max(0, queue.findIndex(x => x.id === d.id)));
+    if (d.kind === 'video') { setVideo(d); return; }
+    const toTrack = (x: DownloadMeta): Track => ({ id: x.id, title: x.title, subtitle: x.subtitle, artUrl: x.artUrl, streamUrl: api.url(x.url), kind: x.kind as Track['kind'], durationSec: undefined });
+    const audio = queue.filter(x => x.kind !== 'video');
+    player.playQueue(audio.map(toTrack), Math.max(0, audio.findIndex(x => x.id === d.id)));
   };
 
   const remove = async (d: DownloadMeta) => { await downloads.remove(d.id); load(); toast('Removed download', 'info', d.title); };
@@ -44,7 +47,7 @@ export default function Downloads() {
   return (
     <div className="animate-fade-in max-w-3xl">
       <PageHeader title="Downloads" icon={<Icon.Download size={22} />}
-        subtitle={`Music, audiobooks & podcasts saved for offline${items.length ? ` · ${formatBytes(downloads.totalBytes())}` : ''}`}
+        subtitle={`Music, audiobooks, podcasts & videos saved for offline${items.length ? ` · ${formatBytes(downloads.totalBytes())}` : ''}`}
         actions={items.length ? <Badge color={online ? 'green' : 'amber'}>{online ? 'Online' : 'Offline — playing from device'}</Badge> : undefined} />
 
       {items.length === 0 ? (
@@ -71,6 +74,7 @@ export default function Downloads() {
 
       <ConfirmModal open={!!del} onClose={() => setDel(null)} onConfirm={() => del && remove(del)} danger
         title="Remove download?" message={`"${del?.title}" will be removed from this device. You can download it again anytime.`} confirmLabel="Remove" />
+      {video && <div className="fixed inset-0 z-[300] bg-black flex flex-col"><div className="h-16 flex items-center px-3 gap-3"><button className="icon-btn" onClick={() => setVideo(null)}><Icon.Close size={20} /></button><p className="text-white truncate">{video.title}</p></div><video src={video.url} controls autoPlay playsInline className="flex-1 w-full min-h-0 object-contain" /></div>}
     </div>
   );
 }

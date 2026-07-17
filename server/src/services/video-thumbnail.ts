@@ -6,13 +6,13 @@ import * as jf from './jellyfin.js';
 
 // Thumbnail requests arrive in bursts as a grid scrolls into view. Keep FFmpeg
 // work bounded so a large personal-video folder cannot saturate the server.
-const pending: { source: string; resolve: (b: Buffer) => void; reject: (e: Error) => void }[] = [];
+const pending: { source: string; atSec: number; resolve: (b: Buffer) => void; reject: (e: Error) => void }[] = [];
 let active = 0;
 
-function extract(source: string): Promise<Buffer> {
+function extract(source: string, atSec: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const proc = spawn('ffmpeg', [
-      '-nostdin', '-v', 'error', '-ss', '1', '-i', source,
+      '-nostdin', '-v', 'error', '-ss', String(Math.max(0, atSec)), '-i', source,
       '-map', '0:v:0', '-frames:v', '1', '-vf', 'scale=min(1280\\,iw):-2',
       '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
     ]);
@@ -40,12 +40,12 @@ function pump() {
   while (active < 2 && pending.length) {
     const job = pending.shift()!;
     active++;
-    extract(job.source).then(job.resolve, job.reject).finally(() => { active--; pump(); });
+    extract(job.source, job.atSec).then(job.resolve, job.reject).finally(() => { active--; pump(); });
   }
 }
 
-export function videoFrame(source: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => { pending.push({ source, resolve, reject }); pump(); });
+export function videoFrame(source: string, atSec = 1): Promise<Buffer> {
+  return new Promise((resolve, reject) => { pending.push({ source, atSec, resolve, reject }); pump(); });
 }
 
 export async function jellyfinSource(itemId: string): Promise<{ source: string; mtimeMs?: number }> {

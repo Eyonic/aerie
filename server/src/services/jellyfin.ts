@@ -394,4 +394,83 @@ export async function search(term: string): Promise<MediaItem[]> {
   return (data.Items || []).map(mapItem);
 }
 
+export async function transcodingStatus() {
+  if (!configured()) return { configured: false, hardwareAcceleration: 'none', active: [], directPlaying: 0 };
+  const [sessions, encoding, info] = await Promise.all([
+    jf('/Sessions', { ActiveWithinSeconds: 600 }).catch(() => []),
+    jf('/System/Configuration/encoding').catch(() => ({})),
+    jf('/System/Info').catch(() => ({})),
+  ]);
+  const all = Array.isArray(sessions) ? sessions : [];
+  const active = all.filter((s: any) => s.NowPlayingItem).map((s: any) => {
+    const t = s.TranscodingInfo || {};
+    return {
+      id: String(s.Id || ''), device: s.DeviceName || s.Client || 'Unknown device', title: s.NowPlayingItem?.Name || 'Unknown title',
+      mediaType: s.NowPlayingItem?.MediaType || s.NowPlayingItem?.Type,
+      method: t.IsVideoDirect ? 'Direct play' : t.IsAudioDirect && t.IsVideoDirect !== false ? 'Direct stream' : t.VideoCodec || t.AudioCodec ? 'Transcoding' : 'Direct play',
+      hardwareAcceleration: t.HardwareAccelerationType || null, videoCodec: t.VideoCodec || null, audioCodec: t.AudioCodec || null,
+      width: t.Width || null, height: t.Height || null, completionPct: t.CompletionPercentage || null,
+      reasons: Array.isArray(t.TranscodeReasons) ? t.TranscodeReasons : [],
+    };
+  });
+  const hw = String(encoding.HardwareAccelerationType || encoding.EncodingThreadCount === -1 && encoding.EnableHardwareEncoding ? 'enabled' : 'none');
+  return {
+    configured: true, serverVersion: info.Version || null, hardwareAcceleration: hw || 'none',
+    hardwareEncoding: !!encoding.EnableHardwareEncoding, active,
+    transcoding: active.filter((s: any) => s.method === 'Transcoding').length,
+    directPlaying: active.filter((s: any) => s.method !== 'Transcoding').length,
+  };
+}
+
+export async function libraryScanStatus() {
+  if (!configured()) return { configured: false, running: false, progress: 0, libraries: [] };
+  const [tasks, folders] = await Promise.all([
+    jf('/ScheduledTasks').catch(() => []), jf('/Library/VirtualFolders').catch(() => []),
+  ]);
+  const scan = (Array.isArray(tasks) ? tasks : []).find((t: any) => /scan media library/i.test(t.Name || '') || /RefreshLibrary/i.test(t.Key || ''));
+  return {
+    configured: true, running: scan?.State === 'Running', progress: Number(scan?.CurrentProgressPercentage || 0),
+    lastResult: scan?.LastExecutionResult ? { status: scan.LastExecutionResult.Status, start: scan.LastExecutionResult.StartTimeUtc, end: scan.LastExecutionResult.EndTimeUtc, error: scan.LastExecutionResult.ErrorMessage } : null,
+    libraries: (Array.isArray(folders) ? folders : []).map((f: any) => ({ name: f.Name, type: f.CollectionType || 'mixed', paths: f.Locations || [] })),
+  };
+}
+
+export async function startLibraryScan() {
+  const res = await fetch(`${base()}/Library/Refresh`, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) throw new Error(`jellyfin ${res.status} library refresh`);
+}
+
+export async function chapters(id: string): Promise<{ name: string; startSec: number }[]> {
+  const uid = await jellyUserId();
+  const it = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Chapters' });
+  return (Array.isArray(it?.Chapters) ? it.Chapters : []).map((c: any) => ({ name: String(c.Name || ''), startSec: Number(c.StartPositionTicks || 0) / 1e7 }));
+}
+
+export async function metadata(id: string) {
+  const uid = await jellyUserId();
+  const it = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Path,Genres,Overview,Studios,ProviderIds,DateCreated' });
+  return {
+    id: it.Id, name: it.Name || '', sortName: it.SortName || '', overview: it.Overview || '', year: it.ProductionYear || null,
+    genres: it.Genres || [], communityRating: it.CommunityRating || null, officialRating: it.OfficialRating || '',
+    path: it.Path || '', type: it.Type || '', locked: !!it.LockData,
+  };
+}
+
+export async function updateMetadata(id: string, changes: Record<string, any>) {
+  const uid = await jellyUserId();
+  const current = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Path,Genres,Overview,Studios,ProviderIds' });
+  const body = { ...current, ...changes, Id: id };
+  const res = await fetch(`${base()}/Items/${id}`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`jellyfin ${res.status} metadata update`);
+  fullLibraryCache.clear(); pageCache.clear();
+}
+
+export async function refreshItem(id: string) {
+  const url = new URL(`${base()}/Items/${id}/Refresh`);
+  url.searchParams.set('MetadataRefreshMode', 'FullRefresh'); url.searchParams.set('ImageRefreshMode', 'FullRefresh');
+  url.searchParams.set('ReplaceAllMetadata', 'false'); url.searchParams.set('ReplaceAllImages', 'false');
+  const res = await fetch(url, { method: 'POST', headers: authHeaders() });
+  if (!res.ok) throw new Error(`jellyfin ${res.status} metadata refresh`);
+}
+
 export { base as jellyfinBase, key as jellyfinKey };

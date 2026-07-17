@@ -7,9 +7,11 @@ import { config } from '../config.js';
 const r = Router();
 
 r.post('/login', (req, res) => {
-  const { username, password, code } = req.body || {};
+  const { username, password, code, deviceName, deviceType } = req.body || {};
   const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.ip;
-  const result = login(String(username || ''), String(password || ''), ip, code ? String(code) : undefined);
+  const result = login(String(username || ''), String(password || ''), ip, code ? String(code) : undefined, {
+    name: String(deviceName || 'Web browser'), type: String(deviceType || 'web'), userAgent: req.get('user-agent') || '',
+  });
   if (!result) return res.status(401).json({ error: 'invalid_credentials' });
   if ('needs2fa' in result) return res.status(200).json({ needs2fa: true });
   res.cookie('cb_token', result.token, { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 });
@@ -30,6 +32,8 @@ r.post('/cookie', (req, res) => {
   try {
     const payload = jwt.verify(token, config.jwtSecret) as any;
     if (!findUserById(payload.id)) return res.status(401).json({ error: 'unauthorized' });
+    if (payload.sid && !db.prepare(`SELECT 1 FROM auth_sessions WHERE id=? AND user_id=? AND revoked_at IS NULL
+      AND datetime(expires_at)>datetime('now')`).get(payload.sid, payload.id)) return res.status(401).json({ error: 'session_revoked' });
     res.cookie('cb_token', token, { httpOnly: true, sameSite: 'lax', maxAge: 30 * 864e5 });
     res.json({ ok: true });
   } catch {
@@ -37,7 +41,8 @@ r.post('/cookie', (req, res) => {
   }
 });
 
-r.post('/logout', (_req, res) => {
+r.post('/logout', authMiddleware, (req: AuthedRequest, res) => {
+  if (req.sessionId) db.prepare("UPDATE auth_sessions SET revoked_at=datetime('now') WHERE id=?").run(req.sessionId);
   res.clearCookie('cb_token');
   res.json({ ok: true });
 });

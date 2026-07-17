@@ -196,11 +196,29 @@ function PhoneSyncSection() {
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
         <button className="btn-primary" onClick={() => { native?.syncAdd?.(); setTimeout(load, 1200); setTimeout(load, 3500); }}><Icon.Plus size={15} /> Add folder</button>
+        {native?.syncAddCamera && <button className="btn-secondary" onClick={() => { native.syncAddCamera?.(); setTimeout(load, 1500); setTimeout(load, 4000); }}><Icon.Photos size={15} /> Enable camera backup</button>}
         <button className="btn-secondary" onClick={() => { native?.syncNow?.(); setTimeout(load, 1000); }}><Icon.Refresh size={15} /> Sync now</button>
       </div>
       <p className="text-xs text-slate-500 mt-3">First sync starts right away with a progress notification. After that, folders upload automatically overnight while charging on Wi-Fi.</p>
     </Section>
   );
+}
+
+function SyncConflictsSection() {
+  const [items, setItems] = useState<any[] | null>(null);
+  const load = () => api.sync.conflicts().then(r => setItems(r.items || [])).catch(() => setItems([]));
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
+  const resolve = async (id: string, action: 'device' | 'server' | 'dismiss') => {
+    try { await api.sync.resolveConflict(id, action); setItems(old => (old || []).filter(x => x.id !== id)); toast('Conflict resolved', 'success', action === 'device' ? 'The device version will upload on its next sync.' : action === 'server' ? 'The server version was kept.' : 'Conflict dismissed.'); }
+    catch (e: any) { toast('Could not resolve conflict', 'error', e?.message); }
+  };
+  if (items === null) return null;
+  return <Section title="Sync conflict centre" subtitle="Choose what to keep when a file changed in two places.">
+    {!items.length ? <p className="text-sm text-accent-green flex items-center gap-2"><Icon.Check size={16} /> No unresolved conflicts.</p> : <div className="space-y-3">{items.map(c => <div key={c.id} className="rounded-xl border border-accent-amber/20 bg-accent-amber/[0.04] p-4">
+      <div className="flex items-start gap-3"><Icon.Warning size={18} className="text-accent-amber mt-0.5 shrink-0" /><div className="min-w-0 flex-1"><p className="text-sm font-medium text-white truncate">{c.relPath}</p><p className="text-xs muted truncate">{c.base} · device {formatBytes(c.deviceSize || 0)} · server {formatBytes(c.serverSize || 0)}</p></div></div>
+      <div className="flex flex-wrap gap-2 mt-3 ml-7"><button className="btn-secondary !py-1.5" onClick={() => resolve(c.id, 'device')}>Keep device copy</button><button className="btn-secondary !py-1.5" onClick={() => resolve(c.id, 'server')}>Keep server copy</button><button className="btn-ghost !py-1.5" onClick={() => resolve(c.id, 'dismiss')}>Dismiss</button></div>
+    </div>)}</div>}
+  </Section>;
 }
 
 function baseDisplayName(base: string): string {
@@ -391,6 +409,7 @@ export default function FolderSync() {
       <DesktopSyncSection />
       <PhoneSyncSection />
       {!hasDesktop && !hasPhone && <SetupCard />}
+      <SyncConflictsSection />
       <DuplicateFilesSection />
       <ServerSyncSection />
     </div>
