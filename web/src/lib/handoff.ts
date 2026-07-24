@@ -1,9 +1,9 @@
 // Network-handoff between the two Aerie origins (https://your-domain and
 // the LAN address). The Android app switches origins when the current one stops
 // answering — home WiFi may not reach the public domain (hairpin NAT) and mobile
-// data can't reach the LAN IP. localStorage is per-origin, so the app carries the auth
-// token + live playback state across in a #cbho= URL hash; the JWT itself is
-// origin-independent (same backend signs both).
+// data can't reach the LAN IP. The native wrapper carries a short-lived auth
+// token + live playback state in a URL fragment (never sent to the server), then
+// immediately exchanges it for an HttpOnly cookie on the destination origin.
 import { getToken, setToken } from './api';
 import { usePlayer } from './store';
 
@@ -42,7 +42,7 @@ export function absorbHandoff(): boolean {
 /** The cb_token cookie is per-origin, so after a hop this origin has none — and
  *  plain <img>/<a> requests (posters, downloads) authenticate by cookie, not by
  *  the Authorization header. Re-establish it before first render; bounded so a
- *  dead network can't block boot (tokenized URLs still work without it). */
+ *  dead network can't block boot. */
 export async function syncSessionCookie(timeoutMs = 2500): Promise<void> {
   const t = getToken();
   if (!t) return;
@@ -51,14 +51,14 @@ export async function syncSessionCookie(timeoutMs = 2500): Promise<void> {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     await fetch('/api/auth/cookie', { method: 'POST', headers: { Authorization: `Bearer ${t}` }, signal: ctl.signal });
     clearTimeout(timer);
-  } catch { /* cookie heals on next login; images fall back to ?token= URLs */ }
+  } catch { /* cookie heals on the next native refresh or login */ }
 }
 
 export function takePendingHandoff(): HandoffState | null {
   const p = pending;
   pending = null;
   // Only valid for the session it arrived with — if auth failed and the user
-  // logged in as someone else, its stale ?token= URLs are dead; drop it.
+  // logged in as someone else, its carried playback state is stale; drop it.
   return p && p.token === getToken() ? p : null;
 }
 

@@ -1,6 +1,30 @@
 **/node_modules
 **/dist
+**/release
+**/.release-build.*
+**/.release-previous.*
+**/.gradle
+**/.signing
 **/.git
 **/*.log
 **/.DS_Store
 *.workflow.js
+
+# Host-only configuration, credentials, databases and signing material must
+# never enter the Docker build context. The production image receives runtime
+# settings through --env-file and mounted data volumes instead.
+appdata
+deploy/deploy.conf
+**/default-server.json
+**/.env
+**/*.env
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+apps/android/**/build

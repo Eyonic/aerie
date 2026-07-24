@@ -4,9 +4,8 @@ import { Icon } from '../lib/icons';
 import { toast } from '../lib/store';
 import { formatBytes, cx } from '../lib/utils';
 import { PageHeader, Badge, Spinner, EmptyState, ConfirmModal } from '../components/ui';
-import type { BackupStatus } from '../lib/model';
+import type { BackupConfiguration, BackupStatus } from '../lib/model';
 
-const RETENTION = 14;
 const STALE_MS = 30 * 60 * 60 * 1000; // ~30h: a nightly backup older than this is stale
 
 interface HistoryRow {
@@ -14,6 +13,8 @@ interface HistoryRow {
   sizeBytes?: number;
   createdAt: string;
   success: boolean;
+  kind?: 'recovery_bundle' | 'legacy_database';
+  note?: string;
 }
 
 type Pill = { label: string; color: 'green' | 'red' | 'amber'; dot: string };
@@ -36,41 +37,30 @@ function relative(iso: string | null | undefined, skew = 0): string {
   return new Date(norm).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-// The nightly job (and the manual "Run backup now") only snapshot the Aerie
-// database — that is the single real backup. The other targets are placeholders
-// that never actually run, so we must not present them as Healthy.
+// The backend exposes the comprehensive recovery bundle under the historical
+// `db` key for compatibility with older clients.
 function isRealBackup(b: BackupStatus): boolean {
   return b.key === 'db' && !!b.lastRun && b.success;
 }
 
-function statusOf(b: BackupStatus): Pill {
+function statusOf(b: BackupStatus, nightlyEnabled: boolean, skew = 0): Pill {
   if (b.key !== 'db') {
     // Not independently backed up. Off-site is simply not configured.
     if (b.key === 'offsite' || (!b.nextRun && !b.lastRun)) return { label: 'Not configured', color: 'amber', dot: '#f59e0b' };
-    // files/config are covered by the nightly DB snapshot, not independently
-    // scheduled — don't imply a pending run they'll never make. This keeps the
-    // pill/health consistent with the "Next run: Not scheduled" field below.
     return { label: 'Not scheduled', color: 'amber', dot: '#f59e0b' };
   }
   if (!b.lastRun) return { label: 'Pending', color: 'amber', dot: '#f59e0b' };
   if (!b.success) return { label: 'Failed', color: 'red', dot: '#ef4444' };
-  const age = Date.now() - new Date(b.lastRun).getTime();
+  if (!nightlyEnabled) return { label: 'Verified', color: 'green', dot: '#10b981' };
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(b.lastRun) ? b.lastRun : `${b.lastRun}Z`;
+  const age = Date.now() + skew - new Date(normalized).getTime();
   if (age > STALE_MS) return { label: 'Stale', color: 'amber', dot: '#f59e0b' };
   return { label: 'Healthy', color: 'green', dot: '#10b981' };
 }
 
-// Next automatic run: the scheduler fires the nightly database backup at 03:00
-// local time. Compute the real upcoming occurrence rather than trusting the
-// backend's free-text hint (which isn't a parseable date).
-function nextNightlyRun(hour = 3): Date {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(hour, 0, 0, 0);
-  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
-  return next;
-}
-
-function formatNextRun(d: Date): string {
+function formatNextRun(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'unknown';
   const now = new Date();
   const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
   const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -83,19 +73,23 @@ function StatTile({ icon, label, value, sub, color }: { icon: React.ReactNode; l
       <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl grid place-items-center" style={{ background: `${color}22`, color }}>{icon}</div>
       <p className="text-xl sm:text-2xl font-bold text-white mt-3 tracking-tight truncate" title={value}>{value}</p>
       <p className="text-sm muted">{label}</p>
-      {sub && <p className="text-xs text-slate-500 mt-1 truncate">{sub}</p>}
+      {sub && <p className="text-xs text-slate-500 mt-1 truncate" title={sub}>{sub}</p>}
     </div>
   );
 }
 
-function StatusCard({ b, skew }: { b: BackupStatus; skew: number }) {
-  const st = statusOf(b);
+function StatusCard({ b, skew, configuration }: { b: BackupStatus; skew: number; configuration: BackupConfiguration | null }) {
+  const st = statusOf(b, configuration?.nightly.enabled ?? false, skew);
   const real = isRealBackup(b);
-  // Only the database is truly captured, so only it shows a last-run time and
-  // real size. Only it is on the nightly schedule, so only it has a next run.
   const lastRunLabel = real ? relative(b.lastRun, skew) : 'Never';
   const sizeLabel = real && b.sizeBytes != null ? formatBytes(b.sizeBytes) : '—';
-  const nextRunText = b.key === 'db' ? formatNextRun(nextNightlyRun()) : 'Not scheduled';
+  const nextRunText = b.key !== 'db'
+    ? 'Not scheduled'
+    : !configuration
+      ? 'Unavailable'
+      : configuration.nightly.enabled
+        ? `${configuration.nightly.localTime} · ${configuration.nightly.timeZone}`
+        : 'Automation off';
   const note = b.note || (b.key !== 'db' ? 'Not independently backed up yet — the nightly job snapshots the database.' : undefined);
   return (
     <div className="card card-hover p-5 flex flex-col">
@@ -145,7 +139,10 @@ function StatusCard({ b, skew }: { b: BackupStatus; skew: number }) {
 
 export default function Backups() {
   const [targets, setTargets] = useState<BackupStatus[] | null>(null);
+  const [configuration, setConfiguration] = useState<BackupConfiguration | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [confirm, setConfirm] = useState<HistoryRow | null>(null);
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -156,10 +153,8 @@ export default function Backups() {
   // times are computed against the same clock the backups were stamped with.
   const syncClock = async () => {
     try {
-      const token = localStorage.getItem('cb_token');
       const res = await fetch('/api/backups/history', {
-        method: 'HEAD', cache: 'no-store',
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        method: 'HEAD', cache: 'no-store', credentials: 'same-origin',
       });
       const h = res.headers.get('date');
       const server = h ? new Date(h).getTime() : NaN;
@@ -168,15 +163,26 @@ export default function Backups() {
   };
 
   const load = async () => {
-    const [list, hist] = await Promise.all([
-      api.backups.list().catch(() => [] as BackupStatus[]),
-      api.backups.history().catch(() => [] as HistoryRow[]),
-    ]);
-    setTargets(Array.isArray(list) ? (list as BackupStatus[]) : []);
-    setHistory(Array.isArray(hist) ? (hist as HistoryRow[]) : []);
+    setLoading(true); setLoadError(null);
+    try {
+      const [list, hist, config] = await Promise.all([
+        api.backups.list(),
+        api.backups.history(),
+        api.backups.configuration(),
+      ]);
+      setTargets(Array.isArray(list) ? (list as BackupStatus[]) : []);
+      setHistory(Array.isArray(hist) ? (hist as HistoryRow[]) : []);
+      setConfiguration(config);
+    } catch (error: any) {
+      const status = Number(error?.status || 0);
+      const detail = String(error?.message || error || 'request_failed').replace(/_/g, ' ');
+      setLoadError(status === 403
+        ? 'Access denied (403). Backup status and recovery bundles are available only to administrators.'
+        : `Backup data could not be loaded${status ? ` (${status})` : ''}: ${detail}`);
+    } finally { setLoading(false); }
   };
 
-  useEffect(() => { syncClock(); load(); }, []);
+  useEffect(() => { void syncClock(); void load(); }, []);
 
   const runNow = async () => {
     setRunning(true);
@@ -205,9 +211,9 @@ export default function Backups() {
     setRestoring(row.name);
     try {
       const res = await api.backups.restore(row.name);
-      const note = res?.note || 'Restart the Aerie container to load the restored database.';
+      const note = res?.note || 'Restart the Aerie container to apply the staged recovery bundle.';
       setRestoreNote(note);
-      toast('Backup restored', 'success', row.name);
+      toast('Restore staged', 'success', 'Restart Aerie when you are ready to apply it.');
       await load();
     } catch (e: any) {
       const msg = String(e?.message || e || '');
@@ -223,8 +229,7 @@ export default function Backups() {
 
   const summary = useMemo(() => {
     const list = targets || [];
-    // Only genuine backups count toward the totals — the other targets never run,
-    // and the backend echoes the DB size for the file target which would double-count.
+    // Only verified recovery bundles count toward backup totals.
     const real = list.filter(isRealBackup);
     const lastSuccess = real
       .map(b => b.lastRun as string)
@@ -233,17 +238,30 @@ export default function Backups() {
     return { lastSuccess, totalSize, count: list.length, realCount: real.length };
   }, [targets]);
 
-  const nextRunLabel = formatNextRun(nextNightlyRun());
+  const nightly = configuration?.nightly;
+  const nextRunLabel = nightly?.nextRunAt ? formatNextRun(nightly.nextRunAt) : null;
 
-  if (!targets) {
+  if (!targets && loading) {
     return <div className="grid place-items-center h-full min-h-[50vh] text-brand-400"><Spinner size={34} /></div>;
   }
+
+  if (!targets) return (
+    <div className="animate-fade-in">
+      <PageHeader title="Backups" subtitle="Verified recovery bundles for your database, files, versions, and durable app data." icon={<Icon.Backup size={22} />} />
+      <div className="card">
+        <EmptyState icon={<Icon.Warning size={28} />} title="Backups could not be loaded" subtitle={loadError || 'The backup service is unavailable.'}
+          action={<button className="btn-primary" disabled={loading} onClick={() => void load()}>
+            {loading ? <Spinner size={15} /> : <Icon.Refresh size={15} />} Retry
+          </button>} />
+      </div>
+    </div>
+  );
 
   return (
     <div className="animate-fade-in">
       <PageHeader
         title="Backups"
-        subtitle="Nightly snapshots of your private cloud, kept safe and ready to restore."
+        subtitle="Verified recovery bundles for your database, files, versions, and durable app data."
         icon={<Icon.Backup size={22} />}
         actions={
           <button className="btn-primary" onClick={runNow} disabled={running} title="Capture a snapshot now">
@@ -253,6 +271,14 @@ export default function Backups() {
         }
       />
 
+      {loadError && (
+        <div role="alert" className="rounded-xl border border-accent-red/25 bg-accent-red/[0.07] px-4 py-3 mb-6 flex items-start gap-3">
+          <Icon.Warning size={17} className="text-accent-red shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1"><p className="text-sm font-medium text-white">Backup data may be out of date</p><p className="text-xs text-slate-400 mt-0.5">{loadError}</p></div>
+          <button className="btn-secondary !py-1.5" disabled={loading} onClick={() => void load()}>{loading ? <Spinner size={14} /> : <Icon.Refresh size={14} />} Retry</button>
+        </div>
+      )}
+
       {/* Restore info banner */}
       {restoreNote && (
         <div className="glass rounded-2xl px-5 py-4 mb-6 flex items-start gap-3 border border-brand-500/30 bg-brand-500/[0.06]">
@@ -260,7 +286,7 @@ export default function Backups() {
             <Icon.Info size={18} />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-semibold text-white">Backup restored</p>
+            <p className="text-sm font-semibold text-white">Restore staged — restart required</p>
             <p className="text-sm text-slate-300 mt-0.5 leading-relaxed">{restoreNote}</p>
           </div>
           <button className="icon-btn shrink-0" onClick={() => setRestoreNote(null)} title="Dismiss">
@@ -278,21 +304,25 @@ export default function Backups() {
         />
         <StatTile
           icon={<Icon.Cloud size={20} />} color="#6366f1"
-          label="Latest snapshot"
+          label="Latest recovery bundle"
           value={history.length ? formatBytes(history[0].sizeBytes ?? summary.totalSize) : '—'}
-          sub={history.length ? `Latest of ${history.length} snapshot${history.length === 1 ? '' : 's'}` : 'No snapshot yet'}
+          sub={history.length ? `Latest of ${history.length} recovery bundle${history.length === 1 ? '' : 's'}` : 'No recovery bundle yet'}
         />
         <StatTile
           icon={<Icon.Clock size={20} />} color="#06b6d4"
-          label="Next scheduled"
-          value="03:00 nightly"
-          sub={`Next: ${nextRunLabel}`}
+          label="Nightly automation"
+          value={!nightly ? 'Unavailable' : nightly.enabled ? `${nightly.localTime} nightly` : 'Disabled'}
+          sub={!nightly
+            ? 'Schedule details could not be loaded'
+            : nightly.enabled
+              ? `Server time · ${nightly.timeZone}${nextRunLabel ? ` · next ${nextRunLabel} your time` : ''}`
+              : 'Enable Nightly recovery bundle in Automations'}
         />
         <StatTile
           icon={<Icon.Shield size={20} />} color="#a855f7"
           label="Retention"
-          value={`Last ${RETENTION} kept`}
-          sub="Older snapshots pruned"
+          value={configuration ? `Last ${configuration.retention} kept` : 'Unavailable'}
+          sub={configuration ? 'Older recovery bundles are pruned' : 'Retention details could not be loaded'}
         />
       </div>
 
@@ -319,15 +349,15 @@ export default function Backups() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mb-8">
-          {targets.map(b => <StatusCard key={b.key} b={b} skew={serverSkew} />)}
+          {targets.map(b => <StatusCard key={b.key} b={b} skew={serverSkew} configuration={configuration} />)}
         </div>
       )}
 
       {/* History */}
       <div className="flex items-center justify-between mb-3">
         <h2 className="section-title">Backup history</h2>
-        <button className="btn-ghost" onClick={load} title="Refresh">
-          <Icon.Refresh size={16} />
+        <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
+          {loading ? <Spinner size={16} /> : <Icon.Refresh size={16} />}
         </button>
       </div>
       <div className="card !p-0 overflow-hidden">
@@ -342,7 +372,7 @@ export default function Backups() {
             <table className="w-full text-sm min-w-[560px]">
               <thead>
                 <tr className="text-left text-xs uppercase tracking-wide text-slate-500 border-b border-white/[0.06]">
-                  <th className="font-medium px-4 sm:px-5 py-3">Snapshot</th>
+                  <th className="font-medium px-4 sm:px-5 py-3">Recovery bundle</th>
                   <th className="font-medium px-4 sm:px-5 py-3">Size</th>
                   <th className="font-medium px-4 sm:px-5 py-3">When</th>
                   <th className="font-medium px-4 sm:px-5 py-3">Status</th>
@@ -370,7 +400,7 @@ export default function Backups() {
                         className="btn-secondary !py-1.5 !px-3 text-xs whitespace-nowrap"
                         onClick={() => setConfirm(h)}
                         disabled={!h.success || restoring === h.name}
-                        title={h.success ? 'Restore this snapshot' : 'Failed snapshots cannot be restored'}
+                        title={h.success ? 'Validate and stage this recovery bundle' : 'Unverified bundles cannot be restored'}
                       >
                         {restoring === h.name ? <Spinner size={14} /> : <Icon.Refresh size={14} />}
                         <span className="ml-1">Restore</span>
@@ -388,9 +418,9 @@ export default function Backups() {
         open={!!confirm}
         onClose={() => setConfirm(null)}
         onConfirm={() => { if (confirm) doRestore(confirm); }}
-        title="Restore this backup?"
-        message={`This replaces the current database with the snapshot "${confirm?.name}". You'll need to restart the Aerie container afterward to load it. This cannot be undone.`}
-        confirmLabel="Restore"
+        title="Stage this recovery bundle?"
+        message={`Aerie will verify "${confirm?.name}" now and stage it for the next container restart. On restart it replaces the current database, files, versions, and included durable data. A pre-restore rollback bundle is created before anything is swapped.`}
+        confirmLabel="Validate and stage"
         danger
       />
     </div>

@@ -5,6 +5,7 @@ import { type AuthedRequest } from '../lib/auth.js';
 import * as progress from '../services/progress.js';
 import { cachedWebp, fetchImage, imageWidth } from '../services/image-cache.js';
 import type { Book } from '../lib/model.js';
+import { copyMediaHeaders, openMediaStream, pipeMediaBody } from '../services/media-proxy.js';
 
 const r = Router();
 
@@ -75,18 +76,10 @@ r.get('/cover/:id', async (req, res, next) => {
 // Range-aware, backpressure-safe proxy of any ABS URL to the browser.
 async function proxyAudio(req: any, res: any, target: string) {
   const range = req.headers.range;
-  const upstream = await fetch(target, { headers: range ? { Range: range } : {} });
-  res.status(upstream.status);
-  upstream.headers.forEach((v: string, k: string) => {
-    if (['content-type', 'content-length', 'content-range', 'accept-ranges'].includes(k)) res.setHeader(k, v);
-  });
+  const opened = await openMediaStream(target, abs.absBase, range ? { Range: range } : {});
+  copyMediaHeaders(opened.response, res);
   if (!res.getHeader('accept-ranges')) res.setHeader('Accept-Ranges', 'bytes');
-  if (!upstream.body) return res.end();
-  const { Readable } = await import('node:stream');
-  const nodeStream = Readable.fromWeb(upstream.body as any);
-  nodeStream.pipe(res);
-  nodeStream.on('error', () => res.end());
-  req.on('close', () => nodeStream.destroy());
+  await pipeMediaBody(req, res, opened);
 }
 
 // Per-book tracks (one per audio file) — the frontend plays these as a queue so

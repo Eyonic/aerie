@@ -17,7 +17,7 @@ export default function Collections() {
   const [form, setForm] = useState({ name: '', types: 'Movie,Series', genre: '', minRating: '', year: '', sort: 'SortName' });
 
   const load = () => api.media.collections().then(r => setCollections(r.items)).catch(() => setCollections([]));
-  useEffect(load, []);
+  useEffect(() => { void load(); }, []);
   const open = async (c: Collection) => { setSelected(c); setItems(null); try { setItems((await api.media.collectionItems(c.id)).items); } catch { setItems([]); } };
   const create = async () => {
     if (!form.name.trim()) return;
@@ -59,6 +59,6 @@ export default function Collections() {
         <label className="block text-sm text-slate-300">Minimum rating<input type="number" min="0" max="10" step="0.1" className="input mt-1" value={form.minRating} onChange={e => setForm({ ...form, minRating: e.target.value })} /></label>
       </div>
     </Modal>
-    {playing && <VideoPlayer item={playing} onClose={() => setPlaying(null)} />}
+    {playing && <VideoPlayer item={playing} onClose={() => setPlaying(null)} onEpisodeSelect={setPlaying} />}
   </div>;
 }

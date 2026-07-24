@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
-import { useAuth, usePlayer } from '../lib/store';
+import { useAuth, usePlayer, type Track } from '../lib/store';
 import { formatRelative } from '../lib/utils';
 import { PageLoader } from '../components/ui';
 import { PosterCard, VideoPlayer } from '../components/media';
@@ -115,23 +115,34 @@ export default function Dashboard() {
   // If the book is already in progress, resume from currentTimeSec (player auto-saves).
   const playBook = async (b: Book) => {
     const art = (b.coverUrl && api.books.coverUrl(b.coverUrl)) || undefined;
-    const resumeAt = (b.currentTimeSec && b.currentTimeSec > 0) ? b.currentTimeSec : undefined;
+    const resumeAt = (b.currentTimeSec && b.currentTimeSec > 0) ? b.currentTimeSec : 0;
     try {
       const tracks = await api.books.tracks(b.id);
       if (tracks && tracks.length) {
-        player.playQueue(tracks.map((t, i) => ({
-          id: `${b.id}:${t.ino}`,
-          title: tracks.length > 1 ? `${b.title} — ${t.title}` : b.title,
-          subtitle: b.author || 'Unknown author',
-          artUrl: art, streamUrl: api.books.trackUrl(t.streamUrl),
-          kind: 'audiobook' as const, durationSec: t.durationSec,
-          cast: { source: 'audiobookshelf' as const, itemId: b.id, fileId: t.ino },
-          startAt: i === 0 ? resumeAt : undefined,
-        })), 0);
+        const totalDurationSec = b.durationSec || tracks.reduce((sum, track) => sum + (track.durationSec || 0), 0);
+        let offset = 0;
+        let startIndex = 0;
+        const queue: Track[] = tracks.map((t, i) => {
+          const timelineOffsetSec = offset;
+          const nextOffset = offset + (t.durationSec || 0);
+          if (resumeAt >= timelineOffsetSec && (resumeAt < nextOffset || i === tracks.length - 1)) startIndex = i;
+          offset = nextOffset;
+          return {
+            id: `${b.id}:${t.ino}`,
+            title: tracks.length > 1 ? `${b.title} — ${t.title}` : b.title,
+            subtitle: b.author || 'Unknown author',
+            artUrl: art, streamUrl: api.books.trackUrl(t.streamUrl),
+            kind: 'audiobook', durationSec: t.durationSec,
+            timelineOffsetSec, totalDurationSec,
+            cast: { source: 'audiobookshelf', itemId: b.id, fileId: t.ino },
+          };
+        });
+        if (resumeAt > 0) queue[startIndex] = { ...queue[startIndex], startAt: Math.max(0, resumeAt - queue[startIndex].timelineOffsetSec!) };
+        player.playQueue(queue, startIndex);
         return;
       }
     } catch { /* fall through */ }
-    player.playTrack({ id: b.id, title: b.title, subtitle: b.author, artUrl: art, streamUrl: api.books.streamUrl(b.id), kind: 'audiobook', startAt: resumeAt, cast: { source: 'audiobookshelf', itemId: b.id } });
+    player.playTrack({ id: b.id, title: b.title, subtitle: b.author, artUrl: art, streamUrl: api.books.streamUrl(b.id), kind: 'audiobook', startAt: resumeAt || undefined, cast: { source: 'audiobookshelf', itemId: b.id } });
   };
 
   const hasContinue = resume.length > 0 || continueBooks.length > 0;
@@ -285,7 +296,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {playing && <VideoPlayer item={playing} onClose={() => setPlaying(null)} />}
+      {playing && <VideoPlayer item={playing} onClose={() => setPlaying(null)} onEpisodeSelect={setPlaying} />}
     </div>
   );
 }

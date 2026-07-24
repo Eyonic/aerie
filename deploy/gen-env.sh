@@ -57,11 +57,19 @@ else
 fi
 
 umask 077
-cat > "$ENVFILE" <<EOF
+ENV_TMP="$(mktemp "$APPDIR/.aerie.env.XXXXXX")"
+cleanup_env_tmp() { rm -f -- "$ENV_TMP"; }
+trap cleanup_env_tmp EXIT
+cat > "$ENV_TMP" <<EOF
 PORT=8200
+TZ=${AERIE_TIMEZONE:-Etc/UTC}
+BACKUP_SCHEDULE_HOUR=${BACKUP_SCHEDULE_HOUR:-3}
+BACKUP_RETENTION=${BACKUP_RETENTION:-14}
 JWT_SECRET=$JWT
 PUBLIC_URL=${PUBLIC_URL:-}
 LAN_URL=${LAN_URL:-http://$HOST_IP:8200}
+TRUST_PROXY=${TRUST_PROXY:-0}
+CORS_ORIGINS=${CORS_ORIGINS:-}
 TRANSLATE_LANG=${TRANSLATE_LANG:-}
 MEDIA_PATH_MAP=${MEDIA_PATH_MAP:-}
 DATA_DIR=/data
@@ -86,6 +94,22 @@ DEEPSEEK_URL=https://api.deepseek.com
 DEEPSEEK_API_KEY=$DS_KEY
 DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
 EOF
+
+# Keep operator-managed and future settings that this generator does not own.
+# This is especially important for encryption keys, first-run policy, proxy
+# networking, and new variables added by a newer Aerie release. Only valid
+# dotenv assignments are copied, and generated keys above always win.
+if [ -f "$ENVFILE" ]; then
+  awk -F= '
+    /^[A-Za-z_][A-Za-z0-9_]*=/ {
+      key=$1
+      if (key !~ /^(PORT|TZ|BACKUP_SCHEDULE_HOUR|BACKUP_RETENTION|JWT_SECRET|PUBLIC_URL|LAN_URL|TRUST_PROXY|CORS_ORIGINS|TRANSLATE_LANG|MEDIA_PATH_MAP|DATA_DIR|FILES_ROOT|MEDIA_ROOT|DOWNLOADS_DIR|TOWER_HOST|JELLYFIN_URL|JELLYFIN_API_KEY|ABS_URL|ABS_API_KEY|OLLAMA_URL|OLLAMA_MODEL|SD_URL|WHISPER_URL|JELLYSEERR_URL|JELLYSEERR_API_KEY|LIDARR_URL|LIDARR_API_KEY|ACESTEP_URL|DEEPSEEK_URL|DEEPSEEK_API_KEY|DEEPSEEK_MODEL|AERIE_PRIVATE_CANARY)$/) print
+    }
+  ' "$ENVFILE" >> "$ENV_TMP"
+fi
+chmod 600 "$ENV_TMP"
+mv -f -- "$ENV_TMP" "$ENVFILE"
+trap - EXIT
 
 # Report only presence, never values.
 echo "wrote $ENVFILE"

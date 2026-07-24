@@ -10,7 +10,7 @@ import { Spinner } from './ui';
 import { debounce } from '../lib/utils';
 import type { SearchResponse } from '../lib/model';
 
-type Item = { id: string; label: string; subtitle?: string; thumbUrl?: string; icon?: React.ReactNode; hint?: string; run: () => void };
+type Item = { id: string; label: string; subtitle?: string; snippet?: string; thumbUrl?: string; icon?: React.ReactNode; hint?: string; run: () => void };
 
 const PAGES: { label: string; to: string; icon: React.ReactNode; keys: string }[] = [
   { label: 'Dashboard', to: '/', icon: <Icon.Dashboard size={18} />, keys: 'home dashboard' },
@@ -42,6 +42,7 @@ export function SearchOverlay() {
   const [res, setRes] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [kind, setKind] = useState('all');
+  const [modified, setModified] = useState('any');
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -58,12 +59,12 @@ export function SearchOverlay() {
 
   useEffect(() => { if (searchOpen) setTimeout(() => inputRef.current?.focus(), 50); else { setQ(''); setRes(null); setSel(0); } }, [searchOpen]);
 
-  const run = useRef(debounce(async (query: string, category: string) => {
+  const run = useRef(debounce(async (query: string, category: string, age: string) => {
     if (!query.trim()) { setRes(null); setLoading(false); return; }
-    try { setRes(await api.search(query, category)); } catch { setRes(null); } finally { setLoading(false); }
+    try { setRes(await api.search(query, category, age)); } catch { setRes(null); } finally { setLoading(false); }
   }, 260)).current;
 
-  useEffect(() => { setSel(0); if (q.trim()) { setLoading(true); run(q, kind); } else { setRes(null); } }, [q, kind]);
+  useEffect(() => { setSel(0); if (q.trim()) { setLoading(true); run(q, kind, modified); } else { setRes(null); } }, [q, kind, modified]);
 
   const close = () => setSearchOpen(false);
   const go = (link: string) => { close(); nav(link); };
@@ -103,7 +104,7 @@ export function SearchOverlay() {
     // Search results
     if (res) {
       for (const g of res.groups) {
-        const its = g.results.map<Item>(r => ({ id: `r-${r.id}`, label: r.title, subtitle: r.subtitle, thumbUrl: r.thumbUrl ? api.url(r.thumbUrl) : undefined, run: () => go(r.link) }));
+        const its = g.results.map<Item>(r => ({ id: `r-${r.id}`, label: r.title, subtitle: r.subtitle, snippet: r.snippet, thumbUrl: r.thumbUrl ? api.url(r.thumbUrl) : undefined, run: () => go(r.link) }));
         if (its.length) sections.push({ section: g.label, items: its });
       }
     }
@@ -141,12 +142,31 @@ export function SearchOverlay() {
           {[
             ['all', 'All'],
             ...(user?.features?.files !== false ? [['file', 'Files']] : []),
+            ...(user?.features?.files !== false ? [['document', 'Docs'], ['spreadsheet', 'Sheets'], ['pdf', 'PDFs']] : []),
             ...((user?.features?.movies !== false || user?.features?.tv !== false || user?.features?.music !== false) ? [['media', 'Media']] : []),
             ...(user?.features?.photos !== false ? [['photo', 'Photos']] : []),
             ...(user?.features?.audiobooks !== false ? [['book', 'Audiobooks']] : []),
           ].map(([value, label]) => <button key={value} onClick={() => setKind(value)} className={kind === value ? 'chip !bg-brand-500/25 !text-brand-200' : 'chip'}>{label}</button>)}
+          {['file', 'document', 'spreadsheet', 'pdf'].includes(kind) && (
+            <label className="ml-auto shrink-0">
+              <span className="sr-only">Modified</span>
+              <select value={modified} onChange={e => setModified(e.target.value)}
+                className="chip bg-ink-900 outline-none focus:ring-2 focus:ring-brand-500/60" aria-label="Modified date">
+                <option value="any">Any time</option>
+                <option value="day">Past day</option>
+                <option value="week">Past week</option>
+                <option value="month">Past month</option>
+                <option value="year">Past year</option>
+              </select>
+            </label>
+          )}
         </div>}
         <div ref={listRef} className="max-h-[60vh] overflow-y-auto p-2">
+          {q.trim() && res?.contentIndex?.refreshing && (
+            <p role="status" className="mx-2 mb-2 rounded-lg border border-brand-500/20 bg-brand-500/[0.07] px-3 py-2 text-xs text-brand-200">
+              Indexing document contents in the background. Filename results are available now.
+            </p>
+          )}
           {flat.length === 0 && q.trim() && !loading && <p className="text-center text-sm muted py-10">No results for “{q}”.</p>}
           {items.map(sec => (
             <div key={sec.section} className="mb-1.5">
@@ -162,6 +182,7 @@ export function SearchOverlay() {
                     <div className="min-w-0 flex-1">
                       <p className="text-sm text-white truncate">{it.label}</p>
                       {it.subtitle && <p className="text-xs muted truncate">{it.subtitle}</p>}
+                      {it.snippet && <p className="mt-0.5 line-clamp-2 text-xs leading-4 text-slate-300">{it.snippet}</p>}
                     </div>
                     {it.hint && <span className="chip text-[10px] shrink-0">{it.hint}</span>}
                     {cur === sel && <Icon.ChevronRight size={15} className="text-slate-500 shrink-0" />}

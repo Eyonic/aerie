@@ -8,6 +8,7 @@ import { Spinner, PageLoader, EmptyState, PageHeader, Modal, Badge, Menu } from 
 import { PosterCard, VideoPlayer } from '../components/media';
 import type { MediaItem } from '../lib/model';
 import { imageSrcSet } from '../lib/images';
+import { episodeNeighbors, orderEpisodes } from '../lib/episodes';
 
 function runtimeLabel(m?: number) {
   if (!m) return '';
@@ -82,7 +83,7 @@ function EpisodeRow({ ep, index, onPlay, forceWatched }: { ep: MediaItem; index:
 }
 
 // ---- Series detail modal ----
-function SeriesDetail({ series, onClose, onPlay, watched, onToggleWatched, isWatched, onOpenSeries }: { series: MediaItem; onClose: () => void; onPlay: (ep: MediaItem) => void; watched: boolean; onToggleWatched: () => Promise<void> | void; isWatched: (i: MediaItem) => boolean; onOpenSeries: (s: MediaItem) => void }) {
+function SeriesDetail({ series, onClose, onPlay, watched, onToggleWatched, isWatched, onOpenSeries }: { series: MediaItem; onClose: () => void; onPlay: (ep: MediaItem, queue?: MediaItem[]) => void; watched: boolean; onToggleWatched: () => Promise<void> | void; isWatched: (i: MediaItem) => boolean; onOpenSeries: (s: MediaItem) => void }) {
   const [seasons, setSeasons] = useState<MediaItem[] | null>(null);
   const [activeSeason, setActiveSeason] = useState<string | null>(null);
   const [episodes, setEpisodes] = useState<MediaItem[] | null>(null);
@@ -195,7 +196,7 @@ function SeriesDetail({ series, onClose, onPlay, watched, onToggleWatched, isWat
             <button
               className="btn-primary !px-6 !py-3 text-base gap-2 disabled:opacity-50"
               disabled={!nextEp}
-              onClick={() => nextEp && onPlay(nextEp)}
+              onClick={() => nextEp && onPlay(nextEp, episodes || undefined)}
             >
               <Icon.Play size={20} />
               {nextEp && nextEp.seasonNumber != null && nextEp.episodeNumber != null
@@ -255,7 +256,7 @@ function SeriesDetail({ series, onClose, onPlay, watched, onToggleWatched, isWat
               ) : (
                 <div className="space-y-1">
                   {episodes.map((ep, i) => (
-                    <EpisodeRow key={ep.id} ep={ep} index={i} onPlay={() => onPlay(ep)} forceWatched={watched} />
+                    <EpisodeRow key={ep.id} ep={ep} index={i} onPlay={() => onPlay(ep, episodes)} forceWatched={watched} />
                   ))}
                 </div>
               )}
@@ -299,6 +300,10 @@ export default function TVShows() {
   const [watchedIds, setWatchedIds] = useState<Set<string>>(new Set());
   const [unwatchedIds, setUnwatchedIds] = useState<Set<string>>(new Set());
   const [playing, setPlaying] = useState<MediaItem | null>(null);
+  const [episodeQueue, setEpisodeQueue] = useState<MediaItem[]>([]);
+  const [episodeQueueLoading, setEpisodeQueueLoading] = useState(false);
+  const [episodeQueueComplete, setEpisodeQueueComplete] = useState(false);
+  const episodeQueueToken = useRef(0);
   const [query, setQuery] = useState('');
   const [genre, setGenre] = useState('all');
   const [sort, setSort] = useState<SortKey>('recent');
@@ -408,6 +413,39 @@ export default function TVShows() {
     return () => observer.disconnect();
   }, [series?.length, total, loadingMore, query, genre, sort]);
 
+  const startEpisode = (episode: MediaItem, knownEpisodes: MediaItem[] = []) => {
+    const token = ++episodeQueueToken.current;
+    const seed = orderEpisodes([...knownEpisodes, episode]);
+    setPlaying(episode);
+    setEpisodeQueue(seed);
+    setEpisodeQueueLoading(!!episode.seriesId);
+    setEpisodeQueueComplete(!episode.seriesId);
+    if (!episode.seriesId) return;
+
+    // One server request returns the series in canonical season/episode order,
+    // including the next season. The current-season seed keeps navigation useful
+    // immediately while that request is in flight.
+    api.media.episodes(episode.seriesId).then(items => {
+      if (episodeQueueToken.current !== token) return;
+      const ordered = orderEpisodes(items);
+      if (ordered.some(item => item.id === episode.id)) {
+        setEpisodeQueue(ordered);
+        setEpisodeQueueComplete(true);
+      }
+    }).catch(() => {
+      // Keep the known current-season queue; never invent a cross-season jump.
+      if (episodeQueueToken.current === token) setEpisodeQueueComplete(false);
+    }).finally(() => {
+      if (episodeQueueToken.current === token) setEpisodeQueueLoading(false);
+    });
+  };
+
+  const closePlayer = () => {
+    episodeQueueToken.current++;
+    setPlaying(null);
+    setEpisodeQueueLoading(false);
+  };
+
   if (series === null) return <PageLoader />;
 
   const hasLibrary = configured && (series.length > 0 || filtering);
@@ -442,7 +480,7 @@ export default function TVShows() {
                 {resume.map(ep => (
                   <button
                     key={ep.id}
-                    onClick={() => setPlaying(ep)}
+                    onClick={() => startEpisode(ep)}
                     className="group snap-start shrink-0 w-56 sm:w-64 text-left"
                   >
                     <div className="relative aspect-video rounded-xl overflow-hidden bg-ink-800 shadow-card card-hover">
@@ -573,7 +611,7 @@ export default function TVShows() {
         <SeriesDetail
           series={selected}
           onClose={() => setSelected(null)}
-          onPlay={ep => setPlaying(ep)}
+          onPlay={startEpisode}
           watched={isWatched(selected)}
           onToggleWatched={() => toggleWatched(selected)}
           isWatched={isWatched}
@@ -581,7 +619,17 @@ export default function TVShows() {
         />
       )}
 
-      {playing && <VideoPlayer item={playing} onClose={() => setPlaying(null)} />}
+      {playing && (() => {
+        const neighbors = episodeNeighbors(episodeQueue, playing.id);
+        return <VideoPlayer item={playing} onClose={closePlayer}
+          episodeNavigation={playing.type === 'Episode' ? {
+            previous: neighbors.previous,
+            next: neighbors.next,
+            loading: episodeQueueLoading,
+            complete: episodeQueueComplete,
+            onSelect: setPlaying,
+          } : undefined} />;
+      })()}
     </div>
   );
 }

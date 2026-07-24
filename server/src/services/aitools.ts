@@ -2,16 +2,20 @@
 // search files, find the largest/recent files, summarize documents, look at the
 // media library, build playlists, generate images, etc. Executed server-side and
 // fed back to the Ollama tool-calling loop.
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import path from 'node:path';
 import * as storage from './storage.js';
 import * as jf from './jellyfin.js';
 import * as abs from './audiobookshelf.js';
 import * as progress from './progress.js';
 import * as ai from './ai.js';
+import * as writes from './storage-write.js';
+import { ensureFileCatalog, fileCatalogUsage, listFileCatalog, searchFileCatalog } from './file-catalog.js';
 import { db } from '../lib/db.js';
 import type { User } from '../lib/model.js';
+import { enqueueImageJob } from './image-jobs.js';
+import {
+  assertContentFeature, contentFeatureEnabled, jellyfinFeatureForType, type ContentFeature,
+} from './content-access.js';
 
 export interface Ctx { username: string; userId: number; user?: User; }
 
@@ -29,58 +33,95 @@ export const TOOLS = [
   { type: 'function', function: { name: 'generate_image', description: 'Generate an AI image from a text prompt (queues it; result appears in AI Image Studio).', parameters: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } } },
 ] as const;
 
-async function safe<T>(p: Promise<T>, f: T): Promise<T> { try { return await p; } catch { return f; } }
+const FILE_TOOLS = new Set(['search_files', 'largest_files', 'recent_files', 'storage_usage', 'read_document']);
+const MEDIA_KINDS: Record<string, ContentFeature> = {
+  movies: 'movies', series: 'tv', albums: 'music', songs: 'music', audiobooks: 'audiobooks',
+};
 
-function walkFiles(username: string, userId: number, maxDepth = 6): { name: string; path: string; size: number; modifiedAt: string }[] {
-  const root = storage.userRoot(username);
-  const out: any[] = [];
-  const walk = (dir: string, d: number) => {
-    if (d > maxDepth) return;
-    let names: string[]; try { names = fs.readdirSync(dir); } catch { return; }
-    for (const n of names) {
-      if (n.startsWith('.')) continue;
-      const full = path.join(dir, n);
-      let st: fs.Stats; try { st = fs.statSync(full); } catch { continue; }
-      if (st.isDirectory()) walk(full, d + 1);
-      else out.push({ name: n, path: storage.toVirtual(username, full), size: st.size, modifiedAt: st.mtime.toISOString() });
+/** Only advertise tools and media-kind enum values the current member may use.
+ *  execTool repeats the checks, so a forged tool call cannot bypass this UI/model hint. */
+export function toolsForUser(user: User): any[] {
+  const mediaKinds = Object.entries(MEDIA_KINDS).filter(([, feature]) => contentFeatureEnabled(user, feature)).map(([kind]) => kind);
+  return TOOLS.flatMap<any>(tool => {
+    const name = tool.function.name;
+    if (FILE_TOOLS.has(name) && !contentFeatureEnabled(user, 'files')) return [];
+    if (name === 'find_duplicate_photos' && !contentFeatureEnabled(user, 'photos')) return [];
+    if (name === 'create_playlist' && !contentFeatureEnabled(user, 'music')) return [];
+    if (name === 'continue_media' && !(['videos', 'movies', 'tv', 'audiobooks'] as ContentFeature[])
+      .some(feature => contentFeatureEnabled(user, feature))) return [];
+    if (name === 'list_media') {
+      if (!mediaKinds.length) return [];
+      return [{
+        ...tool,
+        function: {
+          ...tool.function,
+          parameters: {
+            ...tool.function.parameters,
+            properties: {
+              ...tool.function.parameters.properties,
+              kind: { ...tool.function.parameters.properties.kind, enum: mediaKinds },
+            },
+          },
+        },
+      }];
     }
-  };
-  walk(root, 0);
-  return out as any;
+    return [tool];
+  });
 }
 
+async function safe<T>(p: Promise<T>, f: T): Promise<T> { try { return await p; } catch { return f; } }
+
 function fmtBytes(b: number) { if (!b) return '0 B'; const u = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), u.length - 1); return `${(b / 1024 ** i).toFixed(1)} ${u[i]}`; }
+function resultLimit(value: unknown, fallback = 10): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(50, Math.floor(parsed)) : fallback;
+}
 
 export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> {
   const { username, userId } = ctx;
-  const audiobooksEnabled = ctx.user?.features?.audiobooks !== false;
+  const user = ctx.user;
+  if (!user) throw Object.assign(new Error('unauthorized'), { status: 401 });
+  const audiobooksEnabled = contentFeatureEnabled(user, 'audiobooks');
   switch (name) {
     case 'search_files': {
-      const q = String(args.query || '').toLowerCase();
-      const hits = walkFiles(username, userId).filter(f => f.name.toLowerCase().includes(q)).slice(0, 25);
+      assertContentFeature(user, 'files');
+      const q = String(args.query || '').trim();
+      await ensureFileCatalog({ id: userId, username });
+      const hits = searchFileCatalog(userId, q, { limit: 25, includeFolders: false });
       return { count: hits.length, files: hits.map(f => ({ name: f.name, path: f.path, size: fmtBytes(f.size) })) };
     }
     case 'largest_files': {
-      const files = walkFiles(username, userId).sort((a, b) => b.size - a.size).slice(0, args.limit || 10);
+      assertContentFeature(user, 'files');
+      const limit = resultLimit(args.limit);
+      await ensureFileCatalog({ id: userId, username });
+      const files = listFileCatalog(userId, { includeFolders: false, sort: 'largest', limit });
       return { files: files.map(f => ({ name: f.name, path: f.path, size: fmtBytes(f.size) })) };
     }
     case 'recent_files': {
-      const files = walkFiles(username, userId).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt)).slice(0, args.limit || 10);
-      return { files: files.map(f => ({ name: f.name, path: f.path, modified: f.modifiedAt })) };
+      assertContentFeature(user, 'files');
+      const limit = resultLimit(args.limit);
+      await ensureFileCatalog({ id: userId, username });
+      const files = listFileCatalog(userId, { includeFolders: false, sort: 'recent', limit });
+      return { files: files.map(f => ({ name: f.name, path: f.path, modified: new Date(f.mtimeMs).toISOString() })) };
     }
     case 'storage_usage': {
-      const u = await safe(storage.computeUsage(username, userId), { usedBytes: 0, fileCount: 0, byKind: {} } as any);
+      assertContentFeature(user, 'files');
+      await ensureFileCatalog({ id: userId, username });
+      const u = fileCatalogUsage(userId);
+      u.usedBytes = await safe(writes.chargedUsageBytes({ id: userId, username }), u.usedBytes);
       return { used: fmtBytes(u.usedBytes), files: u.fileCount, byType: Object.fromEntries(Object.entries(u.byKind).map(([k, v]: any) => [k, fmtBytes(v.bytes)])) };
     }
     case 'read_document': {
+      assertContentFeature(user, 'files');
       try {
-        const { real, stat } = storage.statReal(username, args.path);
+        const { real, stat } = await storage.statRealAsync(username, args.path);
         if (stat.size > 2_000_000) return { error: 'file too large' };
         const content = await fsp.readFile(real, 'utf8');
         return { path: args.path, content: content.slice(0, 12000) };
       } catch { return { error: 'could not read file' }; }
     }
     case 'find_duplicate_photos': {
+      assertContentFeature(user, 'photos');
       const rows = db.prepare(`SELECT size,width,height,COUNT(*) count,GROUP_CONCAT(rel_path, char(10)) paths
         FROM photo_index
         WHERE user_id=? AND size > 0 AND width IS NOT NULL AND height IS NOT NULL
@@ -94,6 +135,9 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
     }
     case 'list_media': {
       const limit = args.limit || 15;
+      const required = MEDIA_KINDS[String(args.kind || '')];
+      if (!required) return { items: [] };
+      assertContentFeature(user, required);
       if (args.kind === 'movies') return { items: (await safe(jf.listByType('Movie', { Limit: limit, SortBy: 'DateCreated', SortOrder: 'Descending' }), [])).map((m: any) => ({ name: m.name, year: m.year })) };
       if (args.kind === 'series') return { items: (await safe(jf.listByType('Series', { Limit: limit }), [])).map((m: any) => ({ name: m.name, year: m.year })) };
       if (args.kind === 'albums') return { items: (await safe(jf.listByType('MusicAlbum', { Limit: limit }), [])).map((m: any) => ({ name: m.name, artist: m.albumArtist })) };
@@ -105,12 +149,14 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
       return { items: [] };
     }
     case 'continue_media': {
+      const videoEnabled = (['videos', 'movies', 'tv'] as ContentFeature[]).some(feature => contentFeatureEnabled(user, feature));
       const [vids, books] = await Promise.all([
-        safe(Promise.all(progress.resume(userId, 'video', 8).map(async p => {
+        videoEnabled ? safe(Promise.all(progress.resume(userId, 'video', 24).map(async p => {
           const v = await jf.itemDetail(p.itemId);
+          if (!contentFeatureEnabled(user, jellyfinFeatureForType(v.type))) return null;
           const dur = p.durationTicks || v.runtimeTicks || 0;
           return { ...v, positionTicks: p.positionTicks, progressPct: dur ? Math.round((p.positionTicks / dur) * 100) : v.progressPct };
-        })), [] as any[]),
+        })), [] as any[]) : Promise.resolve([]),
         audiobooksEnabled ? safe(Promise.all(progress.resume(userId, 'audio', 8).map(async p => {
           const b = await abs.itemDetail(p.itemId);
           const dur = p.durationTicks || Math.round((b.durationSec || 0) * 1e7);
@@ -120,7 +166,7 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
       return {
         // Carry id/type/series so the UI can deep-link episodes to /tv (not /movies) and
         // show real series context instead of a bare episode name ("Pilot").
-        watching: vids.slice(0, 8).map((v: any) => ({
+        watching: vids.filter(Boolean).slice(0, 8).map((v: any) => ({
           id: v.id,
           type: v.type,                 // 'Movie' | 'Episode'
           name: v.name,
@@ -133,6 +179,7 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
       };
     }
     case 'create_playlist': {
+      assertContentFeature(user, 'music');
       const q = String(args.mood || '').toLowerCase();
       const all = await safe(jf.listByType('Audio', { Limit: 500 }), [] as any[]);
       let picked = all.filter((s: any) => `${s.name} ${s.album} ${s.albumArtist} ${(s.genres || []).join(' ')}`.toLowerCase().includes(q));
@@ -143,22 +190,8 @@ export async function execTool(name: string, args: any, ctx: Ctx): Promise<any> 
       return { name: `${args.mood} mix`, tracks: picked.map((s: any) => ({ id: s.id, title: s.name, artist: s.albumArtist || s.album })) };
     }
     case 'generate_image': {
-      const id = 'j_' + Math.random().toString(36).slice(2, 10);
-      db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt) VALUES (?,?,?,?,?)').run(id, userId, 'image', 'queued', args.prompt);
-      // fire-and-forget; the AI Image Studio has the full flow
-      (async () => {
-        try {
-          const sd = await import('./images.js');
-          const imgs = await sd.txt2img({ prompt: args.prompt });
-          for (const b of imgs) {
-            const { filename } = sd.saveGenerated(userId, b);
-            const gid = 'g_' + Math.random().toString(36).slice(2, 8);
-            db.prepare('INSERT INTO generated_images (id,user_id,prompt,filename,width,height,workflow) VALUES (?,?,?,?,?,?,?)').run(gid, userId, args.prompt, filename, 832, 1216, 'assistant');
-          }
-          db.prepare("UPDATE jobs SET status='done', finished_at=datetime('now') WHERE id=?").run(id);
-        } catch { db.prepare("UPDATE jobs SET status='error' WHERE id=?").run(id); }
-      })();
-      return { status: 'started', note: 'Image is generating — it will appear in AI Image Studio in ~20s.' };
+      const id = enqueueImageJob(user, args.prompt);
+      return { id, status: 'queued', note: 'Image generation is queued. Progress appears in Jobs and the result will be saved to AI Image Studio.' };
     }
     default:
       return { error: 'unknown tool' };

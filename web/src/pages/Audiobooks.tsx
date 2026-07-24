@@ -2,10 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatDuration } from '../lib/utils';
-import { usePlayer, toast } from '../lib/store';
+import { usePlayer, toast, type Track } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, ProgressBar, Badge, Spinner } from '../components/ui';
 import type { Book, Chapter } from '../lib/model';
 import { imageSrcSet } from '../lib/images';
+import { getAudioEngine } from '../lib/audio-engine';
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 const SLEEP_OPTIONS = [15, 30, 45, 60];
@@ -52,16 +53,16 @@ function trackFor(book: Book) {
 
 // ---- shared audio helpers (talk to the single global <audio> element) ----
 function getAudio(): HTMLAudioElement | null {
-  return document.querySelector('audio');
+  return getAudioEngine();
 }
 
-// Chosen speed persists for the whole session and is re-applied whenever a new
-// stream loads (the browser resets playbackRate to 1 on load()).
-let sessionSpeed = 1;
+// Long-form speed is owned by the account-scoped global player. Apply it
+// immediately here as well; the persistent engine re-applies it after loads.
 function applySpeed(next?: number) {
-  if (next != null) sessionSpeed = next;
+  const player = usePlayer.getState();
+  if (next != null) player.setPlaybackRate(next);
   const a = getAudio();
-  if (a) a.playbackRate = sessionSpeed;
+  if (a) a.playbackRate = next ?? usePlayer.getState().playbackRate;
 }
 
 // Start (or resume) a book and optionally jump to an offset in seconds. Because
@@ -77,7 +78,24 @@ function playBook(book: Book, seconds?: number) {
   // saved listening position so the book picks up exactly where it was left off.
   const resumeAt = seconds != null ? seconds : (book.currentTimeSec || 0);
   if (bookOf(P.current?.id) === book.id && a) {
-    if (resumeAt > 0 || seconds != null) a.currentTime = resumeAt;
+    if (seconds != null) {
+      const targetIndex = P.queue.findIndex((track, index) => {
+        if (bookOf(track.id) !== book.id) return false;
+        const start = track.timelineOffsetSec || 0;
+        const end = start + (track.durationSec || (index === P.queue.length - 1 ? Number.MAX_SAFE_INTEGER : 0));
+        return seconds >= start && (seconds < end || index === P.queue.length - 1);
+      });
+      if (targetIndex >= 0 && targetIndex !== P.index) {
+        const queue = P.queue.map((track, index) => index === targetIndex
+          ? { ...track, startAt: Math.max(0, seconds - (track.timelineOffsetSec || 0)) }
+          : track);
+        P.playQueue(queue, targetIndex);
+        setTimeout(() => applySpeed(), 250);
+        return;
+      }
+      const localOffset = P.current?.timelineOffsetSec || 0;
+      a.currentTime = Math.max(0, seconds - localOffset);
+    }
     if (!P.playing) P.setPlaying(true);
     applySpeed();
     return;
@@ -95,70 +113,38 @@ function playBook(book: Book, seconds?: number) {
     setTimeout(attempt, 250);
   };
   // Build a queue from the book's audio files so multi-file audiobooks play every
-  // part in order (and single-file books stream the actual file, not a zip). startAt
-  // applies to the first track so the global player seeks to the resume point.
+  // part in order (and single-file books stream the actual file, not a zip).
+  // Resume is translated from the whole-book timeline to the right file + local
+  // offset, so long multi-file books never jump backward to part one.
   api.books.tracks(book.id).then(tracks => {
     if (tracks && tracks.length) {
       const art = coverSrc(book) || undefined;
-      P.playQueue(tracks.map((t, i) => ({
-        id: `${book.id}:${t.ino}`,
-        title: tracks.length > 1 ? `${book.title} — ${t.title}` : book.title,
-        subtitle: authorName(book),
-        artUrl: art, streamUrl: api.books.trackUrl(t.streamUrl),
-        kind: 'audiobook' as const, durationSec: t.durationSec,
-        cast: { source: 'audiobookshelf' as const, itemId: book.id, fileId: t.ino },
-        ...(i === 0 && resumeAt > 0 ? { startAt: resumeAt } : {}),
-      })), 0);
+      const totalDurationSec = book.durationSec || tracks.reduce((sum, track) => sum + (track.durationSec || 0), 0);
+      let offset = 0;
+      let startIndex = 0;
+      const queue: Track[] = tracks.map((t, i) => {
+        const timelineOffsetSec = offset;
+        const nextOffset = offset + (t.durationSec || 0);
+        if (resumeAt >= timelineOffsetSec && (resumeAt < nextOffset || i === tracks.length - 1)) startIndex = i;
+        offset = nextOffset;
+        return {
+          id: `${book.id}:${t.ino}`,
+          title: tracks.length > 1 ? `${book.title} — ${t.title}` : book.title,
+          subtitle: authorName(book),
+          artUrl: art, streamUrl: api.books.trackUrl(t.streamUrl),
+          kind: 'audiobook' as const, durationSec: t.durationSec,
+          timelineOffsetSec, totalDurationSec,
+          cast: { source: 'audiobookshelf' as const, itemId: book.id, fileId: t.ino },
+        };
+      });
+      if (resumeAt > 0) queue[startIndex] = { ...queue[startIndex], startAt: Math.max(0, resumeAt - (queue[startIndex].timelineOffsetSec || 0)) };
+      P.playQueue(queue, startIndex);
     } else P.playTrack(resumeAt > 0 ? { ...trackFor(book), startAt: resumeAt } : trackFor(book));
     applyOnLoad();
-    watchPlayback(book);
   }).catch(() => {
     P.playTrack(resumeAt > 0 ? { ...trackFor(book), startAt: resumeAt } : trackFor(book));
     applyOnLoad();
-    watchPlayback(book);
   });
-}
-
-// The global <audio> element has no error handler, so a book whose stream 404s (a
-// missing/renamed file) would sit forever as a fake "Now playing" stuck at 0:00.
-// After starting a fresh stream we watch the element: if it errors — or never
-// advances past 0:00 despite being "playing" — we surface a toast and drop the
-// bogus now-playing state so the user gets clear feedback instead of silence.
-function watchPlayback(book: Book) {
-  const started = Date.now();
-  let settled = false;
-  let el: HTMLAudioElement | null = null;
-
-  const stillOurs = () => bookOf(usePlayer.getState().current?.id) === book.id;
-  const stop = () => {
-    settled = true;
-    clearInterval(iv);
-    if (el) el.removeEventListener('error', onError);
-  };
-  const succeed = () => { if (!settled) stop(); };
-  const fail = () => {
-    if (settled) return;
-    stop();
-    if (stillOurs()) usePlayer.getState().clear();
-    toast('Could not play this book', 'error', book.title);
-  };
-  const onError = () => fail();
-
-  const iv = setInterval(() => {
-    // User moved on to a different book/track — stop watching without a verdict.
-    if (!stillOurs()) return succeed();
-    const a = getAudio();
-    if (a && a !== el) {
-      if (el) el.removeEventListener('error', onError);
-      el = a; a.addEventListener('error', onError);
-    }
-    if (!a) return;
-    if (a.error) return fail();                       // hard media error (404 / decode)
-    if (a.currentTime > 0.25 && a.readyState >= 2) return succeed(); // really playing
-    if (!usePlayer.getState().playing && a.paused) return succeed(); // user paused it
-    // Backstop: still pinned at 0:00 with no playable data after a long grace window.
-    if (Date.now() - started > 15000 && a.currentTime < 0.25 && a.readyState < 2) return fail();
-  }, 400);
 }
 
 function skip(delta: number) {
@@ -304,12 +290,13 @@ function ContinueTile({ book, onOpen }: { book: Book; onOpen: () => void }) {
 function BookDetail({ book, onClose }: { book: Book; onClose: () => void }) {
   const [detail, setDetail] = useState<(Book & { chapters: Chapter[]; overview?: string }) | null>(null);
   const [loading, setLoading] = useState(true);
-  const [speed, setSpeed] = useState(sessionSpeed);
+  const speed = usePlayer((s) => s.playbackRate);
   const sleep = useSleep();
 
   // Reactive slices of the global player so we can reflect the current chapter.
   const curId = usePlayer((s) => s.current?.id);
   const curTime = usePlayer((s) => s.currentTime);
+  const curTimelineOffset = usePlayer((s) => s.current?.timelineOffsetSec || 0);
   const playing = usePlayer((s) => s.playing);
   const isActive = bookOf(curId) === book.id;
 
@@ -328,10 +315,10 @@ function BookDetail({ book, onClose }: { book: Book; onClose: () => void }) {
   const pct = book.progressPct || 0;
 
   const activeIdx = isActive && chapters.length
-    ? chapters.findIndex((c) => curTime >= c.start && curTime < (c.end || Infinity))
+    ? chapters.findIndex((c) => curTime + curTimelineOffset >= c.start && curTime + curTimelineOffset < (c.end || Infinity))
     : -1;
 
-  const setSpeedFn = (s: number) => { setSpeed(s); applySpeed(s); if (isActive) toast(`Speed ${s}×`, 'info'); };
+  const setSpeedFn = (s: number) => { applySpeed(s); if (isActive) toast(`Speed ${s}×`, 'info'); };
 
   const mainAction = () => {
     if (isActive) { usePlayer.getState().toggle(); applySpeed(); return; }

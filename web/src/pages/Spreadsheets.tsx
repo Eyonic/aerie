@@ -3,10 +3,20 @@ import { useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatRelative, debounce, copyText } from '../lib/utils';
-import { toast } from '../lib/store';
+import { toast, useAuth } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, Spinner, Menu, ConfirmModal } from '../components/ui';
 import { voice, type Recorder } from '../lib/voice';
 import type { DocMeta } from '../lib/model';
+import { clipboardTextToGrid, csvToGrid, gridToCsv } from '../lib/csv';
+import {
+  clearRecoveryDraftIfContent, downloadRecoveryDraft, loadRecoveryDraft, saveRecoveryDraft, type RecoveryDraft,
+} from '../lib/recovery-drafts';
+import {
+  commitOfflineEditableSync, getOfflineEditable, listOfflineEditables, markOfflineEditableConflict,
+  markOfflineEditableDirty, pinOfflineEditable, refreshOfflineEditable, removeOfflineEditable,
+  resolveOfflineEditableChoice, syncOfflineEditable, type OfflineEditableCopy,
+} from '../lib/offline-editables';
+import { officeErrorMessage } from '../lib/office-errors';
 
 /* ================================================================== */
 /* Formula engine — safe recursive-descent evaluator (no eval())      */
@@ -354,6 +364,8 @@ function looksLikeHeader(g: string[][]): boolean {
 type CellFmt = { bold?: boolean; bg?: string; align?: 'left' | 'center' | 'right'; num?: NumFmt };
 type SheetData = { name: string; grid: string[][]; formats: Record<string, CellFmt>; colWidths?: number[]; freezeRows?: number; freezeCols?: number };
 type SheetDoc = { sheets: SheetData[]; active: number };
+const OFFICE_SHEET_RE = /\.(xlsx|ods)$/i;
+const BINARY_SHEET_RE = /\.(xlsx|ods|xls)$/i;
 
 const fkey = (r: number, c: number) => `${r}:${c}`;
 const DEFAULT_W = 116;
@@ -388,12 +400,27 @@ function parseDoc(parsed: any): SheetDoc {
   return { sheets: [{ name: 'Sheet 1', grid: normalizeGrid(parsed?.grid), formats: {} }], active: 0 };
 }
 
-function gridToCsv(grid: string[][]): string {
-  return grid.map(row => row.map(cell => {
-    if (/[",\n]/.test(cell)) return '"' + cell.replace(/"/g, '""') + '"';
-    return cell;
-  }).join(',')).join('\n');
+function sheetFromContent(content: string, isCsv: boolean, fileName: string): SheetDoc {
+  if (isCsv) return {
+    sheets: [{ name: fileName.replace(/\.csv$/i, ''), grid: normalizeGrid(csvToGrid(content)), formats: {} }], active: 0,
+  };
+  let parsed: any;
+  try { parsed = JSON.parse(content || '{}'); }
+  catch { throw new Error('invalid_recovery_spreadsheet'); }
+  return parseDoc(parsed);
 }
+
+function cloneSheetDoc(doc: SheetDoc): SheetDoc {
+  return JSON.parse(JSON.stringify(doc)) as SheetDoc;
+}
+
+interface SheetHistoryEntry {
+  doc: SheetDoc;
+  sel: { r: number; c: number };
+  anchor: { r: number; c: number };
+}
+
+const SHEET_HISTORY_CAP = 60;
 
 /* ================================================================== */
 /* Tiny markdown-ish renderer for AI output                            */
@@ -431,16 +458,64 @@ function AiMarkdown({ text }: { text: string }) {
 export default function Spreadsheets() {
   const params = useParams();
   const [searchParams] = useSearchParams();
+  const accountId = useAuth(state => state.user?.id || 0);
   const path = searchParams.get('path') || (params.id ? decodeURIComponent(params.id) : null);
-  return path ? <Editor key={path} path={path} /> : <SheetsList />;
+  if (path && BINARY_SHEET_RE.test(path)) return <OfficeSpreadsheetImport key={`${accountId}:${path}`} path={path} />;
+  return path ? <Editor key={`${accountId}:${path}`} path={path} /> : <SheetsList />;
+}
+
+function OfficeSpreadsheetImport({ path }: { path: string }) {
+  const nav = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const filename = path.split('/').pop() || 'Office spreadsheet';
+  const supported = OFFICE_SHEET_RE.test(path);
+  const convert = async () => {
+    setBusy(true);
+    try {
+      const result = await api.sheets.importExisting(path);
+      toast('Editable Aerie copy created', 'success', result.warnings?.[1]);
+      nav(`/spreadsheets?path=${encodeURIComponent(result.path)}`, { replace: true });
+    } catch (error: any) {
+      toast('Could not import spreadsheet', 'error', officeErrorMessage(error, 'The Office file could not be converted safely.'));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="animate-fade-in max-w-2xl">
+      <PageHeader title="Import Office spreadsheet" subtitle={filename} icon={<Icon.Sheet size={22} />} />
+      <div className="card space-y-4">
+        <div className="flex items-start gap-3">
+          <Icon.Info size={20} className="mt-0.5 shrink-0 text-accent-green" />
+          <div>
+            <h2 className="font-semibold text-white">Create an editable Aerie copy</h2>
+            <p className="mt-1 text-sm text-slate-300">{supported
+              ? 'The original file stays unchanged. Aerie imports sheets, cell values and formulas; macros, external links and advanced formatting are omitted.'
+              : 'Legacy .xls files cannot be converted safely in Aerie. Save the file as .xlsx or .ods in a spreadsheet application, then import it. Aerie will not open or overwrite this binary as text.'}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {supported && <button className="btn-primary" onClick={convert} disabled={busy}>{busy ? <Spinner size={16} /> : <Icon.Refresh size={16} />}Create editable copy</button>}
+          <button className="btn-secondary" onClick={() => nav(`/files?path=${encodeURIComponent(path.split('/').slice(0, -1).join('/') || '/')}`)} disabled={busy}>Back to Files</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ---------------- LIST MODE ---------------- */
 
 function SheetsList() {
   const nav = useNavigate();
+  const accountId = useAuth(state => state.user?.id || 0);
   const [sheets, setSheets] = useState<DocMeta[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [offlineOnly, setOfflineOnly] = useState(false);
+  const [offlineCopies, setOfflineCopies] = useState<Record<string, OfflineEditableCopy>>({});
+  const [offlineBusy, setOfflineBusy] = useState<Set<string>>(new Set());
+  const listRequestRef = useRef(0);
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState('Untitled');
   const [delTarget, setDelTarget] = useState<DocMeta | null>(null);
@@ -453,17 +528,75 @@ function SheetsList() {
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const onlySheets = (list: DocMeta[]) => list.filter(s => s.kind === 'spreadsheet' || s.path.endsWith('.cbxsheet') || s.path.endsWith('.csv'));
-  const load = () => api.sheets.list().then(list => setSheets(onlySheets(list))).catch(() => setSheets([]));
-  useEffect(() => { load(); }, []);
+  const readOfflineCopies = useCallback(async () => {
+    if (!accountId) { setOfflineCopies({}); return [] as OfflineEditableCopy[]; }
+    const copies = await listOfflineEditables(accountId, 'spreadsheet');
+    setOfflineCopies(Object.fromEntries(copies.map(copy => [copy.path, copy])));
+    return copies;
+  }, [accountId]);
+  const load = useCallback(async () => {
+    const request = ++listRequestRef.current;
+    setListError(null);
+    try {
+      const list = onlySheets(await api.sheets.list());
+      if (request === listRequestRef.current) {
+        setSheets(list);
+        setOfflineOnly(false);
+      }
+      await readOfflineCopies().catch(() => []);
+    } catch (error: any) {
+      const copies = await readOfflineCopies().catch(() => [] as OfflineEditableCopy[]);
+      if (request !== listRequestRef.current) return;
+      if (copies.length) {
+        setSheets(copies.map(copy => ({
+          id: `offline:${copy.path}`,
+          path: copy.path,
+          title: copy.title,
+          updatedAt: copy.locallyUpdatedAt || copy.serverUpdatedAt || copy.cachedAt,
+          kind: 'spreadsheet' as const,
+        })));
+        setOfflineOnly(true);
+        setListError('The server is unavailable. Showing spreadsheets saved on this device.');
+      } else {
+        setListError(error?.message || 'The spreadsheet service may be offline. No offline spreadsheets are available yet.');
+      }
+    }
+  }, [readOfflineCopies]);
+
+  const syncOfflineCopies = useCallback(async () => {
+    if (!accountId) return;
+    const copies = await listOfflineEditables(accountId, 'spreadsheet').catch(() => [] as OfflineEditableCopy[]);
+    const outcomes = await Promise.all(copies.filter(copy => copy.dirty).map(copy => syncOfflineEditable(
+      accountId, 'spreadsheet', copy.path,
+      (savePath, content, revision) => api.files.saveContent(savePath, content, revision),
+    )));
+    if (outcomes.some(outcome => outcome.status === 'conflict')) {
+      toast('An offline spreadsheet needs review', 'warning', 'Open the marked spreadsheet to choose between your draft and the server copy.');
+    }
+    await readOfflineCopies().catch(() => []);
+  }, [accountId, readOfflineCopies]);
+
+  useEffect(() => {
+    void load().then(() => { if (navigator.onLine) void syncOfflineCopies(); });
+    const online = () => { void syncOfflineCopies().then(load); };
+    window.addEventListener('online', online);
+    return () => window.removeEventListener('online', online);
+  }, [load, syncOfflineCopies]);
 
   async function doDelete() {
     const target = delTarget;
     if (!target) return;
+    if (offlineCopies[target.path]?.dirty) {
+      toast('This spreadsheet has unsynced offline changes', 'warning', 'Open it and sync or resolve those changes before deleting it.');
+      setDelTarget(null);
+      return;
+    }
     setDeleting(true);
     try {
       await api.files.delete([target.path]);
+      const offlineRemoved = !offlineCopies[target.path] || await removeOfflineEditable(accountId, 'spreadsheet', target.path).catch(() => false);
       setSheets(list => (list || []).filter(s => (s.id || s.path) !== (target.id || target.path)));
-      toast('Spreadsheet moved to trash', 'success');
+      toast('Spreadsheet moved to trash', offlineRemoved ? 'success' : 'warning', offlineRemoved ? undefined : 'The browser could not remove its offline copy.');
     } catch (e: any) {
       toast('Could not delete spreadsheet', 'error', e?.message);
     } finally {
@@ -474,24 +607,60 @@ function SheetsList() {
 
   const sheetLabel = (s: DocMeta) => (s.title || s.path.split('/').pop() || 'Spreadsheet').replace(/\.cbxsheet$/i, '');
 
+  async function toggleOffline(s: DocMeta) {
+    if (!accountId || offlineBusy.has(s.path)) return;
+    setOfflineBusy(current => new Set(current).add(s.path));
+    try {
+      if (offlineCopies[s.path]) {
+        await removeOfflineEditable(accountId, 'spreadsheet', s.path);
+        toast('Offline copy removed', 'success', 'The server spreadsheet is unchanged.');
+      } else {
+        const source = await api.files.content(s.path);
+        await pinOfflineEditable({
+          accountId, kind: 'spreadsheet', path: s.path, title: sheetLabel(s), content: source.content ?? '',
+          revision: source.revision, serverUpdatedAt: source.modifiedAt || s.updatedAt,
+        });
+        toast('Spreadsheet available offline', 'success', 'You can open and edit it when this server cannot be reached.');
+      }
+      await readOfflineCopies();
+    } catch (error: any) {
+      toast(error?.message === 'offline_copy_dirty' ? 'Offline copy has unsynced changes' : 'Could not change offline availability',
+        error?.message === 'offline_copy_dirty' ? 'warning' : 'error',
+        error?.message === 'offline_copy_dirty' ? 'Open the spreadsheet and sync or resolve it before removing the offline copy.' : error?.message);
+    } finally {
+      setOfflineBusy(current => { const next = new Set(current); next.delete(s.path); return next; });
+    }
+  }
+
   const toggleSelect = (p: string) => setSelected(prev => { const n = new Set(prev); if (n.has(p)) n.delete(p); else n.add(p); return n; });
   const exitSelecting = () => { setSelecting(false); setSelected(new Set()); };
   async function confirmBulkDelete() {
     const paths = [...selected];
     if (!paths.length || bulkDeleting) return;
+    if (paths.some(path => offlineCopies[path]?.dirty)) {
+      toast('Some selected spreadsheets have unsynced offline changes', 'warning', 'Open the marked spreadsheets and sync or resolve them before deleting.');
+      return;
+    }
     setBulkDeleting(true);
     try {
       await api.files.delete(paths);
-      toast(paths.length === 1 ? 'Spreadsheet moved to trash' : `${paths.length} spreadsheets moved to trash`, 'success');
+      const offlineResults = await Promise.allSettled(paths.filter(path => offlineCopies[path]).map(path => removeOfflineEditable(accountId, 'spreadsheet', path)));
+      const offlineCleanupFailed = offlineResults.some(result => result.status === 'rejected');
+      toast(paths.length === 1 ? 'Spreadsheet moved to trash' : `${paths.length} spreadsheets moved to trash`, offlineCleanupFailed ? 'warning' : 'success',
+        offlineCleanupFailed ? 'Some browser offline copies could not be removed.' : undefined);
       setSheets(list => (list || []).filter(s => !selected.has(s.path)));
       exitSelecting();
     } catch (e: any) {
       toast('Could not delete spreadsheets', 'error', e?.message);
       // A partial batch may have trashed some paths before failing — reload and
       // drop vanished paths from the selection so a retry only sends live ones.
-      const fresh = await api.sheets.list().then(onlySheets).catch(() => [] as DocMeta[]);
-      setSheets(fresh);
-      setSelected(prev => new Set(fresh.filter(s => prev.has(s.path)).map(s => s.path)));
+      try {
+        const fresh = onlySheets(await api.sheets.list());
+        setSheets(fresh);
+        setSelected(prev => new Set(fresh.filter(s => prev.has(s.path)).map(s => s.path)));
+      } catch {
+        setListError('Some items may have moved, but the list could not be refreshed. Retry before deleting again.');
+      }
     } finally {
       setBulkDeleting(false);
     }
@@ -527,7 +696,33 @@ function SheetsList() {
     }
   }
 
-  if (!sheets) return <PageLoader />;
+  async function importOffice(file?: File) {
+    if (!file) return;
+    if (!OFFICE_SHEET_RE.test(file.name)) {
+      toast('Choose an Excel or OpenDocument spreadsheet', 'warning', 'Supported imports: .xlsx and .ods');
+      return;
+    }
+    setImporting(true);
+    try {
+      const result = await api.sheets.import(file);
+      toast('Spreadsheet imported', 'success', result.warnings?.[1]);
+      nav(`/spreadsheets?path=${encodeURIComponent(result.path)}`);
+    } catch (error: any) {
+      toast('Import failed', 'error', officeErrorMessage(error, 'The Office file could not be converted safely.'));
+    } finally {
+      setImporting(false);
+      if (importRef.current) importRef.current.value = '';
+    }
+  }
+
+  if (!sheets && !listError) return <PageLoader />;
+  if (!sheets) return (
+    <div className="animate-fade-in">
+      <PageHeader title="Spreadsheets" subtitle="Create, edit and analyze spreadsheets with formulas, charts and AI." icon={<Icon.Sheet size={22} />} />
+      <EmptyState icon={<Icon.Warning size={30} />} title="Couldn't load spreadsheets" subtitle={listError || 'Please try again.'}
+        action={<button className="btn-primary" onClick={() => void load()}><Icon.Refresh size={16} /> Retry</button>} />
+    </div>
+  );
 
   return (
     <div className="animate-fade-in">
@@ -554,22 +749,35 @@ function SheetsList() {
                 <Icon.Check size={16} /><span className="hidden sm:inline">Select</span>
               </button>
             )}
-            <button className="btn-primary" onClick={() => setNewOpen(true)}><Icon.Plus size={16} /> <span className="hidden sm:inline">New spreadsheet</span></button>
+            <input ref={importRef} type="file" accept=".xlsx,.ods,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.spreadsheet"
+              className="hidden" onChange={event => void importOffice(event.target.files?.[0])} />
+            <button className="btn-secondary" onClick={() => importRef.current?.click()} disabled={importing || offlineOnly} title={offlineOnly ? 'Reconnect to import a spreadsheet' : undefined}>
+              {importing ? <Spinner size={16} /> : <Icon.Upload size={16} />}<span className="hidden sm:inline">Import</span>
+            </button>
+            <button className="btn-primary" onClick={() => setNewOpen(true)} disabled={offlineOnly} title={offlineOnly ? 'Reconnect to create a spreadsheet' : undefined}><Icon.Plus size={16} /> <span className="hidden sm:inline">New spreadsheet</span></button>
           </div>
         )}
       />
+
+      {listError && (
+        <div role={offlineOnly ? 'status' : 'alert'} className={cx('mb-4 rounded-xl px-4 py-3 flex items-center gap-3 border', offlineOnly ? 'border-accent-amber/25 bg-accent-amber/10' : 'border-accent-red/25 bg-accent-red/10')}>
+          {offlineOnly ? <Icon.Wifi size={17} className="text-accent-amber" /> : <Icon.Warning size={17} className="text-accent-red" />}
+          <p className="text-sm text-slate-200 flex-1">{listError}</p>
+          <button className="btn-secondary !py-1.5" onClick={() => void load()}><Icon.Refresh size={14} /> Retry</button>
+        </div>
+      )}
 
       {sheets.length === 0 ? (
         <EmptyState
           icon={<Icon.Sheet size={30} />}
           title="No spreadsheets yet"
           subtitle="Start a new spreadsheet to crunch numbers, write formulas, and let AI find insights."
-          action={<button className="btn-primary" onClick={() => setNewOpen(true)}><Icon.Plus size={16} /> New spreadsheet</button>}
+          action={<div className="flex flex-wrap justify-center gap-2"><button className="btn-primary" onClick={() => setNewOpen(true)}><Icon.Plus size={16} /> New spreadsheet</button><button className="btn-secondary" onClick={() => importRef.current?.click()} disabled={importing}>{importing ? <Spinner size={16} /> : <Icon.Upload size={16} />}Import .xlsx or .ods</button></div>}
         />
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
           {!selecting && (
-            <button onClick={createBlank} className="card card-hover p-0 overflow-hidden group text-left flex flex-col">
+            <button onClick={createBlank} disabled={offlineOnly} className="card card-hover p-0 overflow-hidden group text-left flex flex-col disabled:opacity-40">
               <div className="aspect-[4/3] grid place-items-center bg-gradient-to-br from-brand-500/15 to-accent-cyan/10 border-b border-white/[0.05]">
                 <div className="w-12 h-12 rounded-2xl bg-white/[0.06] grid place-items-center text-brand-300 group-hover:scale-110 transition-transform"><Icon.Plus size={24} /></div>
               </div>
@@ -582,6 +790,7 @@ function SheetsList() {
 
           {sheets.map(s => {
             const isSel = selected.has(s.path);
+            const offline = offlineCopies[s.path];
             return (
             <div key={s.id || s.path} className={cx('card card-hover p-0 overflow-hidden text-left flex flex-col group relative', isSel && 'ring-2 ring-brand-500')}>
               <button onClick={() => selecting ? toggleSelect(s.path) : nav(`/spreadsheets?path=${encodeURIComponent(s.path)}`)} aria-pressed={selecting ? isSel : undefined}
@@ -590,6 +799,9 @@ function SheetsList() {
                   <MiniGridPreview />
                   <div className="absolute bottom-2 left-2 w-8 h-8 rounded-lg bg-accent-green/90 grid place-items-center text-white shadow-float"><Icon.Sheet size={16} /></div>
                   {s.path.endsWith('.csv') && <span className="absolute top-2 left-2 chip !py-0.5 !px-2 text-[10px]">CSV</span>}
+                  {offline && <span className={cx('absolute bottom-2 right-2 chip !py-0.5 !px-2 text-[10px]', offline.conflict ? '!text-accent-red' : offline.dirty ? '!text-accent-amber' : '!text-accent-green')}>
+                    {offline.conflict ? 'Review changes' : offline.dirty ? 'Waiting to sync' : 'Offline'}
+                  </span>}
                 </div>
                 <div className="px-4 py-3">
                   <p className="text-sm font-medium text-white truncate group-hover:text-brand-300 transition-colors">{sheetLabel(s)}</p>
@@ -609,6 +821,7 @@ function SheetsList() {
                     <button title="More" className="w-7 h-7 grid place-items-center rounded-lg bg-black/50 backdrop-blur text-slate-200 hover:text-white hover:bg-black/70"><Icon.More size={16} /></button>
                   } items={[
                     { label: 'Open', icon: <Icon.Sheet size={15} />, onClick: () => nav(`/spreadsheets?path=${encodeURIComponent(s.path)}`) },
+                    { label: offline ? 'Remove offline copy' : 'Make available offline', icon: offline ? <Icon.Close size={15} /> : <Icon.Download size={15} />, onClick: () => void toggleOffline(s) },
                     { label: 'Select', icon: <Icon.Check size={15} />, onClick: () => { setSelecting(true); setSelected(new Set([s.path])); } },
                     { label: 'Delete', icon: <Icon.Trash size={15} />, danger: true, onClick: () => setDelTarget(s) },
                   ]} />
@@ -694,6 +907,7 @@ const CHART_COLORS = ['#8b5cf6', '#22d3ee', '#f472b6', '#fbbf24', '#34d399', '#f
 
 function Editor({ path }: { path: string }) {
   const nav = useNavigate();
+  const accountId = useAuth(state => state.user?.id || 0);
   const isCsv = path.toLowerCase().endsWith('.csv');
   const fileName = path.split('/').pop() || 'Spreadsheet';
   // Display name strips the internal ".cbxsheet" extension so the title bar reads cleanly.
@@ -702,6 +916,14 @@ function Editor({ path }: { path: string }) {
   const [doc, setDoc] = useState<SheetDoc | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+  const [recovery, setRecovery] = useState<RecoveryDraft | null>(null);
+  const [recoveryStored, setRecoveryStored] = useState(true);
+  const [recoveryStorageAvailable, setRecoveryStorageAvailable] = useState(true);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [resolvingRecovery, setResolvingRecovery] = useState(false);
+  const [offlineCopy, setOfflineCopy] = useState<OfflineEditableCopy | null>(null);
+  const [offlineMode, setOfflineMode] = useState(false);
+  const [offlineBusy, setOfflineBusy] = useState(false);
 
   const [sel, setSel] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const [anchor, setAnchor] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
@@ -720,6 +942,18 @@ function Editor({ path }: { path: string }) {
   const [histOpen, setHistOpen] = useState(false);
 
   const docRef = useRef<SheetDoc | null>(null);
+  const revisionRef = useRef<string | undefined>(undefined);
+  const pendingRef = useRef(false);
+  const editGenerationRef = useRef(0);
+  const saveInFlightRef = useRef(false);
+  const saveRequestedRef = useRef(false);
+  const conflictRef = useRef(false);
+  const pinnedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const undoRef = useRef<SheetHistoryEntry[]>([]);
+  const redoRef = useRef<SheetHistoryEntry[]>([]);
+  const editHistoryOpenRef = useRef(false);
+  const [historyVersion, setHistoryVersion] = useState(0);
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const firstLoad = useRef(true);
   const selectingRef = useRef(false);
@@ -733,35 +967,139 @@ function Editor({ path }: { path: string }) {
   const grid = sheet?.grid ?? null;
   const formats = sheet?.formats ?? {};
 
+  const storeRecovery = useCallback(async (content: string, revision = revisionRef.current) => {
+    if (!accountId) return null;
+    try {
+      const saved = await saveRecoveryDraft({ accountId, kind: 'spreadsheet', path, content, revision });
+      if (mountedRef.current) setRecoveryStorageAvailable(true);
+      return saved;
+    } catch {
+      if (mountedRef.current) setRecoveryStorageAvailable(false);
+      return null;
+    }
+  }, [accountId, path]);
+
+  const clearRecoveryIfCurrent = useCallback(async (content: string) => {
+    if (!accountId) return false;
+    try {
+      const cleared = await clearRecoveryDraftIfContent(accountId, 'spreadsheet', path, content);
+      if (mountedRef.current) setRecoveryStorageAvailable(true);
+      return cleared;
+    } catch {
+      if (mountedRef.current) setRecoveryStorageAvailable(false);
+      return false;
+    }
+  }, [accountId, path]);
+
+  const storePinnedEdit = useCallback(async (content: string, revision = revisionRef.current) => {
+    if (!accountId || !pinnedRef.current) return null;
+    try {
+      const copy = await markOfflineEditableDirty({
+        accountId, kind: 'spreadsheet', path, title: displayName, content, revision,
+      });
+      if (mountedRef.current && copy) setOfflineCopy(copy);
+      return copy;
+    } catch {
+      return null;
+    }
+  }, [accountId, displayName, path]);
+
   // ---- load ----
   const reload = useCallback(() => {
     let alive = true;
     firstLoad.current = true;
+    conflictRef.current = false;
+    pendingRef.current = false;
+    saveRequestedRef.current = false;
+    editGenerationRef.current++;
+    undoRef.current = [];
+    redoRef.current = [];
+    editHistoryOpenRef.current = false;
+    setHistoryVersion(v => v + 1);
+    setRecovery(null);
+    setRecoveryError(null);
     setDoc(null);
     setLoadError(false);
     (async () => {
+      let draft: RecoveryDraft | null = null;
+      let pinned: OfflineEditableCopy | null = null;
+      if (accountId) {
+        const [draftResult, pinnedResult] = await Promise.allSettled([
+          loadRecoveryDraft(accountId, 'spreadsheet', path),
+          getOfflineEditable(accountId, 'spreadsheet', path),
+        ]);
+        if (draftResult.status === 'fulfilled') draft = draftResult.value;
+        if (pinnedResult.status === 'fulfilled') pinned = pinnedResult.value;
+        if (alive) setRecoveryStorageAvailable(draftResult.status === 'fulfilled');
+      }
+      if (!alive) return;
+      pinnedRef.current = !!pinned;
+      setOfflineCopy(pinned);
+      const pinnedDraft: RecoveryDraft | null = pinned?.dirty ? {
+        accountId, kind: 'spreadsheet', path, content: pinned.content, revision: pinned.revision,
+        savedAt: pinned.locallyUpdatedAt || pinned.cachedAt,
+      } : null;
+      const candidate = !draft ? pinnedDraft : !pinnedDraft ? draft
+        : new Date(draft.savedAt).getTime() >= new Date(pinnedDraft.savedAt).getTime() ? draft : pinnedDraft;
       try {
-        let parsedDoc: SheetDoc;
-        if (isCsv) {
-          const res = await api.sheets.parseCsv(path);
-          parsedDoc = { sheets: [{ name: fileName.replace(/\.csv$/i, ''), grid: normalizeGrid(res.grid), formats: {} }], active: 0 };
-        } else {
-          const res = await api.files.content(path);
-          let parsed: any = {};
-          try { parsed = JSON.parse(res.content || '{}'); } catch { parsed = {}; }
-          parsedDoc = parseDoc(parsed);
+        const source = await api.files.content(path);
+        if (!alive) return;
+        const serverContent = source.content ?? '';
+        let content = serverContent;
+        revisionRef.current = source.revision;
+        setOfflineMode(false);
+        if (candidate?.content === serverContent) {
+          if (draft) await clearRecoveryIfCurrent(serverContent);
+          if (pinned?.dirty) {
+            const settled = await resolveOfflineEditableChoice({
+              accountId, kind: 'spreadsheet', path, expectedLocalContent: pinned.content,
+              chosenContent: serverContent, newRevision: source.revision, serverUpdatedAt: source.modifiedAt,
+            }).catch(() => null);
+            if (alive && settled) setOfflineCopy(settled);
+          }
+        } else if (candidate) {
+          if (candidate.revision === source.revision && !pinned?.conflict) {
+            content = candidate.content;
+            pendingRef.current = true;
+            setSaveState('saving');
+            if (pinned && pinned.content !== candidate.content) await storePinnedEdit(candidate.content, candidate.revision);
+          } else {
+            conflictRef.current = true;
+            setRecoveryStored(true);
+            setRecovery(candidate);
+            if (pinned) await markOfflineEditableConflict(accountId, 'spreadsheet', path, {
+              content: pinned.content, revision: pinned.revision,
+            }).catch(() => null);
+          }
+        } else if (pinned) {
+          const refreshed = await refreshOfflineEditable({
+            accountId, kind: 'spreadsheet', path, title: displayName, content: serverContent,
+            revision: source.revision, serverUpdatedAt: source.modifiedAt,
+          }).catch(() => null);
+          if (alive && refreshed) setOfflineCopy(refreshed);
         }
         if (!alive) return;
+        const parsedDoc = sheetFromContent(content, isCsv, fileName);
         setDoc(parsedDoc);
         setSel({ r: 0, c: 0 }); setAnchor({ r: 0, c: 0 });
       } catch (e: any) {
         if (!alive) return;
-        setLoadError(true);
-        toast('Could not open spreadsheet', 'error', e?.message);
+        if (pinned) {
+          const content = candidate?.content ?? pinned.content;
+          revisionRef.current = candidate?.revision || pinned.revision;
+          pendingRef.current = !!candidate;
+          setDoc(sheetFromContent(content, isCsv, fileName));
+          setSel({ r: 0, c: 0 }); setAnchor({ r: 0, c: 0 });
+          setOfflineMode(true);
+          setSaveState(candidate ? 'unsaved' : 'saved');
+        } else {
+          setLoadError(true);
+          toast('Could not open spreadsheet', 'error', e?.message);
+        }
       }
     })();
     return () => { alive = false; };
-  }, [path, isCsv, fileName]);
+  }, [path, isCsv, fileName, displayName, accountId, clearRecoveryIfCurrent, storePinnedEdit]);
 
   useEffect(() => {
     const dispose = reload();
@@ -771,25 +1109,258 @@ function Editor({ path }: { path: string }) {
   }, [reload]);
 
   // ---- autosave ----
-  const doSave = useMemo(() => debounce(async () => {
+  const runSave = useCallback(async () => {
+    if (!mountedRef.current || conflictRef.current || !pendingRef.current) return;
+    if (saveInFlightRef.current) { saveRequestedRef.current = true; return; }
+    saveInFlightRef.current = true;
     try {
-      const d = docRef.current;
-      if (!d) return;
-      const content = isCsv ? gridToCsv(d.sheets[d.active].grid) : JSON.stringify(d);
-      await api.files.saveContent(path, content);
-      setSaveState('saved');
-    } catch (e: any) {
-      setSaveState('unsaved');
-      toast('Autosave failed', 'error', e?.message);
+      do {
+        saveRequestedRef.current = false;
+        const d = docRef.current;
+        if (!d) break;
+        const generation = editGenerationRef.current;
+        const content = isCsv ? gridToCsv(d.sheets[d.active].grid) : JSON.stringify(d);
+        const baseRevision = revisionRef.current;
+        try {
+          const result = await api.files.saveContent(path, content, baseRevision);
+          revisionRef.current = result.revision;
+          setOfflineMode(false);
+          if (accountId && pinnedRef.current && baseRevision) {
+            const committed = await commitOfflineEditableSync({
+              accountId, kind: 'spreadsheet', path, expectedContent: content,
+              expectedRevision: baseRevision, newRevision: result.revision,
+            }).catch(() => null);
+            if (mountedRef.current && committed) setOfflineCopy(committed);
+          }
+          if (generation === editGenerationRef.current) {
+            if (accountId) await clearRecoveryIfCurrent(content);
+            if (generation === editGenerationRef.current) {
+              pendingRef.current = false;
+              if (mountedRef.current) setSaveState('saved');
+            } else saveRequestedRef.current = true;
+          } else saveRequestedRef.current = true;
+        } catch (e: any) {
+          if (mountedRef.current) setSaveState('unsaved');
+          if (e?.message === 'revision_conflict') {
+            conflictRef.current = true;
+            if (accountId && pinnedRef.current) {
+              const conflicted = baseRevision
+                ? await markOfflineEditableConflict(accountId, 'spreadsheet', path, { content, revision: baseRevision }).catch(() => null)
+                : null;
+              if (mountedRef.current && conflicted) setOfflineCopy(conflicted);
+            }
+            const fallback: RecoveryDraft | null = accountId ? {
+              accountId, kind: 'spreadsheet', path, content,
+              revision: revisionRef.current, savedAt: new Date().toISOString(),
+            } : null;
+            const stored = await storeRecovery(content, revisionRef.current);
+            if (mountedRef.current && (stored || fallback)) {
+              setRecoveryStored(!!stored);
+              setRecovery(stored || fallback);
+            }
+            if (mountedRef.current) {
+              toast('Spreadsheet changed elsewhere', 'error',
+                stored
+                  ? 'Your draft is stored safely. Choose which copy to keep or download it.'
+                  : 'Recovery storage is unavailable. Keep this page open and download your draft now.');
+            }
+          } else if (mountedRef.current && pinnedRef.current) {
+            setOfflineMode(true);
+            setSaveState('unsaved');
+          } else if (mountedRef.current) toast('Autosave failed', 'error', e?.message);
+          break;
+        }
+      } while (saveRequestedRef.current && !conflictRef.current);
+    } finally {
+      saveInFlightRef.current = false;
     }
-  }, 900), [isCsv, path]);
+  }, [accountId, isCsv, path, clearRecoveryIfCurrent, storeRecovery]);
+
+  const doSave = useMemo(() => debounce(() => { void runSave(); }, 900), [runSave]);
+
+  const editorLoaded = doc !== null;
+  useEffect(() => {
+    if (!editorLoaded) return;
+    const retry = () => {
+      setOfflineMode(false);
+      if (pendingRef.current && !conflictRef.current) {
+        setSaveState('saving');
+        void runSave();
+      }
+    };
+    const wentOffline = () => { if (pinnedRef.current) setOfflineMode(true); };
+    window.addEventListener('online', retry);
+    window.addEventListener('offline', wentOffline);
+    if (!offlineMode && navigator.onLine && pendingRef.current && !conflictRef.current) void runSave();
+    return () => {
+      window.removeEventListener('online', retry);
+      window.removeEventListener('offline', wentOffline);
+    };
+  }, [editorLoaded, offlineMode, runSave]);
+
+  const flushAutosave = useCallback(async () => {
+    if (conflictRef.current) return false;
+    if (pendingRef.current) {
+      saveRequestedRef.current = true;
+      await runSave();
+    }
+    // If a request was already in flight, runSave only queued another pass.
+    // Wait for that pass so restore never races an editor write.
+    while (saveInFlightRef.current) await new Promise(resolve => setTimeout(resolve, 20));
+    if (pendingRef.current && !conflictRef.current) await runSave();
+    while (saveInFlightRef.current) await new Promise(resolve => setTimeout(resolve, 20));
+    return !pendingRef.current && !conflictRef.current;
+  }, [runSave]);
+
+  const restoreSheetVersion = useCallback(async (versionId: string) => {
+    if (!await flushAutosave()) throw new Error('unsaved_changes');
+    const revision = revisionRef.current || (await api.files.revision(path)).revision;
+    const restored = await api.files.restoreVersion(path, versionId, revision);
+    revisionRef.current = restored.revision;
+    pendingRef.current = false;
+  }, [flushAutosave, path]);
+
+  const exportAs = useCallback(async (format: 'xlsx' | 'ods') => {
+    if (!await flushAutosave()) {
+      toast('Save the spreadsheet before exporting', 'warning', 'Your current edits were not safely saved yet.');
+      return;
+    }
+    try {
+      const url = URL.createObjectURL(await api.sheets.export(path, format));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${displayName}.${format}`;
+      anchor.rel = 'noopener';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      toast('Spreadsheet exported', 'success', 'Sheet names, values, formulas and column widths are included; advanced formatting may differ.');
+    } catch (error) {
+      toast('Export failed', 'error', officeErrorMessage(error, 'The spreadsheet could not be exported.'));
+    }
+  }, [displayName, flushAutosave, path]);
+
+  const toggleEditorOffline = useCallback(async () => {
+    if (!accountId || offlineBusy) return;
+    setOfflineBusy(true);
+    try {
+      if (pinnedRef.current) {
+        await removeOfflineEditable(accountId, 'spreadsheet', path);
+        pinnedRef.current = false;
+        setOfflineCopy(null);
+        setOfflineMode(false);
+        toast('Offline copy removed', 'success', 'The server spreadsheet is unchanged.');
+        return;
+      }
+      if (!await flushAutosave() || !revisionRef.current || !docRef.current) {
+        toast('Save the spreadsheet before making it available offline', 'warning');
+        return;
+      }
+      const current = docRef.current;
+      const content = isCsv ? gridToCsv(current.sheets[current.active].grid) : JSON.stringify(current);
+      const copy = await pinOfflineEditable({
+        accountId, kind: 'spreadsheet', path, title: displayName, content,
+        revision: revisionRef.current, serverUpdatedAt: new Date().toISOString(),
+      });
+      pinnedRef.current = true;
+      setOfflineCopy(copy);
+      toast('Spreadsheet available offline', 'success', 'This browser will keep a private copy for this account.');
+    } catch (error: any) {
+      toast(error?.message === 'offline_copy_dirty' ? 'Offline copy has unsynced changes' : 'Could not change offline availability',
+        error?.message === 'offline_copy_dirty' ? 'warning' : 'error',
+        error?.message === 'offline_copy_dirty' ? 'Reconnect and sync or resolve the draft before removing it.' : error?.message);
+    } finally {
+      setOfflineBusy(false);
+    }
+  }, [accountId, displayName, flushAutosave, isCsv, offlineBusy, path]);
 
   useEffect(() => {
     if (doc === null) return;
     if (firstLoad.current) { firstLoad.current = false; return; }
+    pendingRef.current = true;
+    editGenerationRef.current++;
+    const content = isCsv ? gridToCsv(doc.sheets[doc.active].grid) : JSON.stringify(doc);
+    if (accountId) void storeRecovery(content);
+    if (pinnedRef.current) void storePinnedEdit(content);
     setSaveState('saving');
     doSave();
-  }, [doc, doSave]);
+  }, [doc, doSave, accountId, isCsv, path, storeRecovery, storePinnedEdit]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const d = docRef.current;
+      if (!pendingRef.current || !d || !accountId) return;
+      const content = isCsv ? gridToCsv(d.sheets[d.active].grid) : JSON.stringify(d);
+      void saveRecoveryDraft({ accountId, kind: 'spreadsheet', path, content, revision: revisionRef.current }).catch(() => {});
+      if (pinnedRef.current) void markOfflineEditableDirty({
+        accountId, kind: 'spreadsheet', path, title: displayName, content, revision: revisionRef.current,
+      }).catch(() => {});
+      if (saveInFlightRef.current) saveRequestedRef.current = true;
+    };
+  }, [accountId, displayName, isCsv, path]);
+
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!pendingRef.current || recoveryStorageAvailable) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [recoveryStorageAvailable]);
+
+  async function resolveRecovery(choice: 'mine' | 'server') {
+    if (!recovery || !accountId) return;
+    setResolvingRecovery(true);
+    setRecoveryError(null);
+    try {
+      const latest = await api.files.content(path);
+      let nextDoc: SheetDoc;
+      if (choice === 'mine') {
+        nextDoc = sheetFromContent(recovery.content, isCsv, fileName);
+        const saved = await api.files.saveContent(path, recovery.content, latest.revision);
+        revisionRef.current = saved.revision;
+        if (pinnedRef.current) {
+          const settled = await resolveOfflineEditableChoice({
+            accountId, kind: 'spreadsheet', path, expectedLocalContent: recovery.content,
+            chosenContent: recovery.content, newRevision: saved.revision,
+          }).catch(() => null);
+          if (settled) setOfflineCopy(settled);
+        }
+        toast('Your recovered sheet is now the current version', 'success');
+      } else {
+        revisionRef.current = latest.revision;
+        nextDoc = sheetFromContent(latest.content ?? '', isCsv, fileName);
+        if (pinnedRef.current) {
+          const settled = await resolveOfflineEditableChoice({
+            accountId, kind: 'spreadsheet', path, expectedLocalContent: recovery.content,
+            chosenContent: latest.content ?? '', newRevision: latest.revision, serverUpdatedAt: latest.modifiedAt,
+          }).catch(() => null);
+          if (settled) setOfflineCopy(settled);
+        }
+        toast('Using the server version', 'info');
+      }
+      firstLoad.current = true;
+      docRef.current = nextDoc;
+      setDoc(nextDoc);
+      setSel({ r: 0, c: 0 });
+      setAnchor({ r: 0, c: 0 });
+      pendingRef.current = false;
+      conflictRef.current = false;
+      setOfflineMode(false);
+      setSaveState('saved');
+      await clearRecoveryIfCurrent(recovery.content);
+      setRecovery(null);
+    } catch (e: any) {
+      setRecoveryError('The conflict was not resolved. Your draft is still available; retry or download it before leaving.');
+      toast('Could not resolve the spreadsheet conflict', 'error', e?.message);
+    } finally {
+      setResolvingRecovery(false);
+    }
+  }
 
   useEffect(() => { if (editing) editInputRef.current?.focus(); }, [editing]);
 
@@ -809,17 +1380,38 @@ function Editor({ path }: { path: string }) {
   }, []);
 
   // ---- sheet mutation helpers ----
-  const updateSheet = useCallback((fn: (s: SheetData) => SheetData) => {
+  const addHistoryEntry = useCallback((entry: SheetHistoryEntry) => {
+    undoRef.current.push(entry);
+    if (undoRef.current.length > SHEET_HISTORY_CAP) undoRef.current.shift();
+    redoRef.current = [];
+    setHistoryVersion(v => v + 1);
+  }, []);
+
+  const recordHistorySnapshot = useCallback(() => {
+    const current = docRef.current;
+    if (!current) return;
+    addHistoryEntry({ doc: cloneSheetDoc(current), sel: { ...sel }, anchor: { ...anchor } });
+  }, [addHistoryEntry, sel, anchor]);
+
+  const beginCellEdit = useCallback(() => {
+    if (editHistoryOpenRef.current) return;
+    recordHistorySnapshot();
+    editHistoryOpenRef.current = true;
+  }, [recordHistorySnapshot]);
+  const finishCellEdit = useCallback(() => { editHistoryOpenRef.current = false; }, []);
+
+  const updateSheet = useCallback((fn: (s: SheetData) => SheetData, recordHistory = true) => {
+    if (recordHistory) recordHistorySnapshot();
     setDoc(d => {
       if (!d) return d;
       const sheets = d.sheets.slice();
       sheets[d.active] = fn(sheets[d.active]);
       return { ...d, sheets };
     });
-  }, []);
+  }, [recordHistorySnapshot]);
 
-  const setGridFn = useCallback((fn: (g: string[][]) => string[][]) => {
-    updateSheet(s => ({ ...s, grid: normalizeGrid(fn(s.grid.map(r => r.slice()))) }));
+  const setGridFn = useCallback((fn: (g: string[][]) => string[][], recordHistory = true) => {
+    updateSheet(s => ({ ...s, grid: normalizeGrid(fn(s.grid.map(r => r.slice()))) }), recordHistory);
   }, [updateSheet]);
 
   const setColWidth = useCallback((c: number, w: number) => {
@@ -829,7 +1421,7 @@ function Editor({ path }: { path: string }) {
       while (widths.length < cols) widths.push(DEFAULT_W);
       widths[c] = w;
       return { ...s, colWidths: widths };
-    });
+    }, false);
   }, [updateSheet]);
 
   if (loadError) {
@@ -860,12 +1452,45 @@ function Editor({ path }: { path: string }) {
   const inRange = (r: number, c: number) => r >= range.r1 && r <= range.r2 && c >= range.c1 && c <= range.c2;
   const isMulti = range.r1 !== range.r2 || range.c1 !== range.c2;
 
-  const setCell = (r: number, c: number, val: string) => setGridFn(g => { if (!g[r]) return g; g[r][c] = val; return g; });
+  const canUndoSheet = historyVersion >= 0 && undoRef.current.length > 0;
+  const canRedoSheet = historyVersion >= 0 && redoRef.current.length > 0;
+  const undoSheet = () => {
+    const current = docRef.current;
+    const previous = undoRef.current.pop();
+    if (!current || !previous) return;
+    finishCellEdit();
+    redoRef.current.push({ doc: cloneSheetDoc(current), sel: { ...sel }, anchor: { ...anchor } });
+    const restored = cloneSheetDoc(previous.doc);
+    docRef.current = restored;
+    setDoc(restored);
+    setSel(previous.sel);
+    setAnchor(previous.anchor);
+    setEditing(false);
+    setHistoryVersion(v => v + 1);
+  };
+  const redoSheet = () => {
+    const current = docRef.current;
+    const next = redoRef.current.pop();
+    if (!current || !next) return;
+    finishCellEdit();
+    undoRef.current.push({ doc: cloneSheetDoc(current), sel: { ...sel }, anchor: { ...anchor } });
+    const restored = cloneSheetDoc(next.doc);
+    docRef.current = restored;
+    setDoc(restored);
+    setSel(next.sel);
+    setAnchor(next.anchor);
+    setEditing(false);
+    setHistoryVersion(v => v + 1);
+  };
+
+  const setCell = (r: number, c: number, val: string, recordHistory = !editHistoryOpenRef.current) =>
+    setGridFn(g => { if (!g[r]) return g; g[r][c] = val; return g; }, recordHistory);
 
   const selectCell = (r: number, c: number, extend: boolean) => {
     if (extend) setSel({ r, c });
     else { setAnchor({ r, c }); setSel({ r, c }); }
     setEditing(false);
+    finishCellEdit();
   };
 
   // ---- structural ops (remap formats) ----
@@ -964,16 +1589,22 @@ function Editor({ path }: { path: string }) {
   const setNum = (n: NumFmt) => applyFormat(f => ({ ...f, num: n === 'plain' ? undefined : n }));
 
   // ---- clipboard ----
-  const copyRange = () => {
+  const selectedClipboardData = () => {
     const out: string[][] = [];
     for (let r = range.r1; r <= range.r2; r++) { const row: string[] = []; for (let c = range.c1; c <= range.c2; c++) row.push(grid[r]?.[c] ?? ''); out.push(row); }
     clipRef.current = out;
-    copyText(out.map(r => r.join('\t')).join('\n'));
-    toast(`Copied ${out.length}×${out[0].length}`, 'success');
+    return out;
   };
-  const pasteRange = () => {
-    const data = clipRef.current;
+  const copyRange = async () => {
+    const out = selectedClipboardData();
+    const copied = await copyText(out.map(r => r.join('\t')).join('\n'));
+    if (copied) toast(`Copied ${out.length}×${out[0].length}`, 'success');
+    else toast('Copy failed', 'error', 'Clipboard access was blocked. The selected cells were not changed.');
+    return copied;
+  };
+  const pasteData = (data: string[][] | null) => {
     if (!data) return;
+    if (!data.length || !data[0]?.length) return;
     setGridFn(g => {
       const needRows = range.r1 + data.length;
       const needCols = range.c1 + data[0].length;
@@ -984,6 +1615,26 @@ function Editor({ path }: { path: string }) {
     });
     setAnchor({ r: range.r1, c: range.c1 });
     setSel({ r: range.r1 + data.length - 1, c: range.c1 + data[0].length - 1 });
+  };
+  const pasteRange = () => pasteData(clipRef.current);
+  const pasteClipboardText = (text: string) => {
+    try { pasteData(clipboardTextToGrid(text)); }
+    catch { toast('Could not paste cells', 'error', 'The clipboard data has invalid quoting.'); }
+  };
+  const onGridPaste = (event: React.ClipboardEvent) => {
+    if (editing) return;
+    const text = event.clipboardData.getData('text/plain');
+    if (text) {
+      event.preventDefault();
+      pasteClipboardText(text);
+    } else if (clipRef.current) {
+      event.preventDefault();
+      pasteRange();
+    }
+  };
+  const cutRange = async () => {
+    if (await copyRange()) clearRange();
+    else toast('Cut cancelled', 'warning', 'The source cells were kept because copying failed.');
   };
 
   // ---- range fill (copy / series, with relative formula shifting) ----
@@ -1031,9 +1682,13 @@ function Editor({ path }: { path: string }) {
     if (editing) return;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key;
-    if (mod && (key === 'c' || key === 'C')) { e.preventDefault(); copyRange(); return; }
-    if (mod && (key === 'v' || key === 'V')) { e.preventDefault(); pasteRange(); return; }
-    if (mod && (key === 'x' || key === 'X')) { e.preventDefault(); copyRange(); clearRange(); return; }
+    if (mod && (key === 'z' || key === 'Z')) { e.preventDefault(); e.shiftKey ? redoSheet() : undoSheet(); return; }
+    if (mod && (key === 'y' || key === 'Y')) { e.preventDefault(); redoSheet(); return; }
+    if (mod && (key === 'c' || key === 'C')) { e.preventDefault(); void copyRange(); return; }
+    // Do not prevent Ctrl/Cmd+V: the browser's paste event carries the real OS
+    // clipboard payload, including cells copied from Excel and Google Sheets.
+    if (mod && (key === 'v' || key === 'V')) return;
+    if (mod && (key === 'x' || key === 'X')) { e.preventDefault(); void cutRange(); return; }
     if (mod && (key === 'd' || key === 'D')) { e.preventDefault(); fillDown(); return; }
     if (mod && (key === 'r' || key === 'R')) { e.preventDefault(); fillRight(); return; }
     if (mod) return;
@@ -1046,12 +1701,12 @@ function Editor({ path }: { path: string }) {
     else if (key === 'Enter') { e.preventDefault(); selectCell(Math.min(rows - 1, r + 1), c, false); }
     else if (key === 'Tab') { e.preventDefault(); selectCell(r, Math.min(cols - 1, c + 1), false); }
     else if (key === 'Delete' || key === 'Backspace') { e.preventDefault(); clearRange(); }
-    else if (key === 'F2') { e.preventDefault(); setEditing(true); }
+    else if (key === 'F2') { e.preventDefault(); beginCellEdit(); setEditing(true); }
     else if (key === 'Escape') { setAnchor({ r, c }); }
     // Start editing seeded with the typed char. preventDefault stops the browser
     // from ALSO inserting that same char into the edit input once it focuses
     // (which previously doubled the first character, e.g. "hh" for "h").
-    else if (key.length === 1) { e.preventDefault(); setCell(r, c, key); setEditing(true); }
+    else if (key.length === 1) { e.preventDefault(); beginCellEdit(); setCell(r, c, key, false); setEditing(true); }
   };
 
   const selRef = `${colName(sel.c)}${sel.r + 1}`;
@@ -1141,10 +1796,19 @@ function Editor({ path }: { path: string }) {
   })();
 
   // ---- sheet tabs ----
-  const addSheet = () => setDoc(d => { if (!d) return d; const sheets = [...d.sheets, { name: `Sheet ${d.sheets.length + 1}`, grid: normalizeGrid(null), formats: {} }]; return { sheets, active: sheets.length - 1 }; });
-  const switchSheet = (i: number) => { setDoc(d => d ? { ...d, active: i } : d); setSel({ r: 0, c: 0 }); setAnchor({ r: 0, c: 0 }); setEditing(false); };
-  const renameSheet = (i: number, name: string) => setDoc(d => { if (!d) return d; const sheets = d.sheets.slice(); sheets[i] = { ...sheets[i], name: name || sheets[i].name }; return { ...d, sheets }; });
-  const deleteSheet = (i: number) => setDoc(d => { if (!d || d.sheets.length <= 1) return d; const sheets = d.sheets.filter((_, x) => x !== i); return { sheets, active: Math.min(d.active, sheets.length - 1) }; });
+  const addSheet = () => {
+    recordHistorySnapshot();
+    setDoc(d => { if (!d) return d; const sheets = [...d.sheets, { name: `Sheet ${d.sheets.length + 1}`, grid: normalizeGrid(null), formats: {} }]; return { sheets, active: sheets.length - 1 }; });
+  };
+  const switchSheet = (i: number) => { finishCellEdit(); setDoc(d => d ? { ...d, active: i } : d); setSel({ r: 0, c: 0 }); setAnchor({ r: 0, c: 0 }); setEditing(false); };
+  const renameSheet = (i: number, name: string) => {
+    recordHistorySnapshot();
+    setDoc(d => { if (!d) return d; const sheets = d.sheets.slice(); sheets[i] = { ...sheets[i], name: name || sheets[i].name }; return { ...d, sheets }; });
+  };
+  const deleteSheet = (i: number) => {
+    recordHistorySnapshot();
+    setDoc(d => { if (!d || d.sheets.length <= 1) return d; const sheets = d.sheets.filter((_, x) => x !== i); return { sheets, active: Math.min(d.active, sheets.length - 1) }; });
+  };
 
   // ---- shared AI panel body ----
   const aiBody = (
@@ -1205,7 +1869,17 @@ function Editor({ path }: { path: string }) {
           <div className="flex items-center gap-1.5 text-xs muted">
             {saveState === 'saving' && <><Spinner size={11} /> Saving…</>}
             {saveState === 'saved' && <><Icon.Check size={12} className="text-accent-green" /> All changes saved</>}
-            {saveState === 'unsaved' && <><Icon.Warning size={12} className="text-accent-amber" /> Unsaved changes</>}
+            {saveState === 'unsaved' && <><Icon.Warning size={12} className="text-accent-amber" /> {offlineMode ? 'Saved on this device · waiting to sync' : 'Unsaved changes'}</>}
+            {offlineCopy && saveState === 'saved' && (
+              <span className={cx('hidden md:flex items-center gap-1', offlineCopy.conflict ? 'text-accent-red' : offlineCopy.dirty ? 'text-accent-amber' : 'text-accent-green')}>
+                <Icon.Download size={11} />{offlineCopy.conflict ? 'Review offline changes' : offlineCopy.dirty ? 'Waiting to sync' : 'Available offline'}
+              </span>
+            )}
+            {!recoveryStorageAvailable && (
+              <span role="status" className="text-accent-amber flex items-center gap-1" title="Browser recovery storage is unavailable. Unsaved changes are protected only after the server save finishes.">
+                <Icon.Warning size={12} /><span className="hidden md:inline">Local recovery unavailable</span>
+              </span>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
@@ -1219,6 +1893,9 @@ function Editor({ path }: { path: string }) {
             <Icon.Sparkles size={16} /> <span className="hidden sm:inline">AI</span>
           </button>
           <Menu trigger={<button className="icon-btn"><Icon.More size={18} /></button>} items={[
+            { label: offlineCopy ? 'Remove offline copy' : 'Make available offline', icon: offlineCopy ? <Icon.Close size={15} /> : <Icon.Download size={15} />, onClick: () => void toggleEditorOffline() },
+            { label: 'Export as Excel (.xlsx)', icon: <Icon.Download size={15} />, onClick: () => void exportAs('xlsx') },
+            { label: 'Export as OpenDocument (.ods)', icon: <Icon.Download size={15} />, onClick: () => void exportAs('ods') },
             { label: 'Insert chart', icon: <Icon.Dashboard size={15} />, onClick: () => setChartOpen(true) },
             ...(!isCsv ? [{ label: 'Version history', icon: <Icon.Clock size={15} />, onClick: () => setHistOpen(true) }] : []),
             { label: 'Add sheet', icon: <Icon.Plus size={15} />, onClick: addSheet },
@@ -1228,6 +1905,9 @@ function Editor({ path }: { path: string }) {
 
       {/* Structure toolbar */}
       <div className="card !rounded-xl p-1.5 mb-2 flex items-center gap-1 flex-wrap relative z-30">
+        <ToolbarBtn onClick={undoSheet} title="Undo (Ctrl/⌘+Z)" disabled={!canUndoSheet}><Icon.Prev size={14} /> Undo</ToolbarBtn>
+        <ToolbarBtn onClick={redoSheet} title="Redo (Ctrl/⌘+Y)" disabled={!canRedoSheet}><Icon.Next size={14} /> Redo</ToolbarBtn>
+        <div className="w-px h-5 bg-white/10 mx-1" />
         <ToolbarBtn onClick={addRow} title="Add row at bottom"><Icon.Plus size={14} /> Row</ToolbarBtn>
         <ToolbarBtn onClick={addCol} title="Add column at right"><Icon.Plus size={14} /> Column</ToolbarBtn>
         <div className="w-px h-5 bg-white/10 mx-1" />
@@ -1285,18 +1965,21 @@ function Editor({ path }: { path: string }) {
         <div className="glass-strong rounded-lg flex-1 flex items-center gap-2 px-3 min-w-0">
           <Icon.Bolt size={15} className={cx('shrink-0', typeof selRaw === 'string' && selRaw[0] === '=' ? 'text-accent-amber' : 'text-slate-600')} />
           <input
+            aria-label={`Formula or value for ${selRef}`}
             className="flex-1 min-w-0 bg-transparent outline-none text-sm text-white font-mono py-2"
             value={selRaw}
             placeholder="Enter a value or =SUM(A1:A5)"
-            onChange={e => setCell(sel.r, sel.c, e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); selectCell(Math.min(rows - 1, sel.r + 1), sel.c, false); } }}
+            onFocus={beginCellEdit}
+            onBlur={finishCellEdit}
+            onChange={e => setCell(sel.r, sel.c, e.target.value, false)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); finishCellEdit(); selectCell(Math.min(rows - 1, sel.r + 1), sel.c, false); } }}
           />
         </div>
       </div>
 
       {/* Grid + AI panel */}
       <div className="flex gap-4 flex-1 min-h-0">
-        <div className="card !rounded-xl flex-1 min-w-0 overflow-auto outline-none" tabIndex={0} onKeyDown={onGridKey}>
+        <div className="card !rounded-xl flex-1 min-w-0 overflow-auto outline-none" tabIndex={0} onKeyDown={onGridKey} onPaste={onGridPaste}>
           <table className="border-collapse text-sm select-none" style={{ tableLayout: 'fixed' }}>
             <colgroup>
               <col style={{ width: 48 }} />
@@ -1307,7 +1990,7 @@ function Editor({ path }: { path: string }) {
                 <th className="sticky top-0 left-0 z-30 bg-ink-850 border-r border-b border-white/[0.08]" />
                 {Array.from({ length: cols }).map((_, c) => (
                   <th key={c}
-                    onClick={() => { setAnchor({ r: 0, c }); setSel({ r: rows - 1, c }); setEditing(false); }}
+                    onClick={() => { setAnchor({ r: 0, c }); setSel({ r: rows - 1, c }); setEditing(false); finishCellEdit(); }}
                     style={c < freezeCols ? { position: 'sticky', left: colLeft(c), zIndex: 30 } : undefined}
                     className={cx('sticky top-0 z-20 h-8 px-2 text-center text-xs font-semibold border-r border-b border-white/[0.08] cursor-pointer transition-colors relative select-none',
                       c === freezeCols - 1 && 'border-r-2 !border-r-white/25',
@@ -1322,7 +2005,7 @@ function Editor({ path }: { path: string }) {
             <tbody>
               {grid.map((row, r) => (
                 <tr key={r} className="group/row">
-                  <td onClick={() => { setAnchor({ r, c: 0 }); setSel({ r, c: cols - 1 }); setEditing(false); }}
+                  <td onClick={() => { setAnchor({ r, c: 0 }); setSel({ r, c: cols - 1 }); setEditing(false); finishCellEdit(); }}
                     style={r < freezeRows ? { position: 'sticky', top: rowTop(r), zIndex: 22 } : undefined}
                     className={cx('sticky left-0 z-10 h-8 text-center text-xs font-semibold border-r border-b border-white/[0.08] cursor-pointer transition-colors',
                       r === freezeRows - 1 && 'border-b-2 !border-b-white/25',
@@ -1347,9 +2030,9 @@ function Editor({ path }: { path: string }) {
                     if (frozenC || frozenR) { cellStyle.zIndex = frozenC && frozenR ? 18 : frozenC ? 16 : 14; if (!f.bg) cellStyle.background = FROZEN_BG; }
                     return (
                       <td key={c}
-                        onMouseDown={e => { if (e.shiftKey) { setSel({ r, c }); } else { setAnchor({ r, c }); setSel({ r, c }); selectingRef.current = true; } setEditing(false); }}
+                        onMouseDown={e => { if (e.shiftKey) { setSel({ r, c }); } else { setAnchor({ r, c }); setSel({ r, c }); selectingRef.current = true; } setEditing(false); finishCellEdit(); }}
                         onMouseEnter={() => { if (selectingRef.current) setSel({ r, c }); }}
-                        onDoubleClick={() => { setAnchor({ r, c }); setSel({ r, c }); setEditing(true); }}
+                        onDoubleClick={() => { setAnchor({ r, c }); setSel({ r, c }); beginCellEdit(); setEditing(true); }}
                         style={cellStyle}
                         className={cx('h-8 border-r border-b border-white/[0.06] px-2 relative cursor-cell transition-colors align-middle',
                           f.bold && 'font-semibold',
@@ -1364,12 +2047,12 @@ function Editor({ path }: { path: string }) {
                           <input ref={editInputRef}
                             className="absolute inset-0 w-full h-full bg-ink-900 text-white px-2 outline-none border-2 border-brand-500 z-10 font-mono text-sm"
                             value={cell}
-                            onChange={e => setCell(r, c, e.target.value)}
-                            onBlur={() => setEditing(false)}
+                            onChange={e => setCell(r, c, e.target.value, false)}
+                            onBlur={() => { setEditing(false); finishCellEdit(); }}
                             onKeyDown={e => {
-                              if (e.key === 'Enter') { e.preventDefault(); setEditing(false); selectCell(Math.min(rows - 1, r + 1), c, false); }
-                              else if (e.key === 'Tab') { e.preventDefault(); setEditing(false); selectCell(r, Math.min(cols - 1, c + 1), false); }
-                              else if (e.key === 'Escape') { e.preventDefault(); setEditing(false); }
+                              if (e.key === 'Enter') { e.preventDefault(); setEditing(false); finishCellEdit(); selectCell(Math.min(rows - 1, r + 1), c, false); }
+                              else if (e.key === 'Tab') { e.preventDefault(); setEditing(false); finishCellEdit(); selectCell(r, Math.min(cols - 1, c + 1), false); }
+                              else if (e.key === 'Escape') { e.preventDefault(); setEditing(false); finishCellEdit(); }
                             }} />
                         ) : (
                           <span className={cx('block truncate leading-8', alignCls)}>{disp}</span>
@@ -1444,8 +2127,32 @@ function Editor({ path }: { path: string }) {
         </div>
       )}
 
+      <Modal open={!!recovery} onClose={() => {}} title="Recover spreadsheet draft" size="md" dismissible={false}
+        footer={<>
+          <button type="button" className="btn-secondary" disabled={!recovery || resolvingRecovery}
+            onClick={() => recovery && downloadRecoveryDraft(recovery,
+              `${displayName} recovered${isCsv ? '.csv' : '.cbxsheet'}`,
+              isCsv ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8')}>
+            <Icon.Download size={15} />Download draft
+          </button>
+          <button type="button" className="btn-danger" disabled={resolvingRecovery} onClick={() => resolveRecovery('server')}>Discard draft, use server</button>
+          <button type="button" className="btn-primary" disabled={resolvingRecovery} onClick={() => resolveRecovery('mine')}>
+            {resolvingRecovery ? <Spinner size={15} /> : <Icon.Refresh size={15} />}Keep my draft
+          </button>
+        </>}>
+        <div role="alert" className="space-y-3 text-sm text-slate-300">
+          <p>{recoveryStored
+            ? 'A saved recovery draft differs from the current server copy. Nothing will be discarded until you choose.'
+            : 'This draft differs from the current server copy, but browser recovery storage is unavailable. Download it before leaving this page.'}</p>
+          {recovery?.savedAt && <p className="text-xs muted">Draft {recoveryStored ? 'saved' : 'captured'} {formatRelative(recovery.savedAt)}</p>}
+          <p className="text-xs muted">Keeping your draft creates a new version, so the server copy remains available in version history.</p>
+          {recoveryError && <p role="alert" className="text-xs text-accent-red">{recoveryError}</p>}
+        </div>
+      </Modal>
+
       <ChartModal open={chartOpen} onClose={() => setChartOpen(false)} grid={grid} range={range} />
-      <HistoryModal open={histOpen} onClose={() => setHistOpen(false)} path={path} onRestored={() => { setHistOpen(false); reload(); }} />
+      <HistoryModal open={histOpen} onClose={() => setHistOpen(false)} path={path} onRestore={restoreSheetVersion}
+        onRestored={() => { setHistOpen(false); reload(); }} />
     </div>
   );
 }
@@ -1586,26 +2293,42 @@ function ChartSvg({ labels, series, type }: { labels: string[]; series: { name: 
 
 /* ---------------- Version history modal ---------------- */
 
-function HistoryModal({ open, onClose, path, onRestored }: { open: boolean; onClose: () => void; path: string; onRestored: () => void }) {
+function HistoryModal({ open, onClose, path, onRestore, onRestored }: {
+  open: boolean;
+  onClose: () => void;
+  path: string;
+  onRestore: (versionId: string) => Promise<void>;
+  onRestored: () => void;
+}) {
   const [versions, setVersions] = useState<any[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setVersions(null);
-    api.files.versions(path).then(setVersions).catch(() => setVersions([]));
+    setLoadError(false);
+    let alive = true;
+    api.files.versions(path).then(items => { if (alive) setVersions(items); }).catch(() => { if (alive) setLoadError(true); });
+    return () => { alive = false; };
   }, [open, path]);
 
   async function restore(id: string) {
     setBusy(id);
-    try { await api.files.restoreVersion(path, id); toast('Version restored', 'success'); onRestored(); }
-    catch (e: any) { toast('Restore failed', 'error', e?.message); }
+    try { await onRestore(id); toast('Version restored', 'success'); onRestored(); }
+    catch (e: any) {
+      const conflict = e?.message === 'revision_conflict';
+      toast(conflict ? 'Spreadsheet changed before restore' : 'Restore failed', 'error',
+        conflict ? 'Nothing was overwritten. Review the current sheet and try again.'
+          : e?.message === 'unsaved_changes' ? 'Save or resolve the current draft before restoring a version.' : e?.message);
+    }
     finally { setBusy(null); }
   }
 
   return (
     <Modal open={open} onClose={onClose} title="Version history" size="md" footer={<button className="btn-secondary" onClick={onClose}>Close</button>}>
-      {!versions ? <div className="py-8 grid place-items-center"><Spinner size={22} /></div>
+      {loadError ? <div role="alert" className="py-8 text-center"><Icon.Warning size={22} className="mx-auto text-accent-red mb-2" /><p className="text-sm text-white">Couldn't load version history</p><p className="text-xs muted mt-1">Close and try again after checking your connection.</p></div>
+        : !versions ? <div className="py-8 grid place-items-center"><Spinner size={22} /></div>
         : versions.length === 0 ? <div className="text-sm muted py-8 text-center">No previous versions yet. Versions are saved as you edit.</div>
           : (
             <div className="space-y-1.5 max-h-[50vh] overflow-auto">

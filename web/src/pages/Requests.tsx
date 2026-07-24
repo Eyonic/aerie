@@ -3,9 +3,18 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatRelative } from '../lib/utils';
-import { toast } from '../lib/store';
+import { toast, useAuth } from '../lib/store';
 import { PageHeader, EmptyState, Spinner, Badge, Modal, ProgressBar } from '../components/ui';
 import { MusicResult, MusicRequest } from '../lib/model';
+import {
+  loadRequestDismissed,
+  loadRequestMeta,
+  requestMetaStorageKey,
+  saveRequestDismissed,
+  saveRequestMeta,
+  switchScopedSnapshot,
+  type RequestMeta,
+} from '../lib/request-local-state';
 
 // ---- Types (loose, matches jellyseerr service shapes) ----
 type Result = {
@@ -29,7 +38,6 @@ type MyRequest = {
   tmdbId?: number;
   posterUrl?: string;
   mediaStatus?: number;
-  requestedBy?: string;
   createdAt?: string;
 };
 
@@ -59,14 +67,10 @@ const isWatchable = (status?: number) => status === 5 || status === 4;
 // ---- tmdbId → real title/poster cache (jellyseerr's /request only returns "#<tmdbId>") ----
 // Populated from search results, trending, and requests created this session; persisted so it
 // accumulates across visits. Lets "My requests" show real titles+posters instead of raw ids.
-type Meta = { title: string; posterUrl?: string; year?: string; mediaType: string };
-const META_KEY = 'cb_req_meta';
-const DISMISS_KEY = 'cb_req_dismissed';
+type Meta = RequestMeta;
 const metaKey = (mediaType: string, tmdbId?: number) => `${mediaType}:${tmdbId ?? '?'}`;
 const isRawId = (t?: string) => !t || /^#\d+$/.test(t.trim());
 const normTitle = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-function loadMeta(): Record<string, Meta> { try { return JSON.parse(localStorage.getItem(META_KEY) || '{}'); } catch { return {}; } }
-function loadDismissed(): number[] { try { return JSON.parse(localStorage.getItem(DISMISS_KEY) || '[]'); } catch { return []; } }
 
 // ---- My-request state: combine request.status (approval) with mediaStatus (availability) ----
 type Tone = 'pending' | 'processing' | 'available' | 'declined';
@@ -267,6 +271,8 @@ function MusicCard({ artist, busy, requested, label, onRequest }: {
 
 export default function Requests() {
   const navigate = useNavigate();
+  const accountId = useAuth(state => state.user?.id ?? null);
+  const localScopeKey = accountId ? requestMetaStorageKey(accountId) : null;
   const [loading, setLoading] = useState(true);
   const [configured, setConfigured] = useState(true);
   const [online, setOnline] = useState(true);
@@ -282,8 +288,17 @@ export default function Requests() {
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [overrides, setOverrides] = useState<Record<string, number>>({});
   const [selected, setSelected] = useState<Result | null>(null);
-  const [meta, setMeta] = useState<Record<string, Meta>>(() => loadMeta());
-  const [dismissed, setDismissed] = useState<Set<number>>(() => new Set(loadDismissed()));
+  const loadLocalState = () => ({
+    meta: loadRequestMeta(accountId),
+    dismissed: new Set(loadRequestDismissed(accountId)),
+  });
+  const [localSnapshot, setLocalSnapshot] = useState(() => ({
+    scopeKey: localScopeKey,
+    value: loadLocalState(),
+  }));
+  const visibleLocalSnapshot = switchScopedSnapshot(localSnapshot, localScopeKey, loadLocalState);
+  if (visibleLocalSnapshot !== localSnapshot) setLocalSnapshot(visibleLocalSnapshot);
+  const { meta, dismissed } = visibleLocalSnapshot.value;
 
   const searchReq = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -320,10 +335,12 @@ export default function Requests() {
 
   // Merge title/poster metadata from search/trending/created items into the persistent cache.
   const cacheMeta = (items: { mediaType: string; tmdbId?: number; title?: string; posterUrl?: string; year?: string }[]) => {
-    setMeta(prev => {
-      const next = { ...prev }; let changed = false;
+    setLocalSnapshot(previous => {
+      const current = switchScopedSnapshot(previous, localScopeKey, loadLocalState);
+      const next = { ...current.value.meta }; let changed = false;
       for (const it of items) {
         if (!it.tmdbId || isRawId(it.title)) continue;
+        if (it.mediaType !== 'movie' && it.mediaType !== 'tv') continue;
         const k = metaKey(it.mediaType, it.tmdbId);
         const cur = next[k];
         if (!cur || cur.title !== it.title || (!cur.posterUrl && it.posterUrl)) {
@@ -331,8 +348,9 @@ export default function Requests() {
           changed = true;
         }
       }
-      if (changed) { try { localStorage.setItem(META_KEY, JSON.stringify(next)); } catch { /* */ } }
-      return changed ? next : prev;
+      if (!changed) return current;
+      saveRequestMeta(accountId, next);
+      return { scopeKey: localScopeKey, value: { ...current.value, meta: next } };
     });
   };
 
@@ -378,10 +396,12 @@ export default function Requests() {
 
   // Hide a submitted request from the local list (jellyseerr exposes no cancel endpoint).
   const dismiss = (id: number) => {
-    setDismissed(prev => {
-      const n = new Set(prev); n.add(id);
-      try { localStorage.setItem(DISMISS_KEY, JSON.stringify([...n])); } catch { /* */ }
-      return n;
+    setLocalSnapshot(previous => {
+      const current = switchScopedSnapshot(previous, localScopeKey, loadLocalState);
+      const dismissed = new Set(current.value.dismissed);
+      dismissed.add(id);
+      saveRequestDismissed(accountId, dismissed);
+      return { scopeKey: localScopeKey, value: { ...current.value, dismissed } };
     });
     toast('Removed from your list', 'info', 'Hidden here — this does not affect an in-progress download.');
   };
@@ -859,8 +879,7 @@ export default function Requests() {
                       )}
                       <div className="flex items-center gap-2 mt-auto pt-1.5">
                         <p className="text-[11px] muted truncate flex-1">
-                          {req.requestedBy ? `by ${req.requestedBy}` : ''}
-                          {req.createdAt ? `${req.requestedBy ? ' • ' : ''}${formatRelative(req.createdAt)}` : ''}
+                          {req.createdAt ? formatRelative(req.createdAt) : ''}
                         </p>
                         {watchable && (
                           <button
@@ -970,8 +989,7 @@ export default function Requests() {
                               )}
                               <div className="flex items-center gap-2 mt-auto pt-1.5">
                                 <p className="text-[11px] muted truncate flex-1">
-                                  {mr.requestedBy ? `by ${mr.requestedBy}` : ''}
-                                  {mr.createdAt ? `${mr.requestedBy ? ' • ' : ''}${formatRelative(mr.createdAt)}` : ''}
+                                  {mr.createdAt ? formatRelative(mr.createdAt) : ''}
                                 </p>
                                 {s === 'available' && (
                                   <button

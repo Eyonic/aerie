@@ -3,15 +3,26 @@ import { useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatRelative, formatDate, debounce } from '../lib/utils';
-import { toast } from '../lib/store';
+import { toast, useAuth } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, Menu, Spinner, Badge, ConfirmModal } from '../components/ui';
 import { voice, type Recorder } from '../lib/voice';
-import type { DocMeta } from '../lib/model';
+import type { DocMeta, TranslationCapabilities, TranslationPreferences } from '../lib/model';
+import {
+  clearRecoveryDraftIfContent, downloadRecoveryDraft, loadRecoveryDraft, saveRecoveryDraft, type RecoveryDraft,
+} from '../lib/recovery-drafts';
+import {
+  commitOfflineEditableSync, getOfflineEditable, listOfflineEditables, markOfflineEditableConflict,
+  markOfflineEditableDirty, moveOfflineEditable, pinOfflineEditable, refreshOfflineEditable,
+  removeOfflineEditable, resolveOfflineEditableChoice, syncOfflineEditable, type OfflineEditableCopy,
+} from '../lib/offline-editables';
+import { officeErrorMessage } from '../lib/office-errors';
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 const DOCS_DIR = '/Documents';
+const OFFICE_DOC_RE = /\.(docx|odt)$/i;
+const BINARY_DOC_RE = /\.(docx|odt|doc|rtf)$/i;
 
 function decodeId(id?: string): string | null {
   if (!id) return null;
@@ -217,7 +228,7 @@ const MicIcon = ({ size = 17 }: { size?: number }) => (
 // ---------------------------------------------------------------------------
 // AI actions catalog
 // ---------------------------------------------------------------------------
-type AiAction = { key: string; label: string; icon: React.ReactNode; desc: string; replace: boolean };
+type AiAction = { key: string; label: string; icon: React.ReactNode; desc: string; replace: boolean; targetLanguage?: string };
 const AI_ACTIONS: AiAction[] = [
   { key: 'summarize', label: 'Summarize', icon: <Icon.Sparkles size={15} />, desc: 'Condense to key points', replace: false },
   { key: 'improve', label: 'Improve writing', icon: <Icon.Edit size={15} />, desc: 'Polish clarity & flow', replace: true },
@@ -227,12 +238,16 @@ const AI_ACTIONS: AiAction[] = [
   { key: 'shorter', label: 'Make shorter', icon: <Icon.ChevronLeft size={15} />, desc: 'Trim it down', replace: true },
   { key: 'longer', label: 'Make longer', icon: <Icon.ChevronRight size={15} />, desc: 'Expand & elaborate', replace: true },
   { key: 'explain', label: 'Explain', icon: <Icon.Info size={15} />, desc: 'Explain in plain terms', replace: false },
-  { key: 'translate', label: 'Translate', icon: <Icon.Cloud size={15} />, desc: 'Translate the text', replace: true },
   { key: 'outline', label: 'Outline', icon: <Icon.List size={15} />, desc: 'Structured outline', replace: false },
   { key: 'title', label: 'Generate title', icon: <Icon.Star size={15} />, desc: 'Suggest a title', replace: false },
   { key: 'contradictions', label: 'Find contradictions', icon: <Icon.Warning size={15} />, desc: 'Spot inconsistencies', replace: false },
-  { key: 'cleanup', label: 'Clean up notes', icon: <Icon.Bolt size={15} />, desc: 'Tidy rough notes', replace: false },
+  { key: 'clean', label: 'Clean up notes', icon: <Icon.Bolt size={15} />, desc: 'Tidy rough notes', replace: false },
 ];
+
+function translatedLanguageName(code: string): string {
+  try { return new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(code) || code; }
+  catch { return code; }
+}
 
 const TEXT_COLORS = ['#ffffff', '#f87171', '#fb923c', '#fbbf24', '#34d399', '#22d3ee', '#818cf8', '#f472b6', '#a855f7', '#94a3b8'];
 const HILITE_COLORS = ['#fde68a', '#fca5a5', '#a7f3d0', '#a5f3fc', '#c4b5fd', '#f9a8d4', '#fecaca', '#fef08a'];
@@ -260,10 +275,50 @@ const SLASH_ITEMS: SlashItem[] = [
 export default function Documents() {
   const params = useParams();
   const [search] = useSearchParams();
+  const accountId = useAuth(state => state.user?.id || 0);
   const path = search.get('path') || decodeId(params.id);
 
-  if (path) return <Editor key={path} path={path} />;
+  if (path && BINARY_DOC_RE.test(path)) return <OfficeDocumentImport key={`${accountId}:${path}`} path={path} />;
+  if (path) return <Editor key={`${accountId}:${path}`} path={path} />;
   return <DocsList />;
+}
+
+function OfficeDocumentImport({ path }: { path: string }) {
+  const nav = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const filename = path.split('/').pop() || 'Office document';
+  const supported = OFFICE_DOC_RE.test(path);
+  const convert = async () => {
+    setBusy(true);
+    try {
+      const result = await api.docs.importExisting(path);
+      toast('Editable Aerie copy created', 'success', result.warnings?.[1]);
+      nav(`/documents?path=${encodeURIComponent(result.path)}`, { replace: true });
+    } catch (error: any) {
+      toast('Could not import document', 'error', officeErrorMessage(error, 'The Office file could not be converted safely.'));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="animate-fade-in max-w-2xl">
+      <PageHeader title="Import Office document" subtitle={filename} icon={<Icon.Doc size={22} />} />
+      <div className="card space-y-4">
+        <div className="flex items-start gap-3">
+          <Icon.Info size={20} className="mt-0.5 shrink-0 text-brand-300" />
+          <div>
+            <h2 className="font-semibold text-white">Create an editable Aerie copy</h2>
+            <p className="mt-1 text-sm text-slate-300">{supported
+              ? `The original ${filename.toLowerCase().endsWith('.odt') ? 'OpenDocument' : 'Word'} file stays unchanged. Text, headings, lists, links and tables are imported; unsupported layout and embedded media may be simplified.`
+              : 'This legacy format cannot be converted safely in Aerie. Convert it to .docx or .odt in an Office application, then import that file. Aerie will not open or overwrite this binary as text.'}</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {supported && <button className="btn-primary" onClick={convert} disabled={busy}>{busy ? <Spinner size={16} /> : <Icon.Refresh size={16} />}Create editable copy</button>}
+          <button className="btn-secondary" onClick={() => nav(`/files?path=${encodeURIComponent(path.split('/').slice(0, -1).join('/') || '/')}`)} disabled={busy}>Back to Files</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ===========================================================================
@@ -271,9 +326,16 @@ export default function Documents() {
 // ===========================================================================
 function DocsList() {
   const nav = useNavigate();
+  const accountId = useAuth(state => state.user?.id || 0);
   const [docs, setDocs] = useState<DocMeta[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [offlineOnly, setOfflineOnly] = useState(false);
+  const [offlineCopies, setOfflineCopies] = useState<Record<string, OfflineEditableCopy>>({});
+  const [offlineBusy, setOfflineBusy] = useState<Set<string>>(new Set());
   const [view, setView] = useState<'grid' | 'list'>('grid');
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
 
   // rename / delete
   const [renameFor, setRenameFor] = useState<DocMeta | null>(null);
@@ -287,8 +349,61 @@ function DocsList() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
-  const load = () => api.docs.list().then(setDocs).catch(() => setDocs([]));
-  useEffect(() => { load(); }, []);
+  const readOfflineCopies = React.useCallback(async () => {
+    if (!accountId) { setOfflineCopies({}); return [] as OfflineEditableCopy[]; }
+    const copies = await listOfflineEditables(accountId, 'document');
+    setOfflineCopies(Object.fromEntries(copies.map(copy => [copy.path, copy])));
+    return copies;
+  }, [accountId]);
+
+  const load = React.useCallback(async () => {
+    setListError(null);
+    try {
+      const list = await api.docs.list();
+      setDocs(list);
+      setOfflineOnly(false);
+      await readOfflineCopies().catch(() => []);
+    } catch (error: any) {
+      const copies = await readOfflineCopies().catch(() => [] as OfflineEditableCopy[]);
+      if (copies.length) {
+        setDocs(copies.map(copy => ({
+          id: `offline:${copy.path}`,
+          path: copy.path,
+          title: copy.title,
+          updatedAt: copy.locallyUpdatedAt || copy.serverUpdatedAt || copy.cachedAt,
+          kind: 'document' as const,
+        })));
+        setOfflineOnly(true);
+        setListError('The server is unavailable. Showing documents saved on this device.');
+      } else {
+        setDocs([]);
+        setOfflineOnly(false);
+        setListError(error?.message || 'The document service may be offline. No offline documents are available yet.');
+      }
+    }
+  }, [readOfflineCopies]);
+
+  const syncOfflineCopies = React.useCallback(async () => {
+    if (!accountId) return;
+    const copies = await listOfflineEditables(accountId, 'document').catch(() => [] as OfflineEditableCopy[]);
+    const dirty = copies.filter(copy => copy.dirty);
+    if (!dirty.length) return;
+    const outcomes = await Promise.all(dirty.map(copy => syncOfflineEditable(
+      accountId, 'document', copy.path,
+      (savePath, content, revision) => api.files.saveContent(savePath, content, revision),
+    )));
+    if (outcomes.some(outcome => outcome.status === 'conflict')) {
+      toast('An offline document needs review', 'warning', 'Open the marked document to choose between your draft and the server copy.');
+    }
+    await readOfflineCopies().catch(() => []);
+  }, [accountId, readOfflineCopies]);
+
+  useEffect(() => {
+    void load().then(() => { if (navigator.onLine) void syncOfflineCopies(); });
+    const online = () => { void syncOfflineCopies().then(load); };
+    window.addEventListener('online', online);
+    return () => window.removeEventListener('online', online);
+  }, [load, syncOfflineCopies]);
 
   const openDoc = (p: string) => nav(`/documents?path=${encodeURIComponent(p)}`);
 
@@ -297,13 +412,21 @@ function DocsList() {
     if (!renameFor) return;
     const base = renameName.trim();
     if (!base) return;
+    if (offlineCopies[renameFor.path]?.dirty) {
+      toast('Sync this document before renaming it', 'warning', 'Its offline changes are still waiting to be saved.');
+      return;
+    }
     setRenaming(true);
     try {
       const newName = base.replace(DOC_EXT_RE, '') + (extOf(renameFor.path) || '.cbxdoc');
-      await api.files.rename(renameFor.path, newName);
+      const oldPath = renameFor.path;
+      const result = await api.files.rename(oldPath, newName);
+      const offlineMoved = !offlineCopies[oldPath] || !!await moveOfflineEditable(
+        accountId, 'document', oldPath, result.path, baseName(result.path),
+      ).catch(() => null);
       setRenameFor(null);
-      toast('Document renamed', 'success');
-      load();
+      toast('Document renamed', offlineMoved ? 'success' : 'warning', offlineMoved ? undefined : 'The browser could not update its offline copy. Re-pin the renamed document when local storage is available.');
+      void load();
     } catch (e: any) {
       toast('Rename failed', 'error', e?.message);
     } finally {
@@ -311,15 +434,47 @@ function DocsList() {
     }
   }
   async function confirmDelete(d: DocMeta) {
+    if (offlineCopies[d.path]?.dirty) {
+      toast('This document has unsynced offline changes', 'warning', 'Open it and resolve or sync those changes before deleting it.');
+      return;
+    }
     try {
       await api.files.delete([d.path]);
-      toast('Document deleted', 'success');
+      const offlineRemoved = !offlineCopies[d.path] || await removeOfflineEditable(accountId, 'document', d.path).catch(() => false);
+      toast('Document deleted', offlineRemoved ? 'success' : 'warning', offlineRemoved ? undefined : 'The browser could not remove its offline copy.');
       setDocs((cur) => (cur ? cur.filter((x) => x.id !== d.id) : cur));
     } catch (e: any) {
       toast('Delete failed', 'error', e?.message);
     }
   }
+  async function toggleOffline(d: DocMeta) {
+    if (!accountId || offlineBusy.has(d.path)) return;
+    setOfflineBusy(current => new Set(current).add(d.path));
+    try {
+      const existing = offlineCopies[d.path];
+      if (existing) {
+        await removeOfflineEditable(accountId, 'document', d.path);
+        toast('Offline copy removed', 'success', 'The server document is unchanged.');
+      } else {
+        const source = await api.files.content(d.path);
+        await pinOfflineEditable({
+          accountId, kind: 'document', path: d.path, title: baseName(d.path), content: source.content ?? '',
+          revision: source.revision, serverUpdatedAt: source.modifiedAt || d.updatedAt,
+        });
+        toast('Document available offline', 'success', 'You can open and edit it when this server cannot be reached.');
+      }
+      await readOfflineCopies();
+    } catch (error: any) {
+      toast(error?.message === 'offline_copy_dirty' ? 'Offline copy has unsynced changes' : 'Could not change offline availability',
+        error?.message === 'offline_copy_dirty' ? 'warning' : 'error',
+        error?.message === 'offline_copy_dirty' ? 'Open the document and sync or resolve it before removing the offline copy.' : error?.message);
+    } finally {
+      setOfflineBusy(current => { const next = new Set(current); next.delete(d.path); return next; });
+    }
+  }
+
   const docMenu = (d: DocMeta) => [
+    { label: offlineCopies[d.path] ? 'Remove offline copy' : 'Make available offline', icon: offlineCopies[d.path] ? <Icon.Close size={15} /> : <Icon.Download size={15} />, onClick: () => void toggleOffline(d) },
     { label: 'Rename', icon: <Icon.Edit size={15} />, onClick: () => askRename(d) },
     { label: 'Select', icon: <Icon.Check size={15} />, onClick: () => { setSelecting(true); setSelected(new Set([d.path])); } },
     { label: 'Delete', icon: <Icon.Trash size={15} />, onClick: () => setDeleteFor(d), danger: true, divider: true },
@@ -330,10 +485,17 @@ function DocsList() {
   async function confirmBulkDelete() {
     const paths = [...selected];
     if (!paths.length || bulkDeleting) return;
+    if (paths.some(path => offlineCopies[path]?.dirty)) {
+      toast('Some selected documents have unsynced offline changes', 'warning', 'Open the marked documents and sync or resolve them before deleting.');
+      return;
+    }
     setBulkDeleting(true);
     try {
       await api.files.delete(paths);
-      toast(paths.length === 1 ? 'Document moved to Trash' : `${paths.length} documents moved to Trash`, 'success');
+      const offlineResults = await Promise.allSettled(paths.filter(path => offlineCopies[path]).map(path => removeOfflineEditable(accountId, 'document', path)));
+      const offlineCleanupFailed = offlineResults.some(result => result.status === 'rejected');
+      toast(paths.length === 1 ? 'Document moved to Trash' : `${paths.length} documents moved to Trash`, offlineCleanupFailed ? 'warning' : 'success',
+        offlineCleanupFailed ? 'Some browser offline copies could not be removed.' : undefined);
       setDocs(cur => (cur ? cur.filter(d => !selected.has(d.path)) : cur));
       exitSelecting();
     } catch (e: any) {
@@ -357,6 +519,25 @@ function DocsList() {
     } catch (e: any) {
       toast('Could not create document', 'error', e?.message);
       setCreating(false);
+    }
+  }
+
+  async function importOffice(file?: File) {
+    if (!file) return;
+    if (!OFFICE_DOC_RE.test(file.name)) {
+      toast('Choose a Word or OpenDocument file', 'warning', 'Supported imports: .docx and .odt');
+      return;
+    }
+    setImporting(true);
+    try {
+      const result = await api.docs.import(file);
+      toast('Document imported', 'success', result.warnings?.[1]);
+      openDoc(result.path);
+    } catch (error: any) {
+      toast('Import failed', 'error', officeErrorMessage(error, 'The Office file could not be converted safely.'));
+    } finally {
+      setImporting(false);
+      if (importRef.current) importRef.current.value = '';
     }
   }
 
@@ -384,7 +565,12 @@ function DocsList() {
           <Icon.Check size={16} /><span className="hidden sm:inline">Select</span>
         </button>
       )}
-      <button className="btn-primary" onClick={newDoc} disabled={creating}>
+      <input ref={importRef} type="file" accept=".docx,.odt,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.oasis.opendocument.text"
+        className="hidden" onChange={event => void importOffice(event.target.files?.[0])} />
+      <button className="btn-secondary" onClick={() => importRef.current?.click()} disabled={importing || offlineOnly} title={offlineOnly ? 'Reconnect to import a document' : undefined}>
+        {importing ? <Spinner size={16} /> : <Icon.Upload size={16} />}<span className="hidden sm:inline">Import</span>
+      </button>
+      <button className="btn-primary" onClick={newDoc} disabled={creating || offlineOnly} title={offlineOnly ? 'Reconnect to create a document' : undefined}>
         {creating ? <Spinner size={16} /> : <Icon.Plus size={17} />}
         <span className="hidden sm:inline">New document</span>
       </button>
@@ -398,21 +584,37 @@ function DocsList() {
     </div>
   );
 
+  if (!docs.length && listError && !offlineOnly) return (
+    <div className="animate-fade-in">
+      <PageHeader title="Documents" subtitle="Write, edit and refine with AI" icon={<Icon.Doc size={22} />} />
+      <EmptyState icon={<Icon.Warning size={30} />} title="Couldn't load documents" subtitle={listError}
+        action={<button className="btn-primary" onClick={() => void load()}><Icon.Refresh size={16} />Retry</button>} />
+    </div>
+  );
+
   return (
     <div className="animate-fade-in">
       <PageHeader title="Documents" subtitle="Write, edit and refine with AI" icon={<Icon.Doc size={22} />} actions={actions} />
+
+      {offlineOnly && (
+        <div role="status" className="mb-4 rounded-xl border border-accent-amber/25 bg-accent-amber/10 px-4 py-3 flex items-center gap-3">
+          <Icon.Wifi size={17} className="text-accent-amber" />
+          <p className="text-sm text-slate-200 flex-1">Offline — showing documents saved on this device. Edits will sync automatically after reconnecting.</p>
+          <button className="btn-secondary !py-1.5" onClick={() => void load()}><Icon.Refresh size={14} />Retry</button>
+        </div>
+      )}
 
       {docs.length === 0 ? (
         <EmptyState
           icon={<Icon.Doc size={30} />}
           title="No documents yet"
           subtitle="Create your first document and start writing with AI assistance."
-          action={<button className="btn-primary" onClick={newDoc} disabled={creating}><Icon.Plus size={17} />New document</button>}
+          action={<div className="flex flex-wrap justify-center gap-2"><button className="btn-primary" onClick={newDoc} disabled={creating}><Icon.Plus size={17} />New document</button><button className="btn-secondary" onClick={() => importRef.current?.click()} disabled={importing}>{importing ? <Spinner size={16} /> : <Icon.Upload size={16} />}Import .docx or .odt</button></div>}
         />
       ) : view === 'grid' ? (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
           {!selecting && (
-            <button onClick={newDoc} disabled={creating}
+            <button onClick={newDoc} disabled={creating || offlineOnly}
               className="card card-hover aspect-[3/4] flex flex-col items-center justify-center gap-3 text-slate-400 hover:text-white border border-dashed border-white/10">
               <div className="w-11 h-11 rounded-xl grid place-items-center bg-brand-500/15 text-brand-400">
                 {creating ? <Spinner size={18} /> : <Icon.Plus size={20} />}
@@ -422,6 +624,7 @@ function DocsList() {
           )}
           {docs.map(d => {
             const isSel = selected.has(d.path);
+            const offline = offlineCopies[d.path];
             return (
             <div key={d.id} className="relative group">
               <button onClick={() => selecting ? toggleSelect(d.path) : openDoc(d.path)} aria-pressed={selecting ? isSel : undefined}
@@ -438,6 +641,9 @@ function DocsList() {
                   <div className="absolute top-3 left-3 w-7 h-7 rounded-lg bg-brand-500/90 grid place-items-center text-white shadow-glow">
                     <Icon.Doc size={15} />
                   </div>
+                  {offline && <span className={cx('absolute bottom-3 left-3 chip !py-0.5 !px-2 text-[10px]', offline.conflict ? '!text-accent-red' : offline.dirty ? '!text-accent-amber' : '!text-accent-green')}>
+                    {offline.conflict ? 'Review changes' : offline.dirty ? 'Waiting to sync' : 'Offline'}
+                  </span>}
                 </div>
                 <div className="px-3.5 py-3 border-t border-white/[0.05]">
                   <p className="text-sm font-medium text-white truncate group-hover:text-brand-300">{baseName(d.path)}</p>
@@ -468,6 +674,7 @@ function DocsList() {
           <div className="divide-y divide-white/[0.04]">
             {docs.map(d => {
               const isSel = selected.has(d.path);
+              const offline = offlineCopies[d.path];
               return (
               <div key={d.id} className={cx('w-full flex items-center gap-3 px-4 py-3.5 hover:bg-white/[0.03] transition-colors', isSel && 'bg-brand-500/[0.08]')}>
                 <button onClick={() => selecting ? toggleSelect(d.path) : openDoc(d.path)} aria-pressed={selecting ? isSel : undefined}
@@ -484,6 +691,9 @@ function DocsList() {
                     <p className="text-xs muted truncate">{d.path}</p>
                   </div>
                 </button>
+                {offline && <span className={cx('chip !py-0.5 !px-2 text-[10px] shrink-0', offline.conflict ? '!text-accent-red' : offline.dirty ? '!text-accent-amber' : '!text-accent-green')}>
+                  {offline.conflict ? 'Review' : offline.dirty ? 'Waiting to sync' : 'Offline'}
+                </span>}
                 <span className="text-xs text-slate-500 shrink-0 hidden sm:block">{formatRelative(d.updatedAt)}</span>
                 {!selecting && (
                   <Menu
@@ -560,10 +770,12 @@ function Pop({ trigger, title, active, onOpen, align = 'left', panelClass = '', 
 // ===========================================================================
 // EDITOR
 // ===========================================================================
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+type SaveState = 'idle' | 'saving' | 'saved' | 'offline' | 'error';
 
 function Editor({ path }: { path: string }): React.ReactElement {
   const nav = useNavigate();
+  const accountId = useAuth(state => state.user?.id || 0);
+  const aiMode = useAuth(state => state.user?.aiMode);
   const [editorSearch] = useSearchParams();
   const markdown = isMarkdownPath(path);
 
@@ -583,9 +795,17 @@ function Editor({ path }: { path: string }): React.ReactElement {
 
   const editorRef = useRef<HTMLDivElement>(null);
   const htmlRef = useRef('');
+  const revisionRef = useRef<string | undefined>(undefined);
   const savedRange = useRef<Range | null>(null);
   const seeded = useRef(false);
   const pendingRef = useRef(false);
+  const editGenerationRef = useRef(0);
+  const saveInFlightRef = useRef(false);
+  const saveRequestedRef = useRef(false);
+  const saveWaitersRef = useRef<Array<() => void>>([]);
+  const conflictRef = useRef(false);
+  const pinnedRef = useRef(false);
+  const mountedRef = useRef(true);
   const recRef = useRef<Recorder | null>(null);
   const slashBlockRef = useRef<HTMLElement | null>(null);
   const aiSel = useRef<{ range: Range | null; hasSel: boolean }>({ range: null, hasSel: false });
@@ -595,6 +815,14 @@ function Editor({ path }: { path: string }): React.ReactElement {
   const [docHtml, setDocHtml] = useState('');
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryDraft | null>(null);
+  const [recoveryStored, setRecoveryStored] = useState(true);
+  const [recoveryStorageAvailable, setRecoveryStorageAvailable] = useState(true);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [resolvingRecovery, setResolvingRecovery] = useState(false);
+  const [offlineCopy, setOfflineCopy] = useState<OfflineEditableCopy | null>(null);
+  const [offlineMode, setOfflineMode] = useState(false);
+  const [offlineBusy, setOfflineBusy] = useState(false);
   const [words, setWords] = useState(0);
   const [chars, setChars] = useState(0);
   const [isEmpty, setIsEmpty] = useState(true);
@@ -606,6 +834,8 @@ function Editor({ path }: { path: string }): React.ReactElement {
   const [panelOpen, setPanelOpen] = useState(true);
   const [mobileAi, setMobileAi] = useState(false);
   const [aiAvailable, setAiAvailable] = useState<boolean | null>(null);
+  const [translationPrefs, setTranslationPrefs] = useState<TranslationPreferences | null>(null);
+  const [translationCaps, setTranslationCaps] = useState<TranslationCapabilities | null>(null);
   const [aiBusy, setAiBusy] = useState<string | null>(null);
   const [suggestion, setSuggestion] = useState<{ action: AiAction; text: string } | null>(null);
 
@@ -644,22 +874,138 @@ function Editor({ path }: { path: string }): React.ReactElement {
   const [renaming, setRenaming] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
+  const storeRecovery = React.useCallback(async (content: string, revision = revisionRef.current) => {
+    if (!accountId) return null;
+    try {
+      const saved = await saveRecoveryDraft({ accountId, kind: 'document', path, content, revision });
+      if (mountedRef.current) setRecoveryStorageAvailable(true);
+      return saved;
+    } catch {
+      if (mountedRef.current) setRecoveryStorageAvailable(false);
+      return null;
+    }
+  }, [accountId, path]);
+
+  const clearRecoveryIfCurrent = React.useCallback(async (content: string) => {
+    if (!accountId) return false;
+    try {
+      const cleared = await clearRecoveryDraftIfContent(accountId, 'document', path, content);
+      if (mountedRef.current) setRecoveryStorageAvailable(true);
+      return cleared;
+    } catch {
+      if (mountedRef.current) setRecoveryStorageAvailable(false);
+      return false;
+    }
+  }, [accountId, path]);
+
+  const storePinnedEdit = React.useCallback(async (content: string, revision = revisionRef.current) => {
+    if (!accountId || !pinnedRef.current) return null;
+    try {
+      const copy = await markOfflineEditableDirty({
+        accountId, kind: 'document', path, title: baseName(path), content, revision,
+      });
+      if (mountedRef.current && copy) setOfflineCopy(copy);
+      return copy;
+    } catch {
+      return null;
+    }
+  }, [accountId, path]);
+
   // ---- load ----
   useEffect(() => {
     let alive = true;
-    api.files.content(path)
-      .then((r) => {
+    (async () => {
+      let draft: RecoveryDraft | null = null;
+      let pinned: OfflineEditableCopy | null = null;
+      if (accountId) {
+        const [draftResult, pinnedResult] = await Promise.allSettled([
+          loadRecoveryDraft(accountId, 'document', path),
+          getOfflineEditable(accountId, 'document', path),
+        ]);
+        if (draftResult.status === 'fulfilled') draft = draftResult.value;
+        if (pinnedResult.status === 'fulfilled') pinned = pinnedResult.value;
+        if (alive) setRecoveryStorageAvailable(draftResult.status === 'fulfilled');
+      }
+      if (!alive) return;
+      pinnedRef.current = !!pinned;
+      setOfflineCopy(pinned);
+
+      const pinnedDraft: RecoveryDraft | null = pinned?.dirty ? {
+        accountId, kind: 'document', path, content: pinned.content, revision: pinned.revision,
+        savedAt: pinned.locallyUpdatedAt || pinned.cachedAt,
+      } : null;
+      const candidate = !draft ? pinnedDraft : !pinnedDraft ? draft
+        : new Date(draft.savedAt).getTime() >= new Date(pinnedDraft.savedAt).getTime() ? draft : pinnedDraft;
+      try {
+        const r = await api.files.content(path);
         if (!alive) return;
-        const raw = r.content ?? '';
-        setDocHtml(markdown ? markdownToHtml(raw) : sanitizeHtml(raw));
+        const serverRaw = r.content ?? '';
+        let raw = serverRaw;
+        revisionRef.current = r.revision;
+        setOfflineMode(false);
+        if (candidate?.content === serverRaw) {
+          if (draft) await clearRecoveryIfCurrent(serverRaw);
+          if (pinned?.dirty) {
+            const settled = await resolveOfflineEditableChoice({
+              accountId, kind: 'document', path, expectedLocalContent: pinned.content,
+              chosenContent: serverRaw, newRevision: r.revision, serverUpdatedAt: r.modifiedAt,
+            }).catch(() => null);
+            if (alive && settled) setOfflineCopy(settled);
+          }
+        } else if (candidate) {
+          if (candidate.revision === r.revision && !pinned?.conflict) {
+            // The server is still at the exact revision this local edit used.
+            // Resume it directly and let the conditional autosave retry.
+            raw = candidate.content;
+            pendingRef.current = true;
+            setSaveState('saving');
+            if (pinned && pinned.content !== candidate.content) await storePinnedEdit(candidate.content, candidate.revision);
+          } else {
+            conflictRef.current = true;
+            setRecoveryStored(true);
+            setRecovery(candidate);
+            if (pinned) await markOfflineEditableConflict(accountId, 'document', path, {
+              content: pinned.content, revision: pinned.revision,
+            }).catch(() => null);
+          }
+        } else if (pinned) {
+          const refreshed = await refreshOfflineEditable({
+            accountId, kind: 'document', path, title: baseName(path), content: serverRaw,
+            revision: r.revision, serverUpdatedAt: r.modifiedAt,
+          }).catch(() => null);
+          if (alive && refreshed) setOfflineCopy(refreshed);
+        }
+        if (!alive) return;
+        setDocHtml(sanitizeHtml(markdown ? markdownToHtml(raw) : raw));
+        setNotFound(false);
         setLoading(false);
-      })
-      .catch(() => { if (alive) { setNotFound(true); setLoading(false); } });
+      } catch {
+        if (!alive) return;
+        if (pinned) {
+          const raw = candidate?.content ?? pinned.content;
+          revisionRef.current = candidate?.revision || pinned.revision;
+          pendingRef.current = !!candidate;
+          setDocHtml(sanitizeHtml(markdown ? markdownToHtml(raw) : raw));
+          setOfflineMode(true);
+          setSaveState(candidate ? 'offline' : 'saved');
+          setNotFound(false);
+          setLoading(false);
+        } else {
+          setNotFound(true);
+          setLoading(false);
+        }
+      }
+    })();
     api.ai.status().then((s) => alive && setAiAvailable(!!s.available)).catch(() => alive && setAiAvailable(false));
+    api.settings.get().then((settings) => {
+      if (!alive) return;
+      setTranslationPrefs(settings.preferences?.translation || null);
+      setTranslationCaps(settings.translationCapabilities);
+    }).catch(() => {});
     api.ai.transcribeStatus().then((s) => alive && setMicAvailable(!!s.available)).catch(() => alive && setMicAvailable(false));
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path]);
+  }, [path, accountId, markdown, clearRecoveryIfCurrent, storePinnedEdit]);
 
   // one-time editing config
   useEffect(() => {
@@ -679,25 +1025,143 @@ function Editor({ path }: { path: string }): React.ReactElement {
 
   // flush unsaved edits on unmount
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (pendingRef.current) {
         const payload = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
-        api.files.saveContent(path, payload).catch(() => { /* */ });
+        if (accountId) void saveRecoveryDraft({ accountId, kind: 'document', path, content: payload, revision: revisionRef.current }).catch(() => {});
+        if (pinnedRef.current) void markOfflineEditableDirty({
+          accountId, kind: 'document', path, title: baseName(path), content: payload, revision: revisionRef.current,
+        }).catch(() => {});
+        if (saveInFlightRef.current) {
+          saveRequestedRef.current = true;
+        } else {
+          api.files.saveContent(path, payload, revisionRef.current)
+            .then(() => accountId
+              ? clearRecoveryDraftIfContent(accountId, 'document', path, payload).catch(() => false)
+              : undefined)
+            .catch(() => { /* the durable recovery draft remains available */ });
+        }
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path]);
+  }, [path, accountId]);
+
+  // If durable browser storage has failed, do not imply that closing the tab is
+  // safe while the server still has unsaved changes.
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!pendingRef.current || recoveryStorageAvailable) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [recoveryStorageAvailable]);
 
   // ---- autosave ----
-  const persist = useMemo(
-    () => debounce(() => {
-      const payload = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
-      api.files.saveContent(path, payload)
-        .then(() => { pendingRef.current = false; setSaveState('saved'); setLastSaved(new Date()); })
-        .catch((e: any) => { setSaveState('error'); toast('Autosave failed', 'error', e?.message); });
-    }, 1000),
-    [path, markdown]
-  );
+  const runSave = React.useCallback(async () => {
+    if (!mountedRef.current || conflictRef.current || !pendingRef.current) return;
+    if (saveInFlightRef.current) {
+      saveRequestedRef.current = true;
+      await new Promise<void>(resolve => saveWaitersRef.current.push(resolve));
+      return;
+    }
+    saveInFlightRef.current = true;
+    try {
+      do {
+        saveRequestedRef.current = false;
+        const generation = editGenerationRef.current;
+        const payload = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
+        const baseRevision = revisionRef.current;
+        try {
+          const result = await api.files.saveContent(path, payload, baseRevision);
+          revisionRef.current = result.revision;
+          setOfflineMode(false);
+          if (accountId && pinnedRef.current && baseRevision) {
+            const committed = await commitOfflineEditableSync({
+              accountId, kind: 'document', path, expectedContent: payload,
+              expectedRevision: baseRevision, newRevision: result.revision,
+            }).catch(() => null);
+            if (mountedRef.current && committed) setOfflineCopy(committed);
+          }
+          if (generation === editGenerationRef.current) {
+            if (accountId) await clearRecoveryIfCurrent(payload);
+            // An edit may have arrived while IndexedDB was committing the
+            // cleanup. Recheck before claiming everything is saved.
+            if (generation === editGenerationRef.current) {
+              pendingRef.current = false;
+              if (mountedRef.current) {
+                setSaveState('saved');
+                setLastSaved(new Date());
+              }
+            } else {
+              saveRequestedRef.current = true;
+            }
+          } else {
+            saveRequestedRef.current = true;
+          }
+        } catch (e: any) {
+          if (mountedRef.current) setSaveState('error');
+          if (e?.message === 'revision_conflict') {
+            conflictRef.current = true;
+            if (accountId && pinnedRef.current) {
+              const conflicted = baseRevision
+                ? await markOfflineEditableConflict(accountId, 'document', path, { content: payload, revision: baseRevision }).catch(() => null)
+                : null;
+              if (mountedRef.current && conflicted) setOfflineCopy(conflicted);
+            }
+            const fallback: RecoveryDraft | null = accountId ? {
+              accountId, kind: 'document', path, content: payload,
+              revision: revisionRef.current, savedAt: new Date().toISOString(),
+            } : null;
+            const stored = await storeRecovery(payload, revisionRef.current);
+            if (mountedRef.current && (stored || fallback)) {
+              setRecoveryStored(!!stored);
+              setRecovery(stored || fallback);
+            }
+            if (mountedRef.current) {
+              toast('This document changed on another device', 'error',
+                stored
+                  ? 'Your draft is stored safely. Choose which copy to keep or download it.'
+                  : 'Recovery storage is unavailable. Keep this page open and download your draft now.');
+            }
+          } else if (mountedRef.current && pinnedRef.current) {
+            setOfflineMode(true);
+            setSaveState('offline');
+          } else if (mountedRef.current) {
+            toast('Autosave failed', 'error', e?.message);
+          }
+          break;
+        }
+      } while (saveRequestedRef.current && !conflictRef.current);
+    } finally {
+      saveInFlightRef.current = false;
+      saveWaitersRef.current.splice(0).forEach(resolve => resolve());
+    }
+  }, [accountId, markdown, path, clearRecoveryIfCurrent, storeRecovery]);
+
+  const persist = useMemo(() => debounce(() => { void runSave(); }, 1000), [runSave]);
+
+  useEffect(() => {
+    if (loading) return;
+    const retry = () => {
+      setOfflineMode(false);
+      if (pendingRef.current && !conflictRef.current) {
+        setSaveState('saving');
+        void runSave();
+      }
+    };
+    const wentOffline = () => { if (pinnedRef.current) setOfflineMode(true); };
+    window.addEventListener('online', retry);
+    window.addEventListener('offline', wentOffline);
+    if (!offlineMode && navigator.onLine && pendingRef.current && !conflictRef.current) void runSave();
+    return () => {
+      window.removeEventListener('online', retry);
+      window.removeEventListener('offline', wentOffline);
+    };
+  }, [loading, offlineMode, runSave]);
 
   function recount() {
     const el = editorRef.current;
@@ -713,6 +1177,12 @@ function Editor({ path }: { path: string }): React.ReactElement {
     if (!el) return;
     htmlRef.current = el.innerHTML;
     pendingRef.current = true;
+    editGenerationRef.current++;
+    if (accountId) {
+      const payload = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
+      void storeRecovery(payload);
+      if (pinnedRef.current) void storePinnedEdit(payload);
+    }
     recount();
     setSaveState('saving');
     persist();
@@ -828,19 +1298,131 @@ function Editor({ path }: { path: string }): React.ReactElement {
     setFindCount(countMatches(findText, findCase));
   }
 
+  function installDocumentContent(raw: string) {
+    const html = sanitizeHtml(markdown ? markdownToHtml(raw) : raw);
+    if (editorRef.current) editorRef.current.innerHTML = html;
+    htmlRef.current = html;
+    setDocHtml(html);
+    pendingRef.current = false;
+    editGenerationRef.current++;
+    recount();
+  }
+
+  async function resolveRecovery(choice: 'mine' | 'server') {
+    if (!recovery || !accountId) return;
+    setResolvingRecovery(true);
+    setRecoveryError(null);
+    try {
+      const latest = await api.files.content(path);
+      if (choice === 'mine') {
+        const result = await api.files.saveContent(path, recovery.content, latest.revision);
+        revisionRef.current = result.revision;
+        if (pinnedRef.current) {
+          const settled = await resolveOfflineEditableChoice({
+            accountId, kind: 'document', path, expectedLocalContent: recovery.content,
+            chosenContent: recovery.content, newRevision: result.revision,
+          }).catch(() => null);
+          if (settled) setOfflineCopy(settled);
+        }
+        installDocumentContent(recovery.content);
+        setLastSaved(new Date());
+        toast('Your recovered draft is now the current version', 'success');
+      } else {
+        revisionRef.current = latest.revision;
+        if (pinnedRef.current) {
+          const settled = await resolveOfflineEditableChoice({
+            accountId, kind: 'document', path, expectedLocalContent: recovery.content,
+            chosenContent: latest.content ?? '', newRevision: latest.revision, serverUpdatedAt: latest.modifiedAt,
+          }).catch(() => null);
+          if (settled) setOfflineCopy(settled);
+        }
+        installDocumentContent(latest.content ?? '');
+        toast('Using the server version', 'info');
+      }
+      await clearRecoveryIfCurrent(recovery.content);
+      conflictRef.current = false;
+      setOfflineMode(false);
+      setRecovery(null);
+      setSaveState('saved');
+    } catch (e: any) {
+      setRecoveryError('The conflict was not resolved. Your draft is still available; retry or download it before leaving.');
+      toast('Could not resolve the document conflict', 'error', e?.message);
+    } finally {
+      setResolvingRecovery(false);
+    }
+  }
+
   async function saveNow() {
     const el = editorRef.current;
     if (el) htmlRef.current = el.innerHTML;
-    setSaveState('saving');
-    try {
+    if (conflictRef.current) {
+      toast('Resolve the saved-draft conflict first', 'warning');
+      return;
+    }
+    pendingRef.current = true;
+    editGenerationRef.current++;
+    if (accountId) {
       const payload = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
-      await api.files.saveContent(path, payload);
-      pendingRef.current = false;
-      setSaveState('saved'); setLastSaved(new Date());
-      toast('Document saved', 'success');
-    } catch (e: any) {
-      setSaveState('error');
-      toast('Save failed', 'error', e?.message);
+      await storeRecovery(payload);
+    }
+    setSaveState('saving');
+    await runSave();
+    if (!pendingRef.current && !conflictRef.current) toast('Document saved', 'success');
+  }
+
+  async function toggleEditorOffline() {
+    if (!accountId || offlineBusy) return;
+    setOfflineBusy(true);
+    try {
+      if (pinnedRef.current) {
+        await removeOfflineEditable(accountId, 'document', path);
+        pinnedRef.current = false;
+        setOfflineCopy(null);
+        setOfflineMode(false);
+        toast('Offline copy removed', 'success', 'The server document is unchanged.');
+        return;
+      }
+      await saveNow();
+      if (pendingRef.current || conflictRef.current || !revisionRef.current) {
+        toast('Save the document before making it available offline', 'warning');
+        return;
+      }
+      const content = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
+      const copy = await pinOfflineEditable({
+        accountId, kind: 'document', path, title: baseName(path), content,
+        revision: revisionRef.current, serverUpdatedAt: new Date().toISOString(),
+      });
+      pinnedRef.current = true;
+      setOfflineCopy(copy);
+      toast('Document available offline', 'success', 'This browser will keep a private copy for this account.');
+    } catch (error: any) {
+      toast(error?.message === 'offline_copy_dirty' ? 'Offline copy has unsynced changes' : 'Could not change offline availability',
+        error?.message === 'offline_copy_dirty' ? 'warning' : 'error',
+        error?.message === 'offline_copy_dirty' ? 'Reconnect and sync or resolve the draft before removing it.' : error?.message);
+    } finally {
+      setOfflineBusy(false);
+    }
+  }
+
+  async function exportAs(format: 'docx' | 'odt') {
+    await saveNow();
+    if (pendingRef.current || conflictRef.current) {
+      toast('Save the document before exporting', 'warning', 'Your current edits were not safely saved yet.');
+      return;
+    }
+    try {
+      const url = URL.createObjectURL(await api.docs.export(path, format));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${baseName(path)}.${format}`;
+      anchor.rel = 'noopener';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      toast('Document exported', 'success', 'Text and document structure are included; page layout and embedded media may differ from the Aerie editor.');
+    } catch (error) {
+      toast('Export failed', 'error', officeErrorMessage(error, 'The document could not be exported.'));
     }
   }
 
@@ -1062,7 +1644,14 @@ function Editor({ path }: { path: string }): React.ReactElement {
 
   // ---- AI ----
   async function runAi(action: AiAction) {
-    if (aiAvailable === false) { toast('Local AI is offline', 'warning'); return; }
+    const isTranslation = action.key === 'translate';
+    const translationReady = aiMode !== 'disabled' && !!translationPrefs && !!translationCaps &&
+      (translationPrefs.provider === 'external' ? translationCaps.externalAllowed : translationCaps.localConfigured);
+    if (isTranslation && !translationReady) {
+      toast('Translation provider unavailable', 'warning', 'Choose an available engine in Settings → AI & Privacy.');
+      return;
+    }
+    if (!isTranslation && aiAvailable === false) { toast('AI provider is offline', 'warning'); return; }
     const el = editorRef.current; if (!el) return;
     const s = window.getSelection();
     let selText = ''; let range: Range | null = null;
@@ -1071,9 +1660,10 @@ function Editor({ path }: { path: string }): React.ReactElement {
     const text = selText.trim() ? selText : whole;
     if (!text.trim()) { toast('Nothing to work with', 'warning', 'Write or select some text first.'); return; }
     aiSel.current = { range, hasSel: !!selText.trim() };
-    setAiBusy(action.key); setSuggestion(null);
+    const actionId = action.targetLanguage ? `${action.key}:${action.targetLanguage}` : action.key;
+    setAiBusy(actionId); setSuggestion(null);
     try {
-      const res = await api.ai.docAction(action.key, text);
+      const res = await api.ai.docAction(action.key, text, action.targetLanguage);
       setSuggestion({ action, text: res.suggestion });
       setPanelOpen(true); setMobileAi(true);
     } catch (e: any) {
@@ -1161,9 +1751,18 @@ function Editor({ path }: { path: string }): React.ReactElement {
     const vid = String(v.id ?? v.versionId ?? v.version ?? v.name);
     setRestoring(vid);
     try {
-      await api.files.restoreVersion(path, vid);
+      const restored = await api.files.restoreVersion(path, vid, revisionRef.current);
+      revisionRef.current = restored.revision;
       const r = await api.files.content(path);
+      revisionRef.current = r.revision;
       const raw = r.content ?? '';
+      if (pinnedRef.current) {
+        const refreshed = await refreshOfflineEditable({
+          accountId, kind: 'document', path, title: baseName(path), content: raw,
+          revision: r.revision, serverUpdatedAt: r.modifiedAt,
+        }).catch(() => null);
+        if (refreshed) setOfflineCopy(refreshed);
+      }
       const html = markdown ? markdownToHtml(raw) : sanitizeHtml(raw);
       if (editorRef.current) editorRef.current.innerHTML = html;
       htmlRef.current = html; pendingRef.current = false;
@@ -1186,17 +1785,21 @@ function Editor({ path }: { path: string }): React.ReactElement {
     setRenaming(true);
     try {
       // flush any pending edits to the current path before renaming
-      if (pendingRef.current && editorRef.current) {
-        htmlRef.current = editorRef.current.innerHTML;
-        const payload = markdown ? htmlToMarkdown(htmlRef.current) : htmlRef.current;
-        await api.files.saveContent(path, payload);
-        pendingRef.current = false;
+      if (pendingRef.current || saveInFlightRef.current) {
+        if (editorRef.current) htmlRef.current = editorRef.current.innerHTML;
+        await runSave();
+        if (pendingRef.current || conflictRef.current) {
+          throw new Error('Save or resolve the current changes before renaming.');
+        }
       }
       const newName = base.replace(DOC_EXT_RE, '') + (extOf(path) || '.cbxdoc');
       const res = await api.files.rename(path, newName);
+      const offlineMoved = !pinnedRef.current || !!await moveOfflineEditable(
+        accountId, 'document', path, res.path, baseName(res.path),
+      ).catch(() => null);
       pendingRef.current = false; // don't let the unmount effect re-save the old path
       setRenameOpen(false);
-      toast('Document renamed', 'success');
+      toast('Document renamed', offlineMoved ? 'success' : 'warning', offlineMoved ? undefined : 'The browser could not update its offline copy. Re-pin the renamed document when local storage is available.');
       // Carry this doc's old path(s) forward so its version history (keyed by
       // path server-side) stays reachable after the rename.
       const carried = [path, ...prevPaths].filter((p, i, a) => p !== res.path && a.indexOf(p) === i);
@@ -1209,10 +1812,15 @@ function Editor({ path }: { path: string }): React.ReactElement {
     }
   }
   async function confirmDelete() {
+    if (offlineCopy?.dirty) {
+      toast('This document has unsynced offline changes', 'warning', 'Sync or resolve them before deleting the document.');
+      return;
+    }
     try {
       pendingRef.current = false; // don't re-save on unmount
       await api.files.delete([path]);
-      toast('Document deleted', 'success');
+      const offlineRemoved = !pinnedRef.current || await removeOfflineEditable(accountId, 'document', path).catch(() => false);
+      toast('Document deleted', offlineRemoved ? 'success' : 'warning', offlineRemoved ? undefined : 'The browser could not remove its offline copy.');
       nav('/documents');
     } catch (e: any) {
       toast('Delete failed', 'error', e?.message);
@@ -1237,9 +1845,24 @@ function Editor({ path }: { path: string }): React.ReactElement {
 
   const saveLabel =
     saveState === 'saving' ? 'Saving…' :
+    saveState === 'offline' ? 'Saved on this device · waiting to sync' :
     saveState === 'error' ? 'Save failed' :
     saveState === 'saved' ? (lastSaved ? `Saved ${lastSaved.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Saved ✓') :
     'All changes saved';
+
+  const translationReady = aiMode !== 'disabled' && !!translationPrefs && !!translationCaps &&
+    (translationPrefs.provider === 'external' ? translationCaps.externalAllowed : translationCaps.localConfigured);
+  const translationActions: AiAction[] = (translationPrefs?.languages || []).map(targetLanguage => ({
+    key: 'translate',
+    targetLanguage,
+    label: `Translate to ${translatedLanguageName(targetLanguage)}`,
+    icon: <Icon.Cloud size={15} />,
+    desc: translationPrefs?.provider === 'external'
+      ? translationCaps?.externalName || 'Configured cloud provider'
+      : translationCaps?.localName || 'Configured local provider',
+    replace: true,
+  }));
+  const visibleAiActions = [...AI_ACTIONS.slice(0, 8), ...translationActions, ...AI_ACTIONS.slice(8)];
 
   // shared AI body
   const aiBody = (
@@ -1270,19 +1893,25 @@ function Editor({ path }: { path: string }): React.ReactElement {
           <>
             <p className="text-[11px] uppercase tracking-wide text-slate-500 font-medium px-1 mb-2">Select text, or run on the whole document</p>
             <div className="space-y-1">
-              {AI_ACTIONS.map((a) => (
-                <button key={a.key} onClick={() => runAi(a)} disabled={!!aiBusy || aiAvailable === false}
+              {visibleAiActions.map((a) => {
+                const actionId = a.targetLanguage ? `${a.key}:${a.targetLanguage}` : a.key;
+                const disabled = !!aiBusy || (a.key === 'translate' ? !translationReady : aiAvailable === false);
+                return <button key={actionId} onClick={() => runAi(a)} disabled={disabled}
                   className="w-full flex items-center gap-3 px-2.5 py-2 rounded-xl hover:bg-white/[0.05] transition-colors text-left disabled:opacity-40 disabled:cursor-not-allowed group">
                   <span className="w-8 h-8 rounded-lg grid place-items-center bg-white/[0.05] text-slate-300 group-hover:text-brand-300 group-hover:bg-brand-500/15 transition-colors shrink-0">
-                    {aiBusy === a.key ? <Spinner size={14} /> : a.icon}
+                    {aiBusy === actionId ? <Spinner size={14} /> : a.icon}
                   </span>
                   <span className="min-w-0">
                     <span className="block text-sm text-white truncate">{a.label}</span>
                     <span className="block text-[11px] muted truncate">{a.desc}</span>
                   </span>
-                </button>
-              ))}
+                </button>;
+              })}
             </div>
+            <button type="button" onClick={() => nav('/settings?tab=ai')}
+              className="mt-3 w-full rounded-lg px-2.5 py-2 text-left text-xs text-brand-300 hover:bg-brand-500/10">
+              Choose translation engine & languages…
+            </button>
           </>
         )}
       </div>
@@ -1302,8 +1931,18 @@ function Editor({ path }: { path: string }): React.ReactElement {
           <h1 className="text-[15px] font-semibold text-white truncate leading-tight">{baseName(path)}</h1>
           <div className="flex items-center gap-1.5 text-xs">
             {saveState === 'saving' && <Spinner size={11} />}
-            <span className={cx('muted hidden sm:inline', saveState === 'error' && 'text-accent-red', saveState === 'saved' && 'text-accent-green')}>{saveLabel}</span>
+            <span className={cx('muted hidden sm:inline', saveState === 'error' && 'text-accent-red', saveState === 'offline' && 'text-accent-amber', saveState === 'saved' && 'text-accent-green')}>{saveLabel}</span>
             <span className="muted sm:hidden">{words.toLocaleString()} words</span>
+            {offlineCopy && saveState !== 'offline' && (
+              <span className={cx('hidden md:flex items-center gap-1', offlineCopy.conflict ? 'text-accent-red' : offlineCopy.dirty ? 'text-accent-amber' : 'text-accent-green')}>
+                <Icon.Download size={11} />{offlineCopy.conflict ? 'Review offline changes' : offlineCopy.dirty ? 'Waiting to sync' : 'Available offline'}
+              </span>
+            )}
+            {!recoveryStorageAvailable && (
+              <span role="status" className="text-accent-amber flex items-center gap-1" title="Browser recovery storage is unavailable. Unsaved changes are protected only after the server save finishes.">
+                <Icon.Warning size={12} /><span className="hidden md:inline">Local recovery unavailable</span>
+              </span>
+            )}
           </div>
         </div>
 
@@ -1316,6 +1955,9 @@ function Editor({ path }: { path: string }): React.ReactElement {
           trigger={<button className="icon-btn shrink-0" title="More"><Icon.More size={17} /></button>}
           items={[
             { label: 'Save now', icon: <Icon.Download size={15} />, onClick: saveNow },
+            { label: offlineCopy ? 'Remove offline copy' : 'Make available offline', icon: offlineCopy ? <Icon.Close size={15} /> : <Icon.Download size={15} />, onClick: () => void toggleEditorOffline() },
+            { label: 'Export as Word (.docx)', icon: <Icon.Download size={15} />, onClick: () => void exportAs('docx') },
+            { label: 'Export as OpenDocument (.odt)', icon: <Icon.Download size={15} />, onClick: () => void exportAs('odt') },
             { label: 'Rename', icon: <Icon.Edit size={15} />, onClick: openRename },
             { label: 'Find & replace', icon: <Icon.Search size={15} />, onClick: () => setFindOpen(true) },
             { label: serif ? 'Sans-serif font' : 'Serif font', icon: <Icon.Edit size={15} />, onClick: () => setSerif((v) => !v) },
@@ -1488,7 +2130,7 @@ function Editor({ path }: { path: string }): React.ReactElement {
       {/* footer */}
       <div className="flex items-center justify-between gap-3 pt-2 mt-1 border-t border-white/[0.06] text-[11px] text-slate-500">
         <span className="tabular-nums">{words.toLocaleString()} words · {chars.toLocaleString()} chars · ~{readMin} min read</span>
-        <span className={cx('sm:hidden', saveState === 'error' && 'text-accent-red', saveState === 'saved' && 'text-accent-green')}>{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved ✓' : saveState === 'error' ? 'Save failed' : ''}</span>
+        <span className={cx('sm:hidden', saveState === 'error' && 'text-accent-red', saveState === 'offline' && 'text-accent-amber', saveState === 'saved' && 'text-accent-green')}>{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved ✓' : saveState === 'offline' ? 'On device · waiting to sync' : saveState === 'error' ? 'Save failed' : ''}</span>
       </div>
 
       {/* mobile AI FAB */}
@@ -1512,6 +2154,28 @@ function Editor({ path }: { path: string }): React.ReactElement {
           </div>
         </div>
       )}
+
+      <Modal open={!!recovery} onClose={() => {}} title="Recover document draft" size="md" dismissible={false}
+        footer={<>
+          <button type="button" className="btn-secondary" disabled={!recovery || resolvingRecovery}
+            onClick={() => recovery && downloadRecoveryDraft(recovery,
+              `${baseName(path)} recovered${extOf(path) || '.html'}`, markdown ? 'text/markdown;charset=utf-8' : 'text/html;charset=utf-8')}>
+            <Icon.Download size={15} />Download draft
+          </button>
+          <button type="button" className="btn-danger" disabled={resolvingRecovery} onClick={() => resolveRecovery('server')}>Discard draft, use server</button>
+          <button type="button" className="btn-primary" disabled={resolvingRecovery} onClick={() => resolveRecovery('mine')}>
+            {resolvingRecovery ? <Spinner size={15} /> : <Icon.Refresh size={15} />}Keep my draft
+          </button>
+        </>}>
+        <div role="alert" className="space-y-3 text-sm text-slate-300">
+          <p>{recoveryStored
+            ? 'A saved recovery draft differs from the current server copy. Nothing will be discarded until you choose.'
+            : 'This draft differs from the current server copy, but browser recovery storage is unavailable. Download it before leaving this page.'}</p>
+          {recovery?.savedAt && <p className="text-xs muted">Draft {recoveryStored ? 'saved' : 'captured'} {formatRelative(recovery.savedAt)}</p>}
+          <p className="text-xs muted">Keeping your draft creates a new version, so the server copy remains available in version history.</p>
+          {recoveryError && <p role="alert" className="text-xs text-accent-red">{recoveryError}</p>}
+        </div>
+      </Modal>
 
       {/* version history */}
       <Modal open={versionsOpen} onClose={() => setVersionsOpen(false)} title="Version history" size="md">

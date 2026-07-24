@@ -1,16 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import QRCode from 'qrcode';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
-import { cx, formatRelative, initials, colorFor } from '../lib/utils';
+import { copyText, cx, formatRelative, initials, colorFor } from '../lib/utils';
 import { useAuth, toast } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, Modal, ConfirmModal, Badge, Spinner } from '../components/ui';
-import type { User, UserFeatures, AuditEvent, Role, AiMode } from '../lib/model';
+import type { User, UserFeatures, AuditEvent, Role, AiMode, HouseholdInvite } from '../lib/model';
 
 type Tab = 'users' | 'settings' | 'audit';
 
 const ROLE_COLOR: Record<Role, 'brand' | 'slate'> = { admin: 'brand', user: 'slate' };
 const AI_MODES: { value: AiMode; label: string }[] = [
-  { value: 'local_only', label: 'Local only' },
+  { value: 'local_only', label: 'Local provider only' },
   { value: 'ask_before_send', label: 'Ask before send' },
   { value: 'external_allowed', label: 'External allowed' },
   { value: 'disabled', label: 'Disabled' },
@@ -156,13 +157,80 @@ function UserModal({ open, onClose, editing, onSaved }: { open: boolean; onClose
           <div className="grid sm:grid-cols-2 gap-2">
             {ACCESS_FEATURES.map(feature => <div key={feature.key} className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
               <div className="min-w-0"><p className="text-sm text-slate-200">{feature.label}</p><p className="text-[11px] text-slate-500 truncate">{feature.desc}</p></div>
-              <Toggle on={form.access[feature.key]} onChange={v => set('access', { ...form.access, [feature.key]: v })} />
+              <Toggle label={`${feature.label} access`} on={form.access[feature.key]} onChange={v => set('access', { ...form.access, [feature.key]: v })} />
             </div>)}
           </div>
         </div>
       </div>
     </Modal>
   );
+}
+
+interface InviteForm { displayName: string; email: string; role: Role; quotaGb: string; aiMode: AiMode; expiresInHours: string; access: Record<AccessKey, boolean>; }
+const emptyInviteForm = (): InviteForm => ({ displayName: '', email: '', role: 'user', quotaGb: '', aiMode: 'ask_before_send', expiresInHours: '48', access: defaultAccess() });
+
+function InviteModal({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
+  const [form, setForm] = useState<InviteForm>(() => emptyInviteForm());
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<{ url: string; qr: string; invite: HouseholdInvite } | null>(null);
+  const set = <K extends keyof InviteForm>(key: K, value: InviteForm[K]) => setForm(old => ({ ...old, [key]: value }));
+
+  useEffect(() => {
+    if (!open) return;
+    setForm(emptyInviteForm());
+    setResult(null);
+  }, [open]);
+
+  const create = async () => {
+    setSaving(true);
+    try {
+      const quota = form.quotaGb.trim() === '' ? null : Math.round(Number(form.quotaGb) * 1e9);
+      const created = await api.admin.createInvite({
+        displayName: form.displayName.trim(), email: form.email.trim() || null, role: form.role,
+        storageQuotaBytes: quota, aiMode: form.aiMode, features: form.access,
+        expiresInHours: Number(form.expiresInHours),
+      });
+      const url = new URL(`/join/${created.token}`, window.location.origin).toString();
+      const qr = await QRCode.toDataURL(url, { width: 220, margin: 1, errorCorrectionLevel: 'M' });
+      setResult({ url, qr, invite: created.invite });
+      onCreated();
+    } catch (error: any) { toast('Could not create invitation', 'error', error?.message); }
+    finally { setSaving(false); }
+  };
+
+  const close = () => { if (!saving) onClose(); };
+  if (result) return <Modal open={open} onClose={close} title="Invitation ready" size="md" dismissible={!saving}>
+    <div className="text-center">
+      <div className="mx-auto w-fit rounded-2xl bg-white p-3"><img src={result.qr} alt="QR code for the one-time invitation" className="h-[220px] w-[220px]" /></div>
+      <p className="mt-4 text-sm text-slate-300">Have {result.invite.displayName || 'the new member'} scan this code, or securely send the link below.</p>
+      <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/[0.08] bg-black/20 p-2">
+        <input className="min-w-0 flex-1 bg-transparent px-2 text-xs text-slate-300 outline-none" value={result.url} readOnly aria-label="Invitation link" />
+        <button className="btn-secondary shrink-0 !py-1.5" onClick={async () => {
+          const copied = await copyText(result.url);
+          toast(copied ? 'Invitation link copied' : 'Copy failed', copied ? 'success' : 'error');
+        }}><Icon.Copy size={14} /> Copy</button>
+      </div>
+      <div className="mt-4 rounded-xl border border-accent-amber/20 bg-accent-amber/[0.06] p-3 text-left text-xs text-amber-100">The secret link is shown only now. It expires {new Date(result.invite.expiresAt).toLocaleString()} and stops working immediately after one account is created.</div>
+      <button className="btn-primary mt-5 w-full" onClick={close}>Done</button>
+    </div>
+  </Modal>;
+
+  return <Modal open={open} onClose={close} title="Invite a household member" size="lg" dismissible={!saving}
+    footer={<><button className="btn-ghost" disabled={saving} onClick={close}>Cancel</button><button className="btn-primary" disabled={saving} onClick={() => void create()}>{saving && <Spinner size={15} />} Create secure invitation</button></>}>
+    <p className="mb-5 text-sm muted">They choose their own username and password. Aerie stores only a hash of the one-time invitation secret.</p>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field label="Display name" hint="Optional; they can change it before joining"><input className="input" value={form.displayName} onChange={event => set('displayName', event.target.value)} maxLength={120} placeholder="Jane Doe" /></Field>
+      <Field label="Email" hint="Optional label; Aerie does not send email"><input className="input" type="email" value={form.email} onChange={event => set('email', event.target.value)} placeholder="jane@home.local" /></Field>
+      <Field label="Role"><Select value={form.role} onChange={value => set('role', value as Role)} options={[{ value: 'user', label: 'User' }, { value: 'admin', label: 'Administrator' }]} /></Field>
+      <Field label="Invitation expires"><Select value={form.expiresInHours} onChange={value => set('expiresInHours', value)} options={[{ value: '24', label: 'In 24 hours' }, { value: '48', label: 'In 2 days' }, { value: '168', label: 'In 7 days' }, { value: '720', label: 'In 30 days' }]} /></Field>
+      <Field label="Storage quota (GB)" hint="Blank = unlimited"><input className="input" type="number" min={0} value={form.quotaGb} onChange={event => set('quotaGb', event.target.value)} placeholder="Unlimited" /></Field>
+      <Field label="AI mode"><Select value={form.aiMode} onChange={value => set('aiMode', value as AiMode)} options={AI_MODES} /></Field>
+      <div className="sm:col-span-2">
+        <p className="mb-2 text-sm font-medium text-slate-200">Library access</p>
+        <div className="grid gap-2 sm:grid-cols-2">{ACCESS_FEATURES.map(feature => <div key={feature.key} className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2.5"><div className="min-w-0"><p className="text-sm text-slate-200">{feature.label}</p><p className="truncate text-[11px] text-slate-500">{feature.desc}</p></div><Toggle label={`${feature.label} access`} on={form.access[feature.key]} onChange={value => set('access', { ...form.access, [feature.key]: value })} /></div>)}</div>
+      </div>
+    </div>
+  </Modal>;
 }
 
 function UserAvatar({ u }: { u: User }) {
@@ -177,13 +245,19 @@ function UserAvatar({ u }: { u: User }) {
 
 function UsersTab({ me }: { me: User }) {
   const [users, setUsers] = useState<User[] | null>(null);
+  const [invites, setInvites] = useState<HouseholdInvite[]>([]);
   const [q, setQ] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
-  const [toDelete, setToDelete] = useState<User | null>(null);
+  const [toDeactivate, setToDeactivate] = useState<User | null>(null);
+  const [restoring, setRestoring] = useState<number | null>(null);
 
   async function load() {
-    try { setUsers(await api.admin.users()); }
+    try {
+      const [members, pending] = await Promise.all([api.admin.users(), api.admin.invites()]);
+      setUsers(members); setInvites(pending.items || []);
+    }
     catch { setUsers([]); toast('Could not load users', 'error'); }
   }
   useEffect(() => { load(); }, []);
@@ -195,30 +269,61 @@ function UsersTab({ me }: { me: User }) {
     return users.filter(u => [u.displayName, u.username, u.email].filter(Boolean).some(x => x!.toLowerCase().includes(s)));
   }, [users, q]);
 
-  async function doDelete() {
-    if (!toDelete) return;
+  async function doDeactivate() {
+    if (!toDeactivate) return;
     try {
-      await api.admin.deleteUser(toDelete.id);
-      toast('User removed', 'success', `${toDelete.displayName} no longer has access.`);
-      setToDelete(null);
+      await api.admin.deactivateUser(toDeactivate.id);
+      toast('Account deactivated', 'success', `${toDeactivate.displayName} no longer has access. Their data is preserved.`);
+      setToDeactivate(null);
       load();
-    } catch (e: any) { toast('Delete failed', 'error', e?.message); }
+    } catch (e: any) { toast('Deactivation failed', 'error', e?.message); }
+  }
+
+  async function restore(user: User) {
+    setRestoring(user.id);
+    try {
+      await api.admin.restoreUser(user.id);
+      toast('Account restored', 'success', `${user.displayName} can sign in again.`);
+      load();
+    } catch (e: any) { toast('Restore failed', 'error', e?.message); }
+    finally { setRestoring(null); }
+  }
+
+  async function revokeInvite(invite: HouseholdInvite) {
+    try {
+      await api.admin.revokeInvite(invite.id);
+      setInvites(old => old.map(item => item.id === invite.id ? { ...item, status: 'revoked', revokedAt: new Date().toISOString() } : item));
+      toast('Invitation revoked', 'success');
+    } catch (error: any) { toast('Could not revoke invitation', 'error', error?.message); }
   }
 
   if (!users) return <PageLoader />;
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center gap-3 mb-4">
-        <div className="relative flex-1 max-w-sm">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="relative min-w-[14rem] flex-1 sm:max-w-sm">
           <Icon.Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <input className="input pl-9" placeholder="Search users…" value={q} onChange={e => setQ(e.target.value)} />
         </div>
-        <div className="muted text-sm ml-auto hidden sm:block">{users.length} account{users.length !== 1 && 's'}</div>
+        <div className="muted text-sm ml-auto hidden sm:block">
+          {users.filter(user => !user.disabledAt).length} active
+          {users.some(user => user.disabledAt) ? ` · ${users.filter(user => user.disabledAt).length} deactivated` : ''}
+        </div>
         <button className="btn-primary" onClick={() => { setEditing(null); setModalOpen(true); }}>
           <Icon.Plus size={16} /> Add user
         </button>
+        <button className="btn-secondary" onClick={() => setInviteOpen(true)}><Icon.Link size={16} /> Invite</button>
       </div>
+
+      {invites.some(invite => invite.status === 'active') && <section className="card mb-5 p-4">
+        <div className="mb-3"><h2 className="text-sm font-semibold text-white">Pending invitations</h2><p className="text-xs muted">One-time links waiting for a household member.</p></div>
+        <div className="space-y-2">{invites.filter(invite => invite.status === 'active').map(invite => <div key={invite.id} className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-500/12 text-brand-300"><Icon.Link size={16} /></div>
+          <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-white">{invite.displayName || invite.email || 'Household member'}</p><p className="text-xs muted">{invite.role} · expires {new Date(invite.expiresAt).toLocaleString()}</p></div>
+          <button className="btn-ghost !py-1.5 text-accent-red" onClick={() => void revokeInvite(invite)}>Revoke</button>
+        </div>)}</div>
+      </section>}
 
       {filtered.length === 0 ? (
         <EmptyState icon={<Icon.Admin size={28} />} title="No users found" subtitle="Try a different search, or add a new account." />
@@ -227,13 +332,14 @@ function UsersTab({ me }: { me: User }) {
         {/* Mobile: stacked cards */}
         <div className="md:hidden space-y-3">
           {filtered.map(u => (
-            <div key={u.id} className="card p-4">
+            <div key={u.id} className={cx('card p-4', u.disabledAt && 'opacity-70')}>
               <div className="flex items-center gap-3">
                 <UserAvatar u={u} />
                 <div className="min-w-0 flex-1">
                   <div className="font-medium text-white flex items-center gap-2">
                     <span className="truncate">{u.displayName}</span>
                     {u.id === me.id && <span className="text-[10px] uppercase tracking-wide text-brand-400 bg-brand-500/10 px-1.5 py-0.5 rounded shrink-0">You</span>}
+                    {u.disabledAt && <span className="text-[10px] uppercase tracking-wide text-slate-300 bg-slate-500/15 px-1.5 py-0.5 rounded shrink-0">Deactivated</span>}
                   </div>
                   <div className="text-xs text-slate-500 font-mono truncate">@{u.username}{u.email ? ` · ${u.email}` : ''}</div>
                 </div>
@@ -241,11 +347,18 @@ function UsersTab({ me }: { me: User }) {
                   <button className="icon-btn" title="Edit" onClick={() => { setEditing(u); setModalOpen(true); }}>
                     <Icon.Edit size={16} />
                   </button>
-                  <button className="icon-btn text-slate-400 hover:text-accent-red disabled:opacity-30"
-                    title={u.id === me.id ? "You can't delete yourself" : 'Delete'} disabled={u.id === me.id}
-                    onClick={() => setToDelete(u)}>
-                    <Icon.Trash size={16} />
-                  </button>
+                  {u.disabledAt ? (
+                    <button className="icon-btn text-slate-400 hover:text-accent-green disabled:opacity-30"
+                      title="Restore account" disabled={restoring === u.id} onClick={() => restore(u)}>
+                      <Icon.Refresh size={16} />
+                    </button>
+                  ) : (
+                    <button className="icon-btn text-slate-400 hover:text-accent-red disabled:opacity-30"
+                      title={u.id === me.id ? "You can't deactivate yourself" : 'Deactivate account'} disabled={u.id === me.id}
+                      onClick={() => setToDeactivate(u)}>
+                      <Icon.Pause size={16} />
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -281,6 +394,7 @@ function UsersTab({ me }: { me: User }) {
                           <div className="font-medium text-white flex items-center gap-2">
                             {u.displayName}
                             {u.id === me.id && <span className="text-[10px] uppercase tracking-wide text-brand-400 bg-brand-500/10 px-1.5 py-0.5 rounded">You</span>}
+                            {u.disabledAt && <span className="text-[10px] uppercase tracking-wide text-slate-300 bg-slate-500/15 px-1.5 py-0.5 rounded">Deactivated</span>}
                           </div>
                         </div>
                       </div>
@@ -295,11 +409,18 @@ function UsersTab({ me }: { me: User }) {
                         <button className="icon-btn" title="Edit" onClick={() => { setEditing(u); setModalOpen(true); }}>
                           <Icon.Edit size={16} />
                         </button>
-                        <button className="icon-btn text-slate-400 hover:text-accent-red disabled:opacity-30 disabled:hover:text-slate-400"
-                          title={u.id === me.id ? "You can't delete yourself" : 'Delete'} disabled={u.id === me.id}
-                          onClick={() => setToDelete(u)}>
-                          <Icon.Trash size={16} />
-                        </button>
+                        {u.disabledAt ? (
+                          <button className="icon-btn text-slate-400 hover:text-accent-green disabled:opacity-30"
+                            title="Restore account" disabled={restoring === u.id} onClick={() => restore(u)}>
+                            <Icon.Refresh size={16} />
+                          </button>
+                        ) : (
+                          <button className="icon-btn text-slate-400 hover:text-accent-red disabled:opacity-30 disabled:hover:text-slate-400"
+                            title={u.id === me.id ? "You can't deactivate yourself" : 'Deactivate account'} disabled={u.id === me.id}
+                            onClick={() => setToDeactivate(u)}>
+                            <Icon.Pause size={16} />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -312,9 +433,10 @@ function UsersTab({ me }: { me: User }) {
       )}
 
       <UserModal open={modalOpen} onClose={() => setModalOpen(false)} editing={editing} onSaved={load} />
-      <ConfirmModal open={!!toDelete} onClose={() => setToDelete(null)} onConfirm={doDelete} danger
-        title="Delete user?" confirmLabel="Delete user"
-        message={`This permanently removes ${toDelete?.displayName}'s account and revokes all access. Their files are not deleted.`} />
+      <InviteModal open={inviteOpen} onClose={() => setInviteOpen(false)} onCreated={load} />
+      <ConfirmModal open={!!toDeactivate} onClose={() => setToDeactivate(null)} onConfirm={doDeactivate} danger
+        title="Deactivate account?" confirmLabel="Deactivate account"
+        message={`${toDeactivate?.displayName} will be signed out immediately. Public shares and background work will pause, while files, snapshots, settings, and history remain intact for restoration.`} />
     </div>
   );
 }
@@ -325,26 +447,34 @@ function UsersTab({ me }: { me: User }) {
 interface SettingsShape {
   publicSharingEnabled: boolean;
   externalAiEnabled: boolean;
-  faceRecognition: boolean;
   locationIndexing: boolean;
   maxUploadMb: number;
   allowedFileTypes: string;
 }
 const SETTINGS_DEFAULTS: SettingsShape = {
-  publicSharingEnabled: false, externalAiEnabled: false, faceRecognition: false,
-  locationIndexing: false, maxUploadMb: 2048, allowedFileTypes: '*',
+  publicSharingEnabled: false, externalAiEnabled: false, locationIndexing: false,
+  maxUploadMb: 2048, allowedFileTypes: '*',
 };
 
+function settingsFromApi(value: any): SettingsShape {
+  return {
+    publicSharingEnabled: value?.publicSharingEnabled ?? SETTINGS_DEFAULTS.publicSharingEnabled,
+    externalAiEnabled: value?.externalAiEnabled ?? SETTINGS_DEFAULTS.externalAiEnabled,
+    locationIndexing: value?.locationIndexing ?? SETTINGS_DEFAULTS.locationIndexing,
+    maxUploadMb: value?.maxUploadMb ?? SETTINGS_DEFAULTS.maxUploadMb,
+    allowedFileTypes: value?.allowedFileTypes ?? SETTINGS_DEFAULTS.allowedFileTypes,
+  };
+}
+
 const TOGGLES: { key: keyof SettingsShape; icon: keyof typeof Icon; title: string; desc: string }[] = [
-  { key: 'publicSharingEnabled', icon: 'Share', title: 'Public sharing links', desc: 'Allow members to create links that anyone with the URL can open. Off keeps every file strictly inside your household.' },
-  { key: 'externalAiEnabled', icon: 'Sparkles', title: 'External AI providers', desc: 'Permit AI features to reach cloud models when a user opts in. Off keeps all inference on your own hardware — nothing leaves the box.' },
-  { key: 'faceRecognition', icon: 'Eye', title: 'Face recognition', desc: 'Cluster photos by the people in them. Faces are processed and stored locally, never uploaded.' },
-  { key: 'locationIndexing', icon: 'Cloud', title: 'Location indexing', desc: 'Read GPS metadata to build a map and place albums. Coordinates stay on-device.' },
+  { key: 'publicSharingEnabled', icon: 'Share', title: 'Public sharing links', desc: 'Allow members to create links that unauthenticated visitors can open. Off prevents new public-link access.' },
+  { key: 'externalAiEnabled', icon: 'Sparkles', title: 'External AI providers', desc: 'Permit language-AI features to use configured cloud models when a member opts in. Off restricts those requests to the configured local provider endpoint.' },
+  { key: 'locationIndexing', icon: 'Cloud', title: 'Location indexing', desc: 'Read GPS metadata to build a map and place albums. Coordinates remain in Aerie and are cleared from the index when this is disabled.' },
 ];
 
-function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ label, on, onChange }: { label: string; on: boolean; onChange: (v: boolean) => void }) {
   return (
-    <button type="button" onClick={() => onChange(!on)} role="switch" aria-checked={on}
+    <button type="button" onClick={() => onChange(!on)} role="switch" aria-checked={on} aria-label={label}
       className={cx('relative w-11 h-6 rounded-full transition-colors shrink-0', on ? 'bg-brand-500' : 'bg-ink-700')}>
       <span className={cx('absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform', on && 'translate-x-5')} />
     </button>
@@ -360,7 +490,7 @@ function SettingsTab() {
 
   useEffect(() => {
     api.admin.settings()
-      .then((s: any) => { const merged = { ...SETTINGS_DEFAULTS, ...(s || {}) }; setSettings(merged); setBaseline(merged); })
+      .then((s: any) => { const merged = settingsFromApi(s); setSettings(merged); setBaseline(merged); })
       .catch(() => { const d = { ...SETTINGS_DEFAULTS }; setSettings(d); setBaseline(d); });
   }, []);
 
@@ -406,10 +536,22 @@ function SettingsTab() {
                 <div className="font-medium text-white">{t.title}</div>
                 <p className="muted text-sm mt-0.5 leading-relaxed">{t.desc}</p>
               </div>
-              <Toggle on={on} onChange={v => set(t.key, v)} />
+              <Toggle label={t.title} on={on} onChange={v => set(t.key, v)} />
             </div>
           );
         })}
+        <div className="flex items-start gap-4 p-4 rounded-xl border-t border-white/[0.04]">
+          <div className="w-10 h-10 rounded-xl grid place-items-center shrink-0 bg-ink-800 text-slate-500">
+            <Icon.Eye size={18} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-white">Face recognition</span>
+              <Badge color="slate">Unavailable</Badge>
+            </div>
+            <p className="muted text-sm mt-0.5 leading-relaxed">This release does not include face detection or clustering, so there is no setting that would imply it is active.</p>
+          </div>
+        </div>
       </div>
 
       <div className="card p-5 grid sm:grid-cols-2 gap-5">
@@ -428,7 +570,7 @@ function SettingsTab() {
         <button className="btn-primary" onClick={save} disabled={saving}>
           {saving && <Spinner size={16} />} Save settings
         </button>
-        <span className="muted text-xs flex items-center gap-1.5"><Icon.Shield size={13} /> Privacy-first defaults keep everything on your hardware.</span>
+        <span className="muted text-xs flex items-center gap-1.5"><Icon.Shield size={13} /> Privacy-first defaults minimize external data sharing.</span>
       </div>
     </div>
   );
@@ -441,7 +583,8 @@ function actionMeta(action: string): { icon: keyof typeof Icon; color: string } 
   const a = action.toLowerCase();
   if (a.includes('login') || a.includes('auth')) return { icon: 'Shield', color: '#6366f1' };
   if (a.includes('logout')) return { icon: 'Logout', color: '#64748b' };
-  if (a.includes('delete') || a.includes('remove') || a.includes('purge')) return { icon: 'Trash', color: '#ef4444' };
+  if (a.includes('delete') || a.includes('remove') || a.includes('purge') || a.includes('deactiv')) return { icon: 'Trash', color: '#ef4444' };
+  if (a.includes('restore')) return { icon: 'Refresh', color: '#10b981' };
   if (a.includes('create') || a.includes('add') || a.includes('mkdir')) return { icon: 'Plus', color: '#10b981' };
   if (a.includes('upload')) return { icon: 'Upload', color: '#06b6d4' };
   if (a.includes('download')) return { icon: 'Download', color: '#06b6d4' };
@@ -479,7 +622,8 @@ const settingLabel = (k: string) => SETTING_LABELS[k] || humanize(k.replace(/([a
 function formatTarget(e: AuditEvent, userMap: Record<number, string>): React.ReactNode {
   const t = e.target;
   if (!t) return <span className="text-slate-600">—</span>;
-  if (e.action === 'admin_user_updated' || e.action === 'admin_user_deleted') {
+  if (e.action === 'admin_user_updated' || e.action === 'admin_user_deleted'
+    || e.action === 'admin_user_deactivated' || e.action === 'admin_user_restored') {
     const id = Number(t);
     if (Number.isInteger(id) && String(id) === t.trim()) {
       return userMap[id] || `User #${id}`;

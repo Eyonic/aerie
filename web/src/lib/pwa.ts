@@ -17,7 +17,10 @@ export const pwa = {
   isStandalone: () =>
     window.matchMedia('(display-mode: standalone)').matches ||
     (window.navigator as any).standalone === true,
-  onChange: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn); },
+  onChange: (fn: () => void) => {
+    listeners.add(fn);
+    return () => { listeners.delete(fn); };
+  },
   install: async (): Promise<boolean> => {
     if (!deferred) return false;
     deferred.prompt();

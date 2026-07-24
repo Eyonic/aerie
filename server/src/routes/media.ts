@@ -5,11 +5,27 @@ import { requireAdmin, type AuthedRequest } from '../lib/auth.js';
 import { db, audit } from '../lib/db.js';
 import * as jf from '../services/jellyfin.js';
 import * as progress from '../services/progress.js';
+import {
+  progressItem, reconcileMissingItem, reconcileMissingSeries,
+} from '../services/jellyfin-progress.js';
 import { cachedWebp, fetchImage, imageWidth } from '../services/image-cache.js';
 import { jellyfinSource, videoFrame } from '../services/video-thumbnail.js';
 import type { MediaItem } from '../lib/model.js';
+import {
+  copyMediaHeaders, mediaBytes, mediaText, openMediaStream, pipeMediaBody,
+} from '../services/media-proxy.js';
+import { config } from '../config.js';
+import {
+  credentialFreeHlsTarget, HlsCapabilityStore, rewriteHlsPlaylist, withJellyfinHlsAuth,
+} from '../services/hls-capability.js';
+import {
+  adaptiveMasterPlaylist, buildPlaybackPlan, chooseVideoSource, parsePlaybackRequest,
+  playbackAudioBitrate, playbackAudioChannels, playbackVariants, variantFromRequest,
+  type PlaybackRequest, type PlaybackVariant, type VideoMediaSource,
+} from '../services/video-playback.js';
 
 const r = Router();
+const hlsCapabilities = new HlsCapabilityStore(config.jwtSecret);
 const itemTypeCache = new Map<string, { type: string; expires: number }>();
 function featureForType(type: string): 'videos' | 'movies' | 'tv' | 'music' {
   if (type === 'Movie') return 'movies';
@@ -38,7 +54,7 @@ r.use(async (req: AuthedRequest, res, next) => {
   }
   try {
     const parts = p.split('/').filter(Boolean);
-    const dynamic = ['item', 'stream', 'offline', 'streams', 'hls', 'image', 'preview', 'similar', 'subtitle'].includes(parts[0]);
+    const dynamic = ['item', 'playback', 'direct', 'stream', 'offline', 'streams', 'hls', 'image', 'preview', 'similar', 'subtitle'].includes(parts[0]);
     const id = dynamic ? parts[1] : (p === '/progress' || p === '/played') ? String(req.body?.id || '') : '';
     if (id && !await itemAllowed(req, id)) return res.status(403).json({ error: 'feature_disabled' });
     next();
@@ -103,10 +119,10 @@ async function pagedLibrary(req: AuthedRequest, type: string, defaults: Record<s
 async function resumeItems(userId: number, media: 'video' | 'audio', limit = 20): Promise<MediaItem[]> {
   const rows = progress.resume(userId, media, limit);
   const items = await Promise.all(rows.map(async row => {
-    try {
-      const item = await jf.itemDetail(row.itemId);
-      return overlayItem(item, { positionTicks: row.positionTicks, durationTicks: row.durationTicks, played: false });
-    } catch { return null; }
+    const item = await progressItem(userId, row.itemId);
+    return item
+      ? overlayItem(item, { positionTicks: row.positionTicks, durationTicks: row.durationTicks, played: false })
+      : null;
   }));
   return items.filter(Boolean) as MediaItem[];
 }
@@ -121,6 +137,12 @@ r.get('/movies', async (req: AuthedRequest, res, next) => {
 r.get('/series', async (req: AuthedRequest, res, next) => {
   try { res.json(req.query.paged ? await pagedLibrary(req, 'Series', { SortBy: 'SortName' }) : overlayItems(req.user!.id, await libraryItems(req, 'Series', { SortBy: 'SortName' }))); }
   catch (e) { if (!jf.configured()) return res.json([]); next(e); }
+});
+r.get('/series/:id/episodes', async (req: AuthedRequest, res, next) => {
+  try {
+    if (req.user!.features?.tv === false) return res.status(403).json({ error: 'feature_disabled' });
+    res.json(overlayItems(req.user!.id, await jf.episodes(String(req.params.id))));
+  } catch (e) { next(e); }
 });
 
 // Music: artists / albums / songs
@@ -239,6 +261,13 @@ r.get('/preview/:id', async (req, res) => {
   } catch { res.status(204).end(); }
 });
 
+r.get('/item/:id/chapters', async (req: AuthedRequest, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    res.json({ chapters: await jf.chapters(String(req.params.id)) });
+  } catch (e) { next(e); }
+});
+
 r.get('/item/:id/segments', async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
@@ -339,38 +368,131 @@ r.get('/collections/:id/items', async (req: AuthedRequest, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Rewrite every URL in an HLS playlist so sub-playlists + segments route back
-// through our proxy (browser never talks to Jellyfin directly).
-function proxifyPlaylist(text: string, baseAbsUrl: string, id: string): string {
-  const enc = (abs: string) => `/api/media/hls/${id}?p=${encodeURIComponent(Buffer.from(abs).toString('base64url'))}`;
-  return text.split('\n').map(line => {
-    const t = line.trim();
-    if (!t) return line;
-    if (t.startsWith('#')) {
-      if (t.includes('URI="')) return line.replace(/URI="([^"]+)"/g, (_m, u) => `URI="${enc(new URL(u, baseAbsUrl).toString())}"`);
-      return line;
-    }
-    try { return enc(new URL(t, baseAbsUrl).toString()); } catch { return line; }
-  }).join('\n');
-}
-
 async function pipeStream(req: AuthedRequest, res: any, target: string) {
   const range = req.headers.range;
-  const upstream = await fetch(target, { headers: range ? { Range: range } : {} });
-  res.status(upstream.status);
-  upstream.headers.forEach((v: string, k: string) => {
-    if (['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control'].includes(k)) res.setHeader(k, v);
-  });
-  if (!upstream.body) return res.end();
-  const reader = upstream.body.getReader();
-  const pump = async () => {
-    while (true) { const { done, value } = await reader.read(); if (done) break; res.write(Buffer.from(value)); }
-    res.end();
-  };
-  pump().catch(() => res.end());
+  const opened = await openMediaStream(target, jf.jellyfinBase(), range ? { Range: range } : {});
+  if (opened.response.status < 200 || opened.response.status >= 300) {
+    opened.controller.abort();
+    if (opened.response.status === 404) progress.remove(req.user!.id, String(req.params.id || ''));
+    return res.status(opened.response.status === 404 ? 404 : 503).json({ error: 'stream_unavailable' });
+  }
+  copyMediaHeaders(opened.response, res);
+  await pipeMediaBody(req, res, opened);
 }
 
-// Stream entrypoint: video -> rewritten HLS master; audio -> progressive stream.
+function playbackRequest(req: AuthedRequest): PlaybackRequest {
+  return parsePlaybackRequest(req.query as Record<string, unknown>);
+}
+
+async function playbackSource(id: string, request: PlaybackRequest, evaluateProfile = false): Promise<VideoMediaSource> {
+  const sources = await jf.videoPlaybackSources(id, evaluateProfile ? request : undefined);
+  return chooseVideoSource(sources, request);
+}
+
+function jellyfinHlsMaster(id: string, source: VideoMediaSource, request: PlaybackRequest,
+  variant: PlaybackVariant): URL {
+  const target = new URL(`${jf.jellyfinBase()}/Videos/${encodeURIComponent(id)}/master.m3u8`);
+  target.searchParams.set('api_key', jf.jellyfinKey());
+  target.searchParams.set('MediaSourceId', source.id);
+  target.searchParams.set('VideoCodec', 'h264');
+  target.searchParams.set('AudioCodec', 'aac');
+  target.searchParams.set('TranscodingMaxAudioChannels', String(request.capabilities.maxAudioChannels));
+  target.searchParams.set('MaxAudioChannels', String(request.capabilities.maxAudioChannels));
+  target.searchParams.set('SegmentContainer', 'ts');
+  target.searchParams.set('MinSegments', '1');
+  target.searchParams.set('MaxStreamingBitrate', String(variant.bitrate));
+  target.searchParams.set('VideoBitrate', String(variant.videoBitrate));
+  target.searchParams.set('AudioBitrate', String(playbackAudioBitrate(source, request)));
+  target.searchParams.set('MaxHeight', String(variant.height || source.video.height || 1080));
+  if (variant.width) target.searchParams.set('MaxWidth', String(variant.width));
+  target.searchParams.set('EnableAutoStreamCopy', 'True');
+  target.searchParams.set('AllowVideoStreamCopy', 'True');
+  target.searchParams.set('AllowAudioStreamCopy', 'True');
+  // A distinct session is required for audio-track and quality changes; Jellyfin
+  // otherwise may attach to an older transcode with different parameters.
+  target.searchParams.set('PlaySessionId', crypto.randomBytes(8).toString('hex'));
+  if (!request.nativeHls) target.searchParams.set('BreakOnNonKeyFrames', 'True');
+  if (request.audioStreamIndex !== null) target.searchParams.set('AudioStreamIndex', String(request.audioStreamIndex));
+  return target;
+}
+
+function firstPlaylistTarget(text: string, masterUrl: URL): URL | null {
+  for (const line of text.split(/\r?\n/)) {
+    const value = line.trim();
+    if (value && !value.startsWith('#')) return new URL(value, masterUrl);
+  }
+  return null;
+}
+
+async function sendJellyfinHls(req: AuthedRequest, res: any, id: string, source: VideoMediaSource,
+  request: PlaybackRequest, variant: PlaybackVariant, mediaPlaylist: boolean) {
+  const base = jf.jellyfinBase();
+  const masterUrl = jellyfinHlsMaster(id, source, request, variant);
+  const upstream = await mediaText(masterUrl, base, { timeoutMs: 15_000, maxBytes: 2 * 1024 * 1024, requireOk: false });
+  if (upstream.status < 200 || upstream.status >= 300) {
+    if (upstream.status === 404) progress.remove(req.user!.id, id);
+    return res.status(upstream.status === 404 ? 404 : 503).json({ error: 'stream_unavailable' });
+  }
+
+  let text = upstream.body;
+  let playlistBase: string | URL = masterUrl;
+  if (mediaPlaylist && !/^#EXTINF:/m.test(text)) {
+    const child = firstPlaylistTarget(text, masterUrl);
+    if (!child) return res.status(503).json({ error: 'stream_unavailable' });
+    // The generated URI must remain within this item/source before credentials
+    // are added back for the one upstream fetch.
+    const clean = credentialFreeHlsTarget(child, base, id, source.id);
+    const authenticated = withJellyfinHlsAuth(clean, jf.jellyfinKey());
+    const media = await mediaText(authenticated, base, { timeoutMs: 15_000, maxBytes: 2 * 1024 * 1024, requireOk: false });
+    if (media.status < 200 || media.status >= 300) {
+      if (media.status === 404) progress.remove(req.user!.id, id);
+      return res.status(media.status === 404 ? 404 : 503).json({ error: 'stream_unavailable' });
+    }
+    text = media.body;
+    playlistBase = clean;
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Aerie-Play-Method', variant.delivery === 'remux' ? 'Remux' : 'Transcode');
+  res.setHeader('X-Aerie-Resolution', variant.height ? `${variant.height}p` : 'source');
+  res.setHeader('X-Aerie-Bitrate', String(variant.bitrate));
+  const outputChannels = playbackAudioChannels(source, request);
+  if (outputChannels) res.setHeader('X-Aerie-Audio-Channels', String(outputChannels));
+  return res.send(rewriteHlsPlaylist(text, String(playlistBase), base, id, req.user!.id, hlsCapabilities, source.id));
+}
+
+// Capability-aware preflight. The response contains only Aerie URLs and safe
+// normalized source metadata; Jellyfin paths, origins and API keys stay private.
+r.get('/playback/:id', async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const request = playbackRequest(req);
+    const sources = await jf.videoPlaybackSources(id, request);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(buildPlaybackPlan(id, sources, request));
+  } catch (e) { next(e); }
+});
+
+// Progressive source used only after the preflight has selected Direct Play.
+// The source id is revalidated against this exact Jellyfin item before proxying.
+r.get('/direct/:id', async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const request = parsePlaybackRequest({ source: req.query.source, quality: 'original' });
+    const source = await playbackSource(id, request);
+    if (!source.supportsDirectPlay) return res.status(409).json({ error: 'direct_play_unavailable' });
+    res.setHeader('X-Aerie-Play-Method', 'Direct Play');
+    if (source.video.height) res.setHeader('X-Aerie-Resolution', `${source.video.height}p`);
+    if (source.bitrate) res.setHeader('X-Aerie-Bitrate', String(source.bitrate));
+    const directAudio = source.audio.find(stream => stream.index === source.defaultAudioStreamIndex)
+      || source.audio.find(stream => stream.default) || source.audio[0];
+    if (directAudio?.channels) res.setHeader('X-Aerie-Audio-Channels', String(directAudio.channels));
+    return pipeStream(req, res, jf.directVideoStreamUrl(id, source.id));
+  } catch (e) { next(e); }
+});
+
+// Stream entrypoint: video -> adaptive/limited rewritten HLS; audio -> progressive stream.
 r.get('/stream/:id', async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
@@ -382,34 +504,19 @@ r.get('/stream/:id', async (req: AuthedRequest, res, next) => {
         + `&AudioCodec=aac&MaxStreamingBitrate=320000`;
       return pipeStream(req, res, target);
     }
-    // Without an explicit bitrate ceiling Jellyfin falls back to a ~256kbps
-    // transcode (everything looked soft/blocky). Mirror jellyfin-web's "Auto":
-    // a huge ceiling makes compatible h264 files DIRECT-STREAM (video copy,
-    // original quality, no CPU) and gives real transcodes a sane budget.
-    // Strict digits-only parse: Number('') is 0, so a bare/empty audioStream=
-    // would otherwise leak AudioStreamIndex=0 (the video stream) to Jellyfin.
-    const rawAudio = Array.isArray(req.query.audioStream) ? '' : String(req.query.audioStream ?? '');
-    const audioStream = /^\d+$/.test(rawAudio) ? Number(rawAudio) : null;
-    // BreakOnNonKeyFrames suits hls.js only; Safari's native HLS player wants
-    // keyframe-aligned segments (the client says which engine it uses).
-    const nativeHls = String(req.query.native) === '1';
-    // Fresh PlaySessionId per master request (like jellyfin-web): without it
-    // Jellyfin matches the request to an existing transcode session and keeps
-    // serving its OLD audio — an AudioStreamIndex change was silently ignored
-    // (verified: byte-identical segments for different tracks).
-    const playSessionId = crypto.randomBytes(8).toString('hex');
-    const masterUrl = `${base}/Videos/${id}/master.m3u8?api_key=${key}&MediaSourceId=${id}`
-      + `&VideoCodec=h264&AudioCodec=aac,mp3&TranscodingMaxAudioChannels=2&SegmentContainer=ts&MinSegments=1`
-      + `&MaxStreamingBitrate=120000000&VideoBitrate=119808000&AudioBitrate=192000`
-      + `&PlaySessionId=${playSessionId}`
-      + (nativeHls ? '' : `&BreakOnNonKeyFrames=True`)
-      + (audioStream != null ? `&AudioStreamIndex=${audioStream}` : '');
-    const upstream = await fetch(masterUrl);
-    if (!upstream.ok) return res.status(upstream.status).json({ error: 'stream_unavailable' });
-    const text = await upstream.text();
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.send(proxifyPlaylist(text, masterUrl, id));
+    const request = playbackRequest(req);
+    const source = await playbackSource(id, request);
+    const variants = playbackVariants(source, request);
+    const rawVariant = Array.isArray(req.query.variant) ? req.query.variant : req.query.variant;
+    if (request.quality === 'auto' && rawVariant === undefined && variants.length > 1) {
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Aerie-Play-Method', 'Adaptive');
+      return res.send(adaptiveMasterPlaylist(id, source, request, variants));
+    }
+    const variant = rawVariant === undefined ? variants[variants.length - 1]
+      : variantFromRequest(source, request, rawVariant);
+    return sendJellyfinHls(req, res, id, source, request, variant, rawVariant !== undefined);
   } catch (e) { next(e); }
 });
 
@@ -422,34 +529,50 @@ r.get('/offline/:id', async (req: AuthedRequest, res, next) => {
 // Proxy for sub-playlists (rewritten again) and .ts segments (streamed).
 r.get('/hls/:id', async (req: AuthedRequest, res, next) => {
   try {
-    const abs = Buffer.from(String(req.query.p || ''), 'base64url').toString('utf8');
-    if (!abs.startsWith(jf.jellyfinBase())) return res.status(400).end();
-    const isPlaylist = abs.includes('.m3u8');
+    const id = String(req.params.id);
+    const token = String(req.query.p || '');
+    if (token.length > 256) return res.status(403).end();
+    let target: URL;
+    try { target = hlsCapabilities.resolve(token, req.user!.id, id); }
+    catch { return res.status(403).end(); }
+    const base = jf.jellyfinBase();
+    const abs = withJellyfinHlsAuth(target, jf.jellyfinKey());
+    const mediaSourceId = target.searchParams.get('MediaSourceId') || id;
+    const isPlaylist = target.pathname.endsWith('.m3u8');
     if (isPlaylist) {
-      const upstream = await fetch(abs);
-      if (!upstream.ok) return res.status(upstream.status).end();
-      const text = await upstream.text();
+      const upstream = await mediaText(abs, base, { timeoutMs: 15_000, maxBytes: 2 * 1024 * 1024, requireOk: false });
+      if (upstream.status < 200 || upstream.status >= 300) {
+        if (upstream.status === 404) progress.remove(req.user!.id, id);
+        return res.status(upstream.status === 404 ? 404 : 503).end();
+      }
+      const text = upstream.body;
       res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       res.setHeader('Cache-Control', 'no-cache');
-      return res.send(proxifyPlaylist(text, abs, String(req.params.id)));
+      return res.send(rewriteHlsPlaylist(text, target.toString(), base, id, req.user!.id, hlsCapabilities, mediaSourceId));
     }
-    return pipeStream(req, res, abs);
+    return pipeStream(req, res, abs.toString());
   } catch (e) { next(e); }
 });
 
 // Audio + subtitle tracks for the player's pickers.
 r.get('/streams/:id', async (req, res, next) => {
-  try { res.json(await jf.mediaStreams(String(req.params.id))); } catch (e) { next(e); }
+  try {
+    const sourceId = parsePlaybackRequest({ source: req.query.source }).sourceId || undefined;
+    res.json(await jf.mediaStreams(String(req.params.id), sourceId));
+  } catch (e) { next(e); }
 });
 
 // Subtitle proxy (VTT).
-r.get('/subtitle/:id/:src/:index', async (req, res, next) => {
+r.get('/subtitle/:id/:src/:index', async (req: AuthedRequest, res, next) => {
   try {
     const url = jf.directSubtitleUrl(String(req.params.id), String(req.params.src), Number(req.params.index));
-    const up = await fetch(url);
-    if (!up.ok) return res.status(up.status).end();
+    const up = await mediaBytes(url, jf.jellyfinBase(), { timeoutMs: 20_000, maxBytes: 16 * 1024 * 1024, requireOk: false });
+    if (up.status < 200 || up.status >= 300) {
+      if (up.status === 404) progress.remove(req.user!.id, String(req.params.id));
+      return res.status(up.status === 404 ? 404 : 503).end();
+    }
     res.setHeader('Content-Type', 'text/vtt');
-    res.end(Buffer.from(await up.arrayBuffer()));
+    res.end(up.body);
   } catch (e) { next(e); }
 });
 
@@ -484,7 +607,9 @@ r.get('/recommendations', async (req: AuthedRequest, res, next) => {
           return ep.playedPct !== 100 && !inProgress;
         });
         if (pick && !seen.has(pick.id)) { seen.add(pick.id); nextUp.push(pick); }
-      } catch { /* skip this series */ }
+      } catch (error) {
+        reconcileMissingSeries(error, userId, s.seriesId);
+      }
     }
     const catalog = await jf.recommendationCatalog();
     // Build a private taste profile from this Aerie user's own recent playback.
@@ -495,7 +620,8 @@ r.get('/recommendations', async (req: AuthedRequest, res, next) => {
     const touched = new Set(recent.map(x => x.item_id));
     const genreCounts = new Map<string, number>();
     for (const row of recent.slice(0, 12)) {
-      try { for (const genre of (await jf.itemDetail(row.item_id)).genres || []) genreCounts.set(genre, (genreCounts.get(genre) || 0) + 1); } catch { /* removed item */ }
+      const item = await progressItem(userId, row.item_id);
+      for (const genre of item?.genres || []) genreCounts.set(genre, (genreCounts.get(genre) || 0) + 1);
     }
     const topGenres = [...genreCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]);
     let personal: MediaItem[] = [];
@@ -517,6 +643,18 @@ r.get('/recommendations', async (req: AuthedRequest, res, next) => {
 // "More like this".
 r.get('/similar/:id', async (req, res, next) => {
   try { res.json(await jf.similar(req.params.id)); } catch (e) { next(e); }
+});
+
+// A cached type lookup can outlive an item by a few minutes. Reconcile the
+// exact row here as a final guard before the safe 404 reaches the app handler.
+r.use((error: unknown, req: AuthedRequest, _res: any, next: (error: unknown) => void) => {
+  const parts = req.path.split('/').filter(Boolean);
+  const dynamic = ['item', 'playback', 'direct', 'stream', 'offline', 'streams', 'hls', 'image', 'preview', 'similar', 'subtitle']
+    .includes(parts[0]);
+  const id = dynamic ? parts[1]
+    : (req.path === '/progress' || req.path === '/played') ? String(req.body?.id || '') : '';
+  if (id) reconcileMissingItem(error, req.user!.id, id);
+  next(error);
 });
 
 export default r;

@@ -4,7 +4,7 @@ import { Icon } from '../lib/icons';
 import { cx, ticksToTime, colorFor, initials } from '../lib/utils';
 import { usePlayer, useAuth, toast } from '../lib/store';
 import type { Track } from '../lib/store';
-import { PageLoader, EmptyState, PageHeader, Modal, Spinner } from '../components/ui';
+import { PageLoader, EmptyState, PageHeader, Modal, Spinner, Menu } from '../components/ui';
 import type { MediaItem } from '../lib/model';
 import { imageSrcSet } from '../lib/images';
 
@@ -43,12 +43,25 @@ function toTrack(m: MediaItem, artFallback?: string): Track {
     streamUrl: api.media.streamUrl(m.id, true),
     kind: 'music',
     durationSec: durationSecOf(m),
+    albumId: m.albumId,
+    replayGain: m.replayGain,
     cast: { source: 'jellyfin', itemId: m.id },
   };
 }
 
 function shuffled(arr: MediaItem[]): MediaItem[] {
-  return [...arr].sort(() => Math.random() - 0.5);
+  const values = [...arr];
+  for (let i = values.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [values[i], values[j]] = [values[j], values[i]];
+  }
+  return values;
+}
+
+function playShuffledQueue(queue: Track[]): void {
+  const player = usePlayer.getState();
+  player.playQueue(queue, 0);
+  if (!usePlayer.getState().shuffle) usePlayer.getState().toggleShuffle();
 }
 
 // Jellyfin seeds junk "system" artists (e.g. "_auto-import") that shouldn't be
@@ -197,18 +210,25 @@ function MixCard({ name, art, count, onPlay, isPlaying }: {
 
 // ---- song row --------------------------------------------------------------
 
-function SongRow({ song, index, onPlay, isCurrent, isPlaying, isFav, onToggleFav, showArt, subtitle }: {
-  song: MediaItem; index: number; onPlay: () => void; isCurrent: boolean; isPlaying?: boolean; isFav: boolean; onToggleFav: () => void; showArt?: boolean; subtitle?: string;
+function SongRow({ song, index, onPlay, onPlayNext, onAddQueue, isCurrent, isPlaying, isFav, onToggleFav, showArt, subtitle }: {
+  song: MediaItem; index: number; onPlay: () => void; onPlayNext: () => void; onAddQueue: () => void;
+  isCurrent: boolean; isPlaying?: boolean; isFav: boolean; onToggleFav: () => void; showArt?: boolean; subtitle?: string;
 }) {
+  const activate = () => {
+    if (isCurrent) usePlayer.getState().toggle();
+    else onPlay();
+  };
   return (
     <div
       className={cx(
-        'group grid items-center gap-3 px-2 sm:px-3 py-2 rounded-xl transition-colors',
-        showArt ? 'grid-cols-[1.75rem_2.75rem_1fr_auto_auto]' : 'grid-cols-[1.75rem_1fr_auto_auto]',
+        'group grid items-center gap-1.5 sm:gap-3 px-2 sm:px-3 py-2 rounded-xl transition-colors',
+        showArt
+          ? 'grid-cols-[1.75rem_2.75rem_minmax(0,1fr)_auto_auto] sm:grid-cols-[1.75rem_2.75rem_minmax(0,1fr)_auto_auto_auto]'
+          : 'grid-cols-[1.75rem_minmax(0,1fr)_auto_auto] sm:grid-cols-[1.75rem_minmax(0,1fr)_auto_auto_auto]',
         isCurrent ? 'bg-brand-500/10' : 'hover:bg-white/[0.04] active:bg-white/[0.06]'
       )}
     >
-      <button onClick={onPlay} aria-label={isCurrent && isPlaying ? `Pause ${song.name}` : `Play ${song.name}`} className="w-7 h-9 grid place-items-center text-slate-500 shrink-0">
+      <button onClick={activate} aria-label={isCurrent && isPlaying ? `Pause ${song.name}` : `Play ${song.name}`} className="w-7 h-9 grid place-items-center text-slate-500 shrink-0">
         {isCurrent && isPlaying ? (
           <EqBars />
         ) : (
@@ -223,18 +243,27 @@ function SongRow({ song, index, onPlay, isCurrent, isPlaying, isFav, onToggleFav
           <CoverArt src={song.posterUrl || song.thumbUrl} title={song.album || song.name} textClass="text-sm" iconSize={16} />
         </div>
       )}
-      <button onClick={onPlay} className="min-w-0 text-left py-1">
+      <button onClick={activate} className="min-w-0 text-left py-1">
         <p className={cx('text-sm font-medium truncate', isCurrent ? 'text-brand-300' : 'text-white')}>{song.name}</p>
         <p className="text-xs muted truncate">{subtitle || song.albumArtist || song.album || 'Unknown artist'}</p>
       </button>
       <button
         onClick={onToggleFav}
-        className={cx('icon-btn shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity', isFav && '!opacity-100')}
+        className={cx('icon-btn shrink-0 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity', isFav && '!opacity-100')}
+        aria-label={isFav ? `Remove ${song.name} from Liked Songs` : `Add ${song.name} to Liked Songs`}
         title={isFav ? 'Remove from Liked Songs' : 'Add to Liked Songs'}
       >
         <Icon.Heart size={16} filled={isFav} className={isFav ? 'text-accent-pink' : 'text-slate-400'} />
       </button>
-      <span className="text-xs muted tabular-nums shrink-0 pr-1 w-11 text-right">{trackLabel(song)}</span>
+      <Menu
+        trigger={<button type="button" className="icon-btn shrink-0 sm:opacity-0 sm:group-hover:opacity-100 sm:focus:opacity-100 transition-opacity"
+          aria-label={`Queue actions for ${song.name}`} title="Queue actions"><Icon.More size={16} /></button>}
+        items={[
+          { label: 'Play next', icon: <Icon.Next size={15} />, onClick: onPlayNext },
+          { label: 'Add to queue', icon: <Icon.Plus size={15} />, onClick: onAddQueue },
+        ]}
+      />
+      <span className="hidden sm:block text-xs muted tabular-nums shrink-0 pr-1 w-11 text-right">{trackLabel(song)}</span>
     </div>
   );
 }
@@ -266,8 +295,20 @@ function AlbumModal({ album, onClose, favIds, onToggleFav }: {
   };
   const shufflePlay = () => {
     if (!tracks || !tracks.length) return;
-    player.playQueue(shuffled(tracks).map(t => toTrack(t, art)), 0);
+    playShuffledQueue(shuffled(tracks).map(t => toTrack(t, art)));
     toast(`Shuffling ${album.name}`, 'success');
+  };
+  const queueAlbum = (next: boolean) => {
+    if (!tracks?.length) return;
+    const queue = tracks.map(t => toTrack(t, art));
+    const hadCurrent = !!usePlayer.getState().current;
+    if (next) player.playNext(queue); else player.addToQueue(queue);
+    toast(hadCurrent ? (next ? 'Playing next' : 'Added to queue') : `Playing ${album.name}`, 'success', `${album.name} · ${plural(queue.length, 'song')}`);
+  };
+  const queueSong = (track: MediaItem, next: boolean) => {
+    const hadCurrent = !!usePlayer.getState().current;
+    if (next) player.playNext(toTrack(track, art)); else player.addToQueue(toTrack(track, art));
+    toast(hadCurrent ? (next ? 'Playing next' : 'Added to queue') : 'Playing now', 'success', track.name);
   };
 
   return (
@@ -294,12 +335,18 @@ function AlbumModal({ album, onClose, favIds, onToggleFav }: {
             {tracks ? plural(tracks.length, 'song') : '…'}
             {totalSec ? ` · ${fmtMins(totalSec)}` : ''}
           </p>
-          <div className="flex items-center gap-2 mt-4 justify-center sm:justify-start">
+          <div className="flex flex-wrap items-center gap-2 mt-4 justify-center sm:justify-start">
             <button className="btn-primary" onClick={() => playFrom(0)} disabled={!tracks || !tracks.length}>
               <Icon.Play size={16} /> Play
             </button>
             <button className="btn-secondary" onClick={shufflePlay} disabled={!tracks || !tracks.length}>
               <Icon.Shuffle size={16} /> Shuffle
+            </button>
+            <button className="btn-secondary" onClick={() => queueAlbum(true)} disabled={!tracks || !tracks.length}>
+              <Icon.Next size={16} /> Play next
+            </button>
+            <button className="btn-secondary" onClick={() => queueAlbum(false)} disabled={!tracks || !tracks.length}>
+              <Icon.Plus size={16} /> Add to queue
             </button>
           </div>
         </div>
@@ -318,6 +365,8 @@ function AlbumModal({ album, onClose, favIds, onToggleFav }: {
                 song={t}
                 index={i}
                 onPlay={() => playFrom(i)}
+                onPlayNext={() => queueSong(t, true)}
+                onAddQueue={() => queueSong(t, false)}
                 isCurrent={player.current?.id === t.id}
                 isPlaying={player.playing}
                 isFav={favIds.has(t.id)}
@@ -359,8 +408,20 @@ function ArtistModal({ artist, albums, songs, onClose, favIds, onToggleFav, onOp
   };
   const shufflePlay = () => {
     if (!theirSongs.length) return;
-    player.playQueue(shuffled(theirSongs).map(s => toTrack(s, art)), 0);
+    playShuffledQueue(shuffled(theirSongs).map(s => toTrack(s, art)));
     toast(`Shuffling ${artist.name}`, 'success');
+  };
+  const queueArtist = (next: boolean) => {
+    if (!theirSongs.length) return;
+    const queue = theirSongs.map(song => toTrack(song, art));
+    const hadCurrent = !!usePlayer.getState().current;
+    if (next) player.playNext(queue); else player.addToQueue(queue);
+    toast(hadCurrent ? (next ? 'Playing next' : 'Added to queue') : `Playing ${artist.name}`, 'success', `${artist.name} · ${plural(queue.length, 'song')}`);
+  };
+  const queueSong = (song: MediaItem, next: boolean) => {
+    const hadCurrent = !!usePlayer.getState().current;
+    if (next) player.playNext(toTrack(song, art)); else player.addToQueue(toTrack(song, art));
+    toast(hadCurrent ? (next ? 'Playing next' : 'Added to queue') : 'Playing now', 'success', song.name);
   };
 
   return (
@@ -386,12 +447,18 @@ function ArtistModal({ artist, albums, songs, onClose, favIds, onToggleFav, onOp
             {plural(theirSongs.length, 'song')}
             {totalSec ? ` · ${fmtMins(totalSec)}` : ''}
           </p>
-          <div className="flex items-center gap-2 mt-4 justify-center sm:justify-start">
+          <div className="flex flex-wrap items-center gap-2 mt-4 justify-center sm:justify-start">
             <button className="btn-primary" onClick={playAll} disabled={!theirSongs.length}>
               <Icon.Play size={16} /> Play
             </button>
             <button className="btn-secondary" onClick={shufflePlay} disabled={!theirSongs.length}>
               <Icon.Shuffle size={16} /> Shuffle
+            </button>
+            <button className="btn-secondary" onClick={() => queueArtist(true)} disabled={!theirSongs.length}>
+              <Icon.Next size={16} /> Play next
+            </button>
+            <button className="btn-secondary" onClick={() => queueArtist(false)} disabled={!theirSongs.length}>
+              <Icon.Plus size={16} /> Add to queue
             </button>
           </div>
         </div>
@@ -420,6 +487,8 @@ function ArtistModal({ artist, albums, songs, onClose, favIds, onToggleFav, onOp
                   showArt
                   subtitle={s.album}
                   onPlay={() => player.playQueue(theirSongs.map(t => toTrack(t, art)), i)}
+                  onPlayNext={() => queueSong(s, true)}
+                  onAddQueue={() => queueSong(s, false)}
                   isCurrent={player.current?.id === s.id}
                   isPlaying={player.playing}
                   isFav={favIds.has(s.id)}
@@ -444,7 +513,7 @@ function QueueModal({ onClose }: { onClose: () => void }) {
   const player = usePlayer();
   const { queue, index, current, playing, shuffle, repeat } = player;
 
-  const upcomingCount = Math.max(0, queue.length - index - 1);
+  const upcomingCount = shuffle ? player.shuffleRemaining.length : Math.max(0, queue.length - index - 1);
 
   return (
     <Modal open onClose={onClose} size="md" title="Queue">
@@ -466,24 +535,25 @@ function QueueModal({ onClose }: { onClose: () => void }) {
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
         <button
           onClick={player.toggleShuffle}
-          className={cx('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors', shuffle ? 'bg-brand-500/15 text-brand-300' : 'text-slate-400 hover:text-white hover:bg-white/[0.05]')}
+          className={cx('min-h-11 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors', shuffle ? 'bg-brand-500/15 text-brand-300' : 'text-slate-400 hover:text-white hover:bg-white/[0.05]')}
         >
           <Icon.Shuffle size={14} /> Shuffle
         </button>
         <button
           onClick={player.cycleRepeat}
-          className={cx('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors', repeat !== 'off' ? 'bg-brand-500/15 text-brand-300' : 'text-slate-400 hover:text-white hover:bg-white/[0.05]')}
+          className={cx('min-h-11 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors', repeat !== 'off' ? 'bg-brand-500/15 text-brand-300' : 'text-slate-400 hover:text-white hover:bg-white/[0.05]')}
         >
           <Icon.Repeat size={14} /> {repeat === 'one' ? 'Repeat one' : repeat === 'all' ? 'Repeat all' : 'Repeat'}
         </button>
         <button
-          onClick={() => { player.clear(); onClose(); }}
-          className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-accent-red hover:bg-accent-red/10 transition-colors"
+          onClick={player.clearUpcoming}
+          disabled={upcomingCount === 0}
+          className="ml-auto min-h-11 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-white/[0.05] transition-colors disabled:opacity-40 disabled:pointer-events-none"
         >
-          <Icon.Trash size={14} /> Clear
+          <Icon.Trash size={14} /> Clear upcoming
         </button>
       </div>
 
@@ -500,7 +570,7 @@ function QueueModal({ onClose }: { onClose: () => void }) {
               return (
                 <button
                   key={`${t.id}-${i}`}
-                  onClick={() => player.playQueue(queue, i)}
+                  onClick={() => player.playAt(i)}
                   className={cx('w-full group grid grid-cols-[2.5rem_1fr_auto] items-center gap-3 px-2 py-2 rounded-xl text-left transition-colors', isCur ? 'bg-brand-500/10' : 'hover:bg-white/[0.04]')}
                 >
                   <div className="w-10 h-10 rounded-lg overflow-hidden shrink-0 relative">
@@ -554,7 +624,6 @@ export default function Music() {
   const loadMoreRef = useRef<HTMLButtonElement>(null);
 
   const [favIds, setFavIds] = useState<Set<string>>(new Set());
-  const [prefs, setPrefs] = useState<any>({});
 
   useEffect(() => {
     let alive = true;
@@ -580,7 +649,6 @@ export default function Music() {
         const recAlbums = (rec?.recentlyAdded || []).filter(x => x.type === 'MusicAlbum');
         setRecentAdded(recAlbums);
         const p = (se as any)?.preferences || {};
-        setPrefs(p);
         setFavIds(new Set<string>(Array.isArray(p.likedSongs) ? p.likedSongs : []));
       } catch {
         if (alive) toast('Failed to load music library', 'error');
@@ -595,9 +663,7 @@ export default function Music() {
     setFavIds(new Set<string>(next));
     try {
       const arr = Array.from(next);
-      const merged = { ...prefs, likedSongs: arr };
-      setPrefs(merged);
-      await api.settings.preferences(merged);
+      await api.settings.preferences({ likedSongs: arr });
     } catch {
       toast('Could not save Liked Songs', 'error');
     }
@@ -725,13 +791,22 @@ export default function Music() {
   const playMix = (name: string, tracks: MediaItem[]) => {
     if (!tracks.length) return;
     const art = tracks.find(t => t.posterUrl || t.thumbUrl);
-    player.playQueue(shuffled(tracks).map(t => toTrack(t, art?.posterUrl || art?.thumbUrl)), 0);
+    playShuffledQueue(shuffled(tracks).map(t => toTrack(t, art?.posterUrl || art?.thumbUrl)));
     toast(`${name} Mix`, 'success', `Shuffling ${plural(tracks.length, 'song')}`);
   };
 
   const playSong = (s: MediaItem, queue: MediaItem[]) => {
     const art = s.posterUrl || s.thumbUrl;
     player.playTrack(toTrack(s, art), queue.map(t => toTrack(t, t.posterUrl || t.thumbUrl)));
+  };
+
+  const queueSongs = (items: MediaItem[], next: boolean, label?: string) => {
+    if (!items.length) return;
+    const queue = items.map(item => toTrack(item, item.posterUrl || item.thumbUrl));
+    const hadCurrent = !!usePlayer.getState().current;
+    if (next) player.playNext(queue); else player.addToQueue(queue);
+    const detail = label || (queue.length === 1 ? queue[0].title : plural(queue.length, 'song'));
+    toast(hadCurrent ? (next ? 'Playing next' : 'Added to queue') : 'Playing now', 'success', detail);
   };
 
   const shuffleAll = async () => {
@@ -748,7 +823,7 @@ export default function Music() {
       } finally { setLoadingMore(false); }
     }
     if (!all.length) return;
-    player.playQueue(shuffled(all).map(s => toTrack(s, s.posterUrl || s.thumbUrl)), 0);
+    playShuffledQueue(shuffled(all).map(s => toTrack(s, s.posterUrl || s.thumbUrl)));
     toast('Shuffling your library', 'success', plural(all.length, 'song'));
   };
 
@@ -832,6 +907,8 @@ export default function Music() {
                         index={i}
                         showArt
                         onPlay={() => playSong(s, filteredSongs)}
+                        onPlayNext={() => queueSongs([s], true)}
+                        onAddQueue={() => queueSongs([s], false)}
                         isCurrent={player.current?.id === s.id}
                         isPlaying={player.playing}
                         isFav={favIds.has(s.id)}
@@ -957,6 +1034,8 @@ export default function Music() {
                           index={i}
                           showArt
                           onPlay={() => playSong(s, songs)}
+                          onPlayNext={() => queueSongs([s], true)}
+                          onAddQueue={() => queueSongs([s], false)}
                           isCurrent={player.current?.id === s.id}
                           isPlaying={player.playing}
                           isFav={favIds.has(s.id)}
@@ -980,7 +1059,7 @@ export default function Music() {
                       <h2 className="text-2xl font-bold text-white">Liked Songs</h2>
                       <p className="text-sm muted mt-1">{user?.displayName || 'You'} · {plural(likedSongs.length, 'song')}</p>
                       {likedSongs.length > 0 && (
-                        <div className="flex items-center gap-2 mt-3 justify-center sm:justify-start">
+                        <div className="flex flex-wrap items-center gap-2 mt-3 justify-center sm:justify-start">
                           <button
                             className="btn-primary"
                             onClick={() => player.playQueue(likedSongs.map(s => toTrack(s, s.posterUrl || s.thumbUrl)), 0)}
@@ -989,9 +1068,15 @@ export default function Music() {
                           </button>
                           <button
                             className="btn-secondary"
-                            onClick={() => player.playQueue(shuffled(likedSongs).map(s => toTrack(s, s.posterUrl || s.thumbUrl)), 0)}
+                            onClick={() => playShuffledQueue(shuffled(likedSongs).map(s => toTrack(s, s.posterUrl || s.thumbUrl)))}
                           >
                             <Icon.Shuffle size={16} /> Shuffle
+                          </button>
+                          <button className="btn-secondary" onClick={() => queueSongs(likedSongs, true, `Liked Songs · ${plural(likedSongs.length, 'song')}`)}>
+                            <Icon.Next size={16} /> Play next
+                          </button>
+                          <button className="btn-secondary" onClick={() => queueSongs(likedSongs, false, `Liked Songs · ${plural(likedSongs.length, 'song')}`)}>
+                            <Icon.Plus size={16} /> Add to queue
                           </button>
                         </div>
                       )}
@@ -1008,6 +1093,8 @@ export default function Music() {
                           index={i}
                           showArt
                           onPlay={() => player.playQueue(likedSongs.map(t => toTrack(t, t.posterUrl || t.thumbUrl)), i)}
+                          onPlayNext={() => queueSongs([s], true)}
+                          onAddQueue={() => queueSongs([s], false)}
                           isCurrent={player.current?.id === s.id}
                           isPlaying={player.playing}
                           isFav={favIds.has(s.id)}

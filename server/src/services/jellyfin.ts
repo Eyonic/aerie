@@ -3,6 +3,11 @@
 // user never leaves the app or sees the Jellyfin origin.
 import { config } from '../config.js';
 import type { MediaItem } from '../lib/model.js';
+import { OutboundHttpError, outboundJson, outboundVoid } from './outbound-http.js';
+import {
+  jellyfinDeviceProfile, normalizeChapters, normalizeVideoSources,
+  type ChapterMetadata, type PlaybackRequest, type VideoMediaSource,
+} from './video-playback.js';
 
 const base = () => config.jellyfin.url.replace(/\/$/, '');
 const key = () => config.jellyfin.apiKey;
@@ -16,12 +21,54 @@ function authHeaders() {
 
 export function configured(): boolean { return !!key(); }
 
+export class JellyfinRequestError extends Error {
+  readonly status: number;
+  readonly upstreamStatus?: number;
+
+  constructor(status: number, upstreamStatus: number | undefined, cause?: unknown) {
+    super(status === 404 ? 'media_not_found' : 'jellyfin_unavailable', { cause });
+    this.name = 'JellyfinRequestError';
+    this.status = status;
+    this.upstreamStatus = upstreamStatus;
+  }
+}
+
+function jellyfinFailure(error: unknown): unknown {
+  if (error instanceof JellyfinRequestError) return error;
+  if (error instanceof OutboundHttpError) {
+    return new JellyfinRequestError(error.upstreamStatus === 404 ? 404 : 503, error.upstreamStatus, error);
+  }
+  return error;
+}
+
+function jellyfinStatusFailure(status: number): JellyfinRequestError {
+  return new JellyfinRequestError(status === 404 ? 404 : 503, status);
+}
+
+export function isJellyfinNotFound(error: unknown): boolean {
+  return error instanceof JellyfinRequestError
+    && error.status === 404
+    && error.upstreamStatus === 404;
+}
+
 async function jf(path: string, params: Record<string, any> = {}): Promise<any> {
-  const url = new URL(base() + path);
+  let url: URL;
+  try { url = new URL(base() + path); }
+  catch (error) { throw new JellyfinRequestError(503, undefined, error); }
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-  const res = await fetch(url, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`jellyfin ${res.status} ${path}`);
-  return res.json();
+  try {
+    return (await outboundJson<any>(url, {
+      headers: authHeaders(), timeoutMs: 15_000, maxBytes: 8 * 1024 * 1024,
+    })).body;
+  } catch (error) { throw jellyfinFailure(error); }
+}
+
+async function jfVoid(value: string | URL, options: Parameters<typeof outboundVoid>[1] = {}) {
+  try {
+    const response = await outboundVoid(value, { ...options, requireOk: false });
+    if (response.status < 200 || response.status >= 300) throw jellyfinStatusFailure(response.status);
+    return response;
+  } catch (error) { throw jellyfinFailure(error); }
 }
 
 let cachedUserId: string | null = null;
@@ -45,6 +92,24 @@ export function directImageUrl(id: string, type = 'Primary', maxWidth?: number):
   u.searchParams.set('quality', '90');
   if (maxWidth) u.searchParams.set('maxWidth', String(maxWidth));
   return u.toString();
+}
+
+/** Pass through only Jellyfin's measured normalization gains. The DTO exposes
+ * these in dB as NormalizationGain and (on supporting servers)
+ * AlbumNormalizationGain. Peaks are not part of this contract, so Aerie never
+ * invents them; positive boosts remain clipping-limited in the client. */
+export function normalizationMetadata(item: unknown): MediaItem['replayGain'] | undefined {
+  if (!item || typeof item !== 'object') return undefined;
+  const source = item as { NormalizationGain?: unknown; AlbumNormalizationGain?: unknown };
+  const bounded = (value: unknown) => typeof value === 'number' && Number.isFinite(value)
+    && value >= -60 && value <= 24 ? value : undefined;
+  const trackDb = bounded(source.NormalizationGain);
+  const albumDb = bounded(source.AlbumNormalizationGain);
+  if (trackDb == null && albumDb == null) return undefined;
+  return {
+    ...(trackDb != null ? { trackDb } : {}),
+    ...(albumDb != null ? { albumDb } : {}),
+  };
 }
 
 function mapItem(it: any): MediaItem {
@@ -75,6 +140,8 @@ function mapItem(it: any): MediaItem {
     episodeNumber: it.IndexNumber,
     albumArtist: it.AlbumArtist,
     album: it.Album,
+    albumId: it.AlbumId,
+    replayGain: normalizationMetadata(it),
     genres: it.Genres,
     communityRating: it.CommunityRating,
   };
@@ -231,27 +298,71 @@ export function streamUrl(id: string, isAudio = false): string {
 }
 
 // Audio + subtitle tracks for a video (for the player's track pickers).
-export async function mediaStreams(id: string): Promise<{ audio: any[]; subtitles: any[] }> {
+export async function mediaStreams(id: string, mediaSourceId?: string): Promise<{ audio: any[]; subtitles: any[] }> {
   const uid = await jellyUserId();
   const it = await jf(`/Users/${uid}/Items/${id}`);
-  const src = it.MediaSources?.[0];
+  const sources = Array.isArray(it?.MediaSources) ? it.MediaSources : [];
+  const src = mediaSourceId ? sources.find((source: any) => String(source?.Id) === mediaSourceId) : sources[0];
+  if (mediaSourceId && !src) throw Object.assign(new Error('invalid_media_source'), { status: 400 });
   const streams = src?.MediaStreams || [];
   const audio = streams.filter((s: any) => s.Type === 'Audio').map((s: any) => ({
-    index: s.Index, name: s.DisplayTitle || s.Language || `Audio ${s.Index}`, lang: s.Language, codec: s.Codec, default: s.IsDefault,
+    index: s.Index, name: s.DisplayTitle || s.Language || `Audio ${s.Index}`, lang: s.Language, codec: s.Codec,
+    channels: Number.isInteger(s.Channels) && s.Channels > 0 && s.Channels <= 32 ? s.Channels : null,
+    bitrate: Number.isInteger(s.BitRate) && s.BitRate > 0 && s.BitRate <= 10_000_000 ? s.BitRate : null,
+    default: s.IsDefault,
   }));
   const subtitles = streams.filter((s: any) => s.Type === 'Subtitle').map((s: any) => ({
-    index: s.Index, name: s.DisplayTitle || s.Language || `Subtitle ${s.Index}`, lang: s.Language, codec: s.Codec, default: s.IsDefault,
+    index: s.Index, name: s.DisplayTitle || s.Language || `Subtitle ${s.Index}`, lang: s.Language, codec: s.Codec,
+    default: s.IsDefault, forced: s.IsForced,
     mediaSourceId: src?.Id || id, url: `/api/media/subtitle/${id}/${src?.Id || id}/${s.Index}`,
   }));
   return { audio, subtitles };
+}
+
+/** Ask Jellyfin to evaluate the actual browser profile, then expose only the
+ * normalized source fields Aerie needs for its credential-free playback plan. */
+export async function videoPlaybackSources(id: string, request?: PlaybackRequest): Promise<VideoMediaSource[]> {
+  const uid = await jellyUserId();
+  let response: any;
+  if (!request) {
+    response = await jf(`/Items/${encodeURIComponent(id)}/PlaybackInfo`, { UserId: uid });
+  } else {
+    const url = new URL(`${base()}/Items/${encodeURIComponent(id)}/PlaybackInfo`);
+    try {
+      response = (await outboundJson<any>(url, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          UserId: uid,
+          MaxStreamingBitrate: request.capabilities.maxStreamingBitrate || 120_000_000,
+          AudioStreamIndex: request.audioStreamIndex,
+          MaxAudioChannels: request.capabilities.maxAudioChannels,
+          MediaSourceId: request.sourceId,
+          DeviceProfile: jellyfinDeviceProfile(request),
+          EnableDirectPlay: request.capabilities.allowDirectPlay,
+          EnableDirectStream: true,
+          EnableTranscoding: true,
+          AllowVideoStreamCopy: true,
+          AllowAudioStreamCopy: true,
+        }),
+        timeoutMs: 15_000,
+        maxBytes: 8 * 1024 * 1024,
+      })).body;
+    } catch (error) { throw jellyfinFailure(error); }
+  }
+  return normalizeVideoSources(response?.MediaSources);
 }
 
 export function directSubtitleUrl(id: string, mediaSourceId: string, index: number): string {
   return `${base()}/Videos/${id}/${mediaSourceId}/Subtitles/${index}/0/Stream.vtt?api_key=${key()}`;
 }
 
-export function directVideoStreamUrl(id: string): string {
-  return `${base()}/Videos/${id}/stream?static=true&api_key=${key()}`;
+export function directVideoStreamUrl(id: string, mediaSourceId?: string): string {
+  const url = new URL(`${base()}/Videos/${encodeURIComponent(id)}/stream`);
+  url.searchParams.set('Static', 'true');
+  url.searchParams.set('api_key', key());
+  if (mediaSourceId) url.searchParams.set('MediaSourceId', mediaSourceId);
+  return url.toString();
 }
 
 // Progressive MP4 for Google Cast (no CORS requirements, unlike HLS). Direct-play
@@ -278,7 +389,10 @@ export async function castSource(id: string, startSec = 0): Promise<{ url: strin
         canSeek: true,
       };
     }
-  } catch { /* fall through to the transcode URL */ }
+  } catch (error) {
+    if (isJellyfinNotFound(error)) throw error;
+    // Metadata outages do not have to block a best-effort transcode URL.
+  }
   const st = startSec > 0 ? `&StartTimeTicks=${Math.round(startSec * 1e7)}` : '';
   return {
     url: `${base()}/Videos/${id}/stream.mp4?api_key=${key()}&VideoCodec=h264&AudioCodec=aac&MaxWidth=1920&MaxAudioChannels=2&VideoBitrate=12000000&AudioBitrate=192000${st}`,
@@ -308,7 +422,10 @@ export async function castAudioSource(id: string, startSec = 0): Promise<{ url: 
         canSeek: true,
       };
     }
-  } catch { /* fall through to the transcode URL */ }
+  } catch (error) {
+    if (isJellyfinNotFound(error)) throw error;
+    // Metadata outages do not have to block a best-effort transcode URL.
+  }
 
   const uid = await jellyUserId();
   const st = startSec > 0 ? `&StartTimeTicks=${Math.round(startSec * 1e7)}` : '';
@@ -333,10 +450,11 @@ export async function reportProgress(id: string, positionTicks: number) {
     // The UserData endpoint reliably persists the resume position (the
     // /Sessions/Playing lifecycle needs a real device session and doesn't stick
     // with a bare API key). This is what makes "Continue watching" work.
-    await fetch(`${base()}/UserItems/${id}/UserData?userId=${uid}`, {
+    await jfVoid(`${base()}/UserItems/${id}/UserData?userId=${uid}`, {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ PlaybackPositionTicks: Math.round(positionTicks) }),
+      timeoutMs: 10_000,
     });
   } catch { /* best-effort */ }
 }
@@ -345,7 +463,9 @@ export async function reportProgress(id: string, positionTicks: number) {
 export async function setPlayed(id: string, played: boolean) {
   try {
     const uid = await jellyUserId();
-    await fetch(`${base()}/UserPlayedItems/${id}?userId=${uid}`, { method: played ? 'POST' : 'DELETE', headers: authHeaders() });
+    await jfVoid(`${base()}/UserPlayedItems/${id}?userId=${uid}`, {
+      method: played ? 'POST' : 'DELETE', headers: authHeaders(), timeoutMs: 10_000,
+    });
   } catch { /* */ }
 }
 
@@ -381,7 +501,10 @@ export async function similar(id: string): Promise<MediaItem[]> {
   try {
     const data = await jf(`/Items/${id}/Similar`, { Limit: 16, Fields: 'ProductionYear' });
     return (data.Items || []).map(mapItem);
-  } catch { return []; }
+  } catch (error) {
+    if (isJellyfinNotFound(error)) throw error;
+    return [];
+  }
 }
 
 export async function search(term: string): Promise<MediaItem[]> {
@@ -390,6 +513,22 @@ export async function search(term: string): Promise<MediaItem[]> {
     SearchTerm: term, Recursive: true, Limit: 24,
     IncludeItemTypes: 'Movie,Series,Audio,MusicAlbum',
     Fields: 'ProductionYear',
+  });
+  return (data.Items || []).map(mapItem);
+}
+
+// A car voice query must not lose music matches because movies and series used
+// up Jellyfin's small, mixed-media search result limit. Keep this separate from
+// the general Aerie search so Android Auto always receives a useful audio-only
+// result set (songs first, with albums available as playable queues).
+export async function searchAudio(term: string, limit = 60): Promise<MediaItem[]> {
+  const uid = await jellyUserId();
+  const data = await jf(`/Users/${uid}/Items`, {
+    SearchTerm: term,
+    Recursive: true,
+    Limit: Math.min(100, Math.max(1, Math.floor(limit))),
+    IncludeItemTypes: 'Audio,MusicAlbum,MusicArtist',
+    Fields: 'RunTimeTicks,Genres',
   });
   return (data.Items || []).map(mapItem);
 }
@@ -436,14 +575,15 @@ export async function libraryScanStatus() {
 }
 
 export async function startLibraryScan() {
-  const res = await fetch(`${base()}/Library/Refresh`, { method: 'POST', headers: authHeaders() });
-  if (!res.ok) throw new Error(`jellyfin ${res.status} library refresh`);
+  await jfVoid(`${base()}/Library/Refresh`, {
+    method: 'POST', headers: authHeaders(), timeoutMs: 15_000,
+  });
 }
 
-export async function chapters(id: string): Promise<{ name: string; startSec: number }[]> {
+export async function chapters(id: string): Promise<ChapterMetadata[]> {
   const uid = await jellyUserId();
-  const it = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Chapters' });
-  return (Array.isArray(it?.Chapters) ? it.Chapters : []).map((c: any) => ({ name: String(c.Name || ''), startSec: Number(c.StartPositionTicks || 0) / 1e7 }));
+  const it = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Chapters,RunTimeTicks' });
+  return normalizeChapters(it?.Chapters, it?.RunTimeTicks);
 }
 
 export async function metadata(id: string) {
@@ -460,8 +600,10 @@ export async function updateMetadata(id: string, changes: Record<string, any>) {
   const uid = await jellyUserId();
   const current = await jf(`/Users/${uid}/Items/${id}`, { Fields: 'Path,Genres,Overview,Studios,ProviderIds' });
   const body = { ...current, ...changes, Id: id };
-  const res = await fetch(`${base()}/Items/${id}`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`jellyfin ${res.status} metadata update`);
+  await jfVoid(`${base()}/Items/${id}`, {
+    method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), timeoutMs: 15_000,
+  });
   fullLibraryCache.clear(); pageCache.clear();
 }
 
@@ -469,8 +611,9 @@ export async function refreshItem(id: string) {
   const url = new URL(`${base()}/Items/${id}/Refresh`);
   url.searchParams.set('MetadataRefreshMode', 'FullRefresh'); url.searchParams.set('ImageRefreshMode', 'FullRefresh');
   url.searchParams.set('ReplaceAllMetadata', 'false'); url.searchParams.set('ReplaceAllImages', 'false');
-  const res = await fetch(url, { method: 'POST', headers: authHeaders() });
-  if (!res.ok) throw new Error(`jellyfin ${res.status} metadata refresh`);
+  await jfVoid(url, {
+    method: 'POST', headers: authHeaders(), timeoutMs: 15_000,
+  });
 }
 
 export { base as jellyfinBase, key as jellyfinKey };

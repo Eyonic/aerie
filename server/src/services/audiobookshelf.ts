@@ -1,6 +1,7 @@
 // Audiobookshelf client — powers Audiobooks and Podcasts sections.
 import { config } from '../config.js';
 import type { Book, Chapter } from '../lib/model.js';
+import { OutboundHttpError, outboundJson, outboundVoid } from './outbound-http.js';
 
 const base = config.audiobookshelf.url.replace(/\/$/, '');
 const key = () => config.audiobookshelf.apiKey;
@@ -10,9 +11,16 @@ export function configured(): boolean { return !!key(); }
 async function abs(path: string, params: Record<string, any> = {}): Promise<any> {
   const url = new URL(base + path);
   for (const [k, v] of Object.entries(params)) if (v != null) url.searchParams.set(k, String(v));
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${key()}` } });
-  if (!res.ok) throw new Error(`abs ${res.status} ${path}`);
-  return res.json();
+  try {
+    return (await outboundJson<any>(url, {
+      headers: { Authorization: `Bearer ${key()}` }, timeoutMs: 15_000, maxBytes: 8 * 1024 * 1024,
+    })).body;
+  } catch (error) {
+    if (error instanceof OutboundHttpError && error.upstreamStatus) {
+      throw new Error(`abs ${error.upstreamStatus} ${path}`, { cause: error });
+    }
+    throw error;
+  }
 }
 
 export function coverUrl(itemId: string): string {
@@ -50,14 +58,16 @@ function mapItem(it: any, progMap?: Map<string, { progress: number; currentTime:
     libraryItemId: it.id,
     title: meta.title || it.title || 'Untitled',
     author: meta.authorName || (meta.authors?.map((a: any) => a.name).join(', ')),
-    narrator: meta.narratorName,
+    narrator: meta.narratorName || (Array.isArray(meta.narrators) ? meta.narrators.join(', ') : undefined),
     series: meta.seriesName || meta.series?.[0]?.name,
     coverUrl: coverUrl(it.id),
     durationSec: media.duration,
     numChapters: media.numChapters || media.chapters?.length,
     progressPct: prog ? Math.round((prog.progress || 0) * 100) : 0,
     currentTimeSec: prog?.currentTime,
-    mediaType: it.mediaType || media.metadata?.type === 'podcast' ? 'podcast' : 'book',
+    // Conditional has lower precedence than ||. The old expression therefore
+    // classified every truthy `mediaType` (including "book") as a podcast.
+    mediaType: it.mediaType === 'podcast' || media.metadata?.type === 'podcast' ? 'podcast' : 'book',
   };
 }
 
@@ -164,10 +174,11 @@ export function directPlayUrl(id: string): string {
 
 export async function updateProgress(id: string, currentTime: number, duration: number) {
   try {
-    await fetch(`${base}/api/me/progress/${id}`, {
+    await outboundVoid(`${base}/api/me/progress/${id}`, {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${key()}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ currentTime, duration, progress: duration ? currentTime / duration : 0 }),
+      timeoutMs: 10_000,
     });
   } catch { /* best-effort */ }
 }

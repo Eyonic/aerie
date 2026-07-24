@@ -1,12 +1,28 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
-import { toast } from '../lib/store';
+import { toast, useAuth, usePlayer } from '../lib/store';
 import { cx, formatBytes, formatRelative, formatDuration } from '../lib/utils';
 import { PageLoader, EmptyState, PageHeader, Badge, Spinner } from '../components/ui';
 import { VideoPlayer } from '../components/media';
 import type { MediaItem, FileEntry } from '../lib/model';
 import { imageSrcSet } from '../lib/images';
+import {
+  loadDriveVideoResume,
+  saveDriveVideoResume,
+  type DriveVideoResumeInfo as ResumeInfo,
+  type DriveVideoResumeMap as ResumeMap,
+} from '../lib/drive-video-resume';
+import { applyPlaybackRate, playbackRateLabel, stepPlaybackRate, VIDEO_PLAYBACK_RATES } from '../lib/playback-rate';
+import {
+  popupNavigationIndex,
+  popupTabNavigationIndex,
+  usePlayerDialog,
+  usePopupFocusReturn,
+  type PopupNavigationKey,
+} from '../lib/player-dialog';
+import { loadVideoVolume, saveVideoVolume, type VideoVolumePreference } from '../lib/video-volume';
 
 // ------------------------------------------------------------------
 // Unified "personal video" — sourced from the user's Drive (Files) and,
@@ -27,17 +43,6 @@ type Vid = {
   path?: string;         // files: raw path
   mediaItem?: MediaItem; // media: for the HLS player
 };
-
-type ResumeInfo = { pos: number; dur: number; at: number };
-type ResumeMap = Record<string, ResumeInfo>;
-
-const RESUME_KEY = 'cbx.videos.resume.v1';
-function loadResume(): ResumeMap {
-  try { return JSON.parse(localStorage.getItem(RESUME_KEY) || '{}') || {}; } catch { return {}; }
-}
-function persistResume(m: ResumeMap) {
-  try { localStorage.setItem(RESUME_KEY, JSON.stringify(m)); } catch { /* ignore quota */ }
-}
 
 const VIDEO_EXT = /\.(mp4|mov|m4v|webm|mkv|avi|wmv|flv|mpg|mpeg|3gp|ogv|ts)$/i;
 function cleanName(filename: string): string {
@@ -213,16 +218,83 @@ function VideoCard({ v, resume, onPlay }: { v: Vid; resume?: ResumeInfo; onPlay:
 }
 
 // ------------------------------------------------------------------
-// Fullscreen native player for Drive videos (files are direct MP4/WebM,
-// no HLS). Resumes from and saves local progress.
+// Fullscreen player for Drive videos (files are direct MP4/WebM, no HLS).
+// It deliberately uses the same single custom transport as library playback;
+// browser-native controls must not create a second, competing bar.
 // ------------------------------------------------------------------
+const DriveSvg = ({ children }: { children: React.ReactNode }) => (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">{children}</svg>
+);
+const DriveExpandIcon = () => <DriveSvg><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3" /></DriveSvg>;
+const DriveShrinkIcon = () => <DriveSvg><path d="M3 8h3a2 2 0 0 0 2-2V3M21 8h-3a2 2 0 0 1-2-2V3M21 16h-3a2 2 0 0 0-2 2v3M3 16h3a2 2 0 0 1 2 2v3" /></DriveSvg>;
+const DriveMutedIcon = () => <DriveSvg><path d="M11 5 6 9H3v6h3l5 4zM16 9l5 6M21 9l-5 6" /></DriveSvg>;
+const DrivePipIcon = () => <DriveSvg><path d="M3 8V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6" /><rect x="3" y="11.5" width="9" height="7" rx="1.5" /></DriveSvg>;
+const DriveAirplayIcon = () => <DriveSvg><path d="M5 17H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-1M12 14l5 7H7z" /></DriveSvg>;
+
+function handleDrivePlayerMenuKeyDown(event: React.KeyboardEvent<HTMLElement>, onClose: () => void) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+    return;
+  }
+  const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), a[href]'));
+  if (event.key === 'Tab') {
+    const nextIndex = popupTabNavigationIndex(
+      items.findIndex(item => item === document.activeElement), items.length, event.shiftKey,
+    );
+    if (nextIndex < 0) return;
+    event.preventDefault(); event.stopPropagation(); items[nextIndex].focus();
+    return;
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  const nextIndex = popupNavigationIndex(
+    event.key as PopupNavigationKey,
+    items.findIndex(item => item === document.activeElement),
+    items.length,
+  );
+  if (nextIndex < 0) return;
+  event.preventDefault(); event.stopPropagation(); items[nextIndex].focus();
+}
+
 function DriveVideoPlayer({ v, startAt, onSaveProgress, onClose }: {
   v: Vid; startAt: number; onSaveProgress: (pos: number, dur: number) => void; onClose: () => void;
 }) {
+  const containerRef = useRef<HTMLDivElement>(null);
   const ref = useRef<HTMLVideoElement>(null);
+  const accountId = useAuth(state => state.user?.id ?? null);
+  usePlayerDialog(containerRef);
+  useEffect(() => {
+    if (usePlayer.getState().playing) usePlayer.getState().setPlaying(false);
+  }, []);
   const [loading, setLoading] = useState(true);
+  const [buffering, setBuffering] = useState(false);
   const [error, setError] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [bufferedEnd, setBufferedEnd] = useState(0);
+  const initialVideoVolumeRef = useRef<VideoVolumePreference | null>(null);
+  if (!initialVideoVolumeRef.current) initialVideoVolumeRef.current = loadVideoVolume(accountId);
+  const [volume, setVolume] = useState(initialVideoVolumeRef.current.volume);
+  const [muted, setMuted] = useState(initialVideoVolumeRef.current.muted);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [controlsShown, setControlsShown] = useState(true);
+  const [controlsFocused, setControlsFocused] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [canPip, setCanPip] = useState(false);
+  const [canAirplay, setCanAirplay] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [speedOpen, setSpeedOpen] = useState(false);
+  const optionsMenuRef = useRef<HTMLDivElement>(null);
+  const speedMenuRef = useRef<HTMLDivElement>(null);
+  usePopupFocusReturn(optionsOpen, optionsMenuRef);
+  usePopupFocusReturn(speedOpen, speedMenuRef);
   const lastSave = useRef(0);
+  const currentRef = useRef(0);
+  const retryAt = useRef(startAt);
+  const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const save = useCallback(() => {
     const el = ref.current;
@@ -231,79 +303,325 @@ function DriveVideoPlayer({ v, startAt, onSaveProgress, onClose }: {
     }
   }, [onSaveProgress]);
 
+  const pokeControls = useCallback(() => {
+    setControlsShown(true);
+    if (controlsTimer.current) clearTimeout(controlsTimer.current);
+    if (ref.current && !ref.current.paused) controlsTimer.current = setTimeout(() => setControlsShown(false), 3000);
+  }, []);
+  const togglePlay = useCallback(() => {
+    const el = ref.current; if (!el) return;
+    if (el.paused) el.play().catch(() => {}); else el.pause();
+  }, []);
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current; if (!el) return;
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    else {
+      const video = ref.current as any;
+      try { if (video?.webkitDisplayingFullscreen) video.webkitExitFullscreen?.(); else video?.webkitEnterFullscreen?.(); } catch { /* unsupported */ }
+    }
+  }, []);
+  const togglePip = async () => {
+    const el = ref.current as any; if (!el) return;
+    try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await el.requestPictureInPicture(); } catch { /* unsupported at runtime */ }
+  };
+  const airplay = () => (ref.current as any)?.webkitShowPlaybackTargetPicker?.();
+  const choosePlaybackRate = useCallback((rate: number) => {
+    const el = ref.current;
+    if (!el || !applyPlaybackRate(el, rate)) return;
+    try { (el as any).preservesPitch = true; } catch { /* unsupported */ }
+    setPlaybackRate(rate);
+    setSpeedOpen(false);
+  }, []);
+  const retry = () => {
+    const el = ref.current; if (!el) return;
+    retryAt.current = currentRef.current || startAt;
+    setError(false); setLoading(true); setBuffering(false);
+    el.load();
+  };
+
   useEffect(() => {
     const el = ref.current; if (!el) return;
+    const savedVolume = loadVideoVolume(accountId);
+    el.volume = savedVolume.volume;
+    el.muted = savedVolume.muted;
+    setVolume(savedVolume.volume);
+    setMuted(savedVolume.muted);
     const onMeta = () => {
-      setLoading(false);
-      if (startAt > 0 && startAt < el.duration - 5) { try { el.currentTime = startAt; } catch { /* noop */ } }
+      setLoading(false); setBuffering(false); setError(false); setDuration(isFinite(el.duration) ? el.duration : 0);
+      const resumeAt = retryAt.current;
+      if (resumeAt > 0 && resumeAt < el.duration - 5) { try { el.currentTime = resumeAt; } catch { /* noop */ } }
       el.play().catch(() => {});
     };
     const onTime = () => {
+      currentRef.current = el.currentTime || 0;
+      setCurrentTime(currentRef.current);
+      if (!el.paused) setBuffering(false);
       const now = Date.now();
       if (now - lastSave.current > 5000) { lastSave.current = now; save(); }
     };
-    const onErr = () => { setError(true); setLoading(false); };
+    const onProgress = () => {
+      let end = 0;
+      for (let i = 0; i < el.buffered.length; i++) end = Math.max(end, el.buffered.end(i));
+      setBufferedEnd(end);
+    };
+    const onPlay = () => { setPlaying(true); setBuffering(false); };
+    const onPause = () => { setPlaying(false); setBuffering(false); };
+    const onVolume = () => {
+      setVolume(el.volume); setMuted(el.muted);
+      saveVideoVolume(accountId, { volume: el.volume, muted: el.muted });
+    };
+    const onRate = () => setPlaybackRate(el.playbackRate || 1);
+    const onErr = () => { retryAt.current = currentRef.current || startAt; setError(true); setLoading(false); setBuffering(false); };
+    const onWait = () => setBuffering(true);
+    const onReady = () => setBuffering(false);
+    const onFs = () => setIsFullscreen(!!document.fullscreenElement);
+    const onWebkitFs = () => setIsFullscreen(!!(el as any).webkitDisplayingFullscreen);
+    const onAirplay = (event: any) => setCanAirplay(event.availability === 'available');
     el.addEventListener('loadedmetadata', onMeta);
     el.addEventListener('timeupdate', onTime);
+    el.addEventListener('progress', onProgress);
+    el.addEventListener('play', onPlay);
+    el.addEventListener('pause', onPause);
+    el.addEventListener('volumechange', onVolume);
+    el.addEventListener('ratechange', onRate);
     el.addEventListener('error', onErr);
-    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', esc);
+    el.addEventListener('waiting', onWait);
+    el.addEventListener('stalled', onWait);
+    el.addEventListener('playing', onReady);
+    el.addEventListener('canplay', onReady);
+    el.addEventListener('seeked', onReady);
+    document.addEventListener('fullscreenchange', onFs);
+    el.addEventListener('webkitbeginfullscreen', onWebkitFs);
+    el.addEventListener('webkitendfullscreen', onWebkitFs);
+    setCanPip(!!document.pictureInPictureEnabled && typeof (el as any).requestPictureInPicture === 'function');
+    if ((window as any).WebKitPlaybackTargetAvailabilityEvent && typeof (el as any).webkitShowPlaybackTargetPicker === 'function') {
+      el.addEventListener('webkitplaybacktargetavailabilitychanged', onAirplay);
+    }
     return () => {
       save();
       el.removeEventListener('loadedmetadata', onMeta);
       el.removeEventListener('timeupdate', onTime);
+      el.removeEventListener('progress', onProgress);
+      el.removeEventListener('play', onPlay);
+      el.removeEventListener('pause', onPause);
+      el.removeEventListener('volumechange', onVolume);
+      el.removeEventListener('ratechange', onRate);
       el.removeEventListener('error', onErr);
-      window.removeEventListener('keydown', esc);
+      el.removeEventListener('waiting', onWait);
+      el.removeEventListener('stalled', onWait);
+      el.removeEventListener('playing', onReady);
+      el.removeEventListener('canplay', onReady);
+      el.removeEventListener('seeked', onReady);
+      document.removeEventListener('fullscreenchange', onFs);
+      el.removeEventListener('webkitbeginfullscreen', onWebkitFs);
+      el.removeEventListener('webkitendfullscreen', onWebkitFs);
+      el.removeEventListener('webkitplaybacktargetavailabilitychanged', onAirplay);
+      if (controlsTimer.current) clearTimeout(controlsTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [v.key]);
+  }, [v.key, accountId]);
 
-  return (
-    <div className="fixed inset-0 z-[200] bg-black flex flex-col animate-fade-in">
-      <div className="absolute top-0 inset-x-0 z-10 p-3 sm:p-4 flex items-center gap-2 bg-gradient-to-b from-black/80 to-transparent">
-        <button className="icon-btn text-white hover:bg-white/10 shrink-0" onClick={onClose} aria-label="Close">
+  useEffect(() => {
+    if (controlsTimer.current) clearTimeout(controlsTimer.current);
+    if (playing) controlsTimer.current = setTimeout(() => setControlsShown(false), 3000);
+    else setControlsShown(true);
+    return () => { if (controlsTimer.current) clearTimeout(controlsTimer.current); };
+  }, [playing, v.key]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target;
+      const el = ref.current;
+      const key = event.key.toLowerCase();
+      if (event.key === 'Escape') {
+        if (optionsOpen || speedOpen) { event.preventDefault(); setOptionsOpen(false); setSpeedOpen(false); }
+        else if (!document.fullscreenElement) onClose();
+        return;
+      }
+      if (target instanceof HTMLElement && target.matches('input, textarea, select, button, [contenteditable="true"]')) return;
+      if (optionsOpen || speedOpen) return;
+      if (key === ' ' || key === 'k') { event.preventDefault(); togglePlay(); }
+      else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight' || key === 'j' || key === 'l') && el) {
+        event.preventDefault();
+        const delta = event.key === 'ArrowLeft' ? -5 : event.key === 'ArrowRight' ? 5 : key === 'j' ? -10 : 10;
+        el.currentTime = Math.max(0, Math.min(el.duration || Number.MAX_SAFE_INTEGER, el.currentTime + delta));
+      } else if (key === 'm' && el) { event.preventDefault(); el.muted = !el.muted; }
+      else if ((event.key === '[' || event.key === ']') && el) {
+        event.preventDefault(); choosePlaybackRate(stepPlaybackRate(el.playbackRate || 1, event.key === '[' ? -1 : 1));
+      }
+      else if (key === 'f') { event.preventDefault(); toggleFullscreen(); }
+      else return;
+      pokeControls();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [choosePlaybackRate, onClose, optionsOpen, speedOpen, pokeControls, toggleFullscreen, togglePlay]);
+
+  const controlsVisible = controlsShown || !playing || controlsFocused || error || optionsOpen || speedOpen;
+  const playedPct = duration ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+  const bufferedPct = duration ? Math.max(playedPct, Math.min(100, (bufferedEnd / duration) * 100)) : 0;
+
+  return createPortal((
+    <div ref={containerRef} className="fixed inset-0 z-[300] bg-black flex flex-col animate-fade-in"
+      role="dialog" aria-modal="true" aria-label={`Video player: ${v.name}`} tabIndex={-1}
+      onPointerMove={pokeControls} onPointerDown={pokeControls}
+      onFocusCapture={event => {
+        const target = event.target;
+        if (target instanceof HTMLElement && target !== containerRef.current && !target.matches('video')) setControlsFocused(true);
+        pokeControls();
+      }}
+      onBlurCapture={event => {
+        const next = event.relatedTarget;
+        const focusedControl = next instanceof HTMLElement && containerRef.current?.contains(next)
+          && next !== containerRef.current && !next.matches('video');
+        setControlsFocused(!!focusedControl);
+        pokeControls();
+      }}>
+      <div className={cx('absolute top-0 inset-x-0 z-10 p-3 pt-[max(0.75rem,env(safe-area-inset-top))] flex items-center gap-2 bg-gradient-to-b from-black/90 via-black/55 to-transparent transition-opacity duration-300',
+        controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none')}>
+        <button className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25 shrink-0" onClick={onClose} aria-label="Close player">
           <Icon.ChevronLeft size={24} />
         </button>
         <div className="min-w-0 flex-1">
           <p className="text-white font-semibold truncate">{v.name}</p>
           <p className="text-xs text-slate-400 truncate">{v.folderName}{v.size ? ` · ${formatBytes(v.size)}` : ''}</p>
         </div>
-        {v.downloadUrl && (
-          <a href={v.downloadUrl} className="icon-btn text-white hover:bg-white/10 shrink-0" aria-label="Download" onClick={e => e.stopPropagation()}>
-            <Icon.Download size={20} />
-          </a>
-        )}
+        <div className="hidden sm:flex items-center gap-1 shrink-0">
+          <button type="button" onClick={() => { setOptionsOpen(false); setSpeedOpen(open => !open); }}
+            className={cx('w-11 h-11 grid place-items-center rounded-full text-[11px] font-bold hover:bg-white/15 active:bg-white/25', playbackRate !== 1 ? 'text-brand-300' : 'text-white')}
+            aria-label={`Playback speed ${playbackRateLabel(playbackRate)}`} aria-haspopup="menu" aria-expanded={speedOpen}
+            title="Playback speed ([ or ])">{playbackRateLabel(playbackRate)}</button>
+          {v.downloadUrl && <a href={v.downloadUrl} className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25" aria-label="Download video" title="Download video"><Icon.Download size={20} /></a>}
+          {canAirplay && <button type="button" onClick={airplay} aria-label="AirPlay" title="AirPlay" className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25"><DriveAirplayIcon /></button>}
+          {canPip && <button type="button" onClick={togglePip} aria-label="Picture in picture" title="Picture in picture" className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25"><DrivePipIcon /></button>}
+        </div>
+        <button type="button" onClick={() => { setSpeedOpen(false); setOptionsOpen(open => !open); }}
+          className="sm:hidden w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25 shrink-0"
+          aria-label="More playback options" aria-haspopup="menu" aria-expanded={optionsOpen} title="More playback options"><Icon.More size={22} /></button>
+        {optionsOpen && <>
+          <div className="fixed inset-0 z-[310]" aria-hidden="true" onClick={() => setOptionsOpen(false)} />
+          <div ref={optionsMenuRef} role="menu" aria-label="Playback options" tabIndex={-1}
+            onKeyDown={event => handleDrivePlayerMenuKeyDown(event, () => setOptionsOpen(false))}
+            className="absolute right-2 top-[max(3.75rem,calc(env(safe-area-inset-top)+3.25rem))] z-[320] w-64 max-w-[86vw] glass-strong rounded-xl shadow-float overflow-hidden animate-fade-in sm:hidden">
+            <p className="px-3 py-2 text-[11px] uppercase tracking-wide text-slate-400 border-b border-white/10">Playback options</p>
+            <button type="button" role="menuitem" onClick={() => { setOptionsOpen(false); setSpeedOpen(true); }} className="w-full min-h-11 px-3 py-2.5 text-sm flex items-center gap-3 text-white hover:bg-white/10">
+              <span className="w-6 text-center text-[11px] font-bold tabular-nums">{playbackRateLabel(playbackRate)}</span> Playback speed
+            </button>
+            {v.downloadUrl && <a href={v.downloadUrl} role="menuitem" onClick={() => setOptionsOpen(false)} className="w-full min-h-11 px-3 py-2.5 text-sm flex items-center gap-3 text-white hover:bg-white/10"><Icon.Download size={20} /> Download video</a>}
+            {canAirplay && <button type="button" role="menuitem" onClick={() => { setOptionsOpen(false); airplay(); }} className="w-full min-h-11 px-3 py-2.5 text-sm flex items-center gap-3 text-white hover:bg-white/10"><DriveAirplayIcon /> AirPlay</button>}
+            {canPip && <button type="button" role="menuitem" onClick={() => { setOptionsOpen(false); togglePip(); }} className="w-full min-h-11 px-3 py-2.5 text-sm flex items-center gap-3 text-white hover:bg-white/10"><DrivePipIcon /> Picture in picture</button>}
+          </div>
+        </>}
+        {speedOpen && <>
+          <div className="fixed inset-0 z-[310]" aria-hidden="true" onClick={() => setSpeedOpen(false)} />
+          <div ref={speedMenuRef} role="menu" aria-label="Playback speed" tabIndex={-1}
+            onKeyDown={event => handleDrivePlayerMenuKeyDown(event, () => setSpeedOpen(false))}
+            className="absolute right-2 top-[max(3.75rem,calc(env(safe-area-inset-top)+3.25rem))] z-[320] w-56 max-w-[86vw] glass-strong rounded-xl shadow-float overflow-hidden animate-fade-in">
+            <p className="px-3 py-2 text-[11px] uppercase tracking-wide text-slate-400 border-b border-white/10">Playback speed</p>
+            {VIDEO_PLAYBACK_RATES.map(rate => <button key={rate} type="button" role="menuitemradio" aria-checked={rate === playbackRate}
+              onClick={() => choosePlaybackRate(rate)} className={cx('w-full min-h-11 px-3 py-2.5 text-sm flex items-center gap-3 text-left hover:bg-white/10', rate === playbackRate ? 'text-brand-300' : 'text-white')}>
+              <span className="w-5 grid place-items-center">{rate === playbackRate && <Icon.Check size={16} />}</span>
+              {playbackRateLabel(rate)}{rate === 1 ? ' · Normal' : ''}
+            </button>)}
+          </div>
+        </>}
       </div>
-      {loading && !error && <div className="absolute inset-0 grid place-items-center text-white"><Spinner size={40} /></div>}
+      {(loading || buffering) && !error && <div className="absolute inset-0 z-[7] grid place-items-center text-white pointer-events-none" role="status" aria-live="polite">
+        <div className="rounded-2xl bg-black/55 backdrop-blur-sm px-4 py-3 flex items-center gap-3 shadow-float">
+          <Spinner size={loading ? 36 : 26} /><span className="text-sm font-medium">{loading ? 'Loading video…' : 'Buffering…'}</span>
+        </div>
+      </div>}
       {error && (
-        <div className="absolute inset-0 grid place-items-center text-center p-6">
-          <div>
-            <p className="text-white mb-2">This video couldn't be played in the browser.</p>
-            {v.downloadUrl && <a href={v.downloadUrl} className="btn-secondary inline-flex items-center gap-2"><Icon.Download size={16} /> Download</a>}
+        <div className="absolute inset-0 z-[9] grid place-items-center text-center p-6 bg-black/60">
+          <div className="max-w-md rounded-2xl bg-ink-900/90 border border-white/10 p-5 shadow-float">
+            <p className="text-white font-semibold">Playback stopped</p>
+            <p className="text-sm text-slate-300 mt-1">This video could not be played in the browser.</p>
+            <div className="flex items-center justify-center gap-2 mt-4 flex-wrap">
+              <button type="button" className="btn-primary !min-h-11" onClick={retry}>Try again</button>
+              {v.downloadUrl && <a href={v.downloadUrl} className="btn-secondary !min-h-11 inline-flex items-center gap-2"><Icon.Download size={16} /> Download</a>}
+              <button type="button" className="btn-secondary !min-h-11" onClick={onClose}>Close</button>
+            </div>
           </div>
         </div>
       )}
-      <video ref={ref} controls autoPlay playsInline className="w-full h-full object-contain bg-black"
-        src={v.streamUrl} poster={v.thumbUrl} />
+      <video ref={ref} controls={false} autoPlay playsInline className="w-full h-full object-contain bg-black"
+        src={v.streamUrl} poster={v.thumbUrl} aria-label={`Playing ${v.name}`}
+        onClick={() => { pokeControls(); togglePlay(); }} onDoubleClick={toggleFullscreen} />
+      {!error && (
+        <div className={cx('absolute inset-x-0 bottom-0 z-[8] px-3 sm:px-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-12 bg-gradient-to-t from-black/95 via-black/70 to-transparent transition-opacity duration-300',
+          controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none')} role="group" aria-label="Playback controls">
+          <div className="relative h-8 flex items-center">
+            <span aria-hidden="true" className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full"
+              style={{ background: `linear-gradient(to right, rgb(99 102 241) 0% ${playedPct}%, rgba(255,255,255,.38) ${playedPct}% ${bufferedPct}%, rgba(255,255,255,.18) ${bufferedPct}% 100%)` }} />
+            <input type="range" min={0} max={duration || 1} step={0.1} value={Math.min(currentTime, duration || Number.MAX_SAFE_INTEGER)} disabled={!duration}
+              aria-label="Seek through video" aria-valuetext={`${formatDuration(currentTime)} of ${formatDuration(duration)}`}
+              onInput={event => { const el = ref.current; if (el) el.currentTime = +(event.target as HTMLInputElement).value; }}
+              className="aerie-video-seek absolute inset-x-0 top-1/2 z-[1] w-full -translate-y-1/2 disabled:cursor-default" />
+          </div>
+          <div className="flex items-center gap-1 sm:gap-2 min-w-0">
+            <button type="button" onClick={togglePlay} aria-label={playing ? 'Pause (Space or K)' : 'Play (Space or K)'} title={playing ? 'Pause (Space or K)' : 'Play (Space or K)'}
+              className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25 shrink-0">
+              {playing ? <Icon.Pause size={22} /> : <Icon.Play size={22} />}
+            </button>
+            <button type="button" onClick={() => { const el = ref.current; if (el) el.currentTime = Math.max(0, el.currentTime - 10); }} aria-label="Back 10 seconds" title="Back 10 seconds (J)"
+              className="hidden sm:grid w-10 h-10 place-items-center rounded-full text-xs font-semibold text-white hover:bg-white/15 active:bg-white/25 shrink-0">−10</button>
+            <button type="button" onClick={() => { const el = ref.current; if (el) el.currentTime = Math.min(el.duration || Number.MAX_SAFE_INTEGER, el.currentTime + 10); }} aria-label="Forward 10 seconds" title="Forward 10 seconds (L)"
+              className="hidden sm:grid w-10 h-10 place-items-center rounded-full text-xs font-semibold text-white hover:bg-white/15 active:bg-white/25 shrink-0">+10</button>
+            <span className="text-[11px] sm:text-xs text-slate-200 tabular-nums whitespace-nowrap shrink-0">
+              {formatDuration(currentTime)}{duration > 0 && <span className="hidden min-[360px]:inline"> / {formatDuration(duration)}</span>}
+            </span>
+            <span className="flex-1 min-w-0" />
+            <button type="button" onClick={() => { const el = ref.current; if (el) el.muted = !el.muted; }} aria-label={muted ? 'Unmute (M)' : 'Mute (M)'} title={muted ? 'Unmute (M)' : 'Mute (M)'}
+              className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25 shrink-0">
+              {muted || volume === 0 ? <DriveMutedIcon /> : <Icon.Volume size={20} />}
+            </button>
+            <input type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} aria-label="Volume"
+              onInput={event => { const el = ref.current; if (el) { el.muted = false; el.volume = +(event.target as HTMLInputElement).value; } }}
+              className="w-24 accent-brand-500 hidden md:block" />
+            <button type="button" onClick={toggleFullscreen} aria-label={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'} title={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
+              className="w-11 h-11 grid place-items-center rounded-full text-white hover:bg-white/15 active:bg-white/25 shrink-0">
+              {isFullscreen ? <DriveShrinkIcon /> : <DriveExpandIcon />}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
-  );
+  ), document.body);
 }
 
 type SortKey = 'recent' | 'name' | 'size';
 
 export default function Videos() {
+  const accountId = useAuth(state => state.user?.id ?? null);
   const [loading, setLoading] = useState(true);
-  const [vids, setVids] = useState<Vid[]>([]);
+  const [videoState, setVideoState] = useState<{ accountId: number | null; items: Vid[] }>({ accountId: null, items: [] });
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<SortKey>('recent');
   const [folder, setFolder] = useState<string>('all');
-  const [resume, setResume] = useState<ResumeMap>(() => loadResume());
-  const [playing, setPlaying] = useState<Vid | null>(null);
+  const [resumeState, setResumeState] = useState<{ accountId: number | null; items: ResumeMap }>(() => ({
+    accountId,
+    items: accountId ? loadDriveVideoResume(accountId) : {},
+  }));
+  const [playingState, setPlayingState] = useState<{ accountId: number; video: Vid } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
+  const loadToken = useRef(0);
+  // Never render a previous member's in-memory list/history/player during the
+  // render before account-change effects run.
+  const vids = videoState.accountId === accountId ? videoState.items : [];
+  const resume = resumeState.accountId === accountId ? resumeState.items : {};
+  const playing = playingState?.accountId === accountId ? playingState.video : null;
 
   const load = useCallback(async () => {
+    const requestedAccount = accountId;
+    const token = ++loadToken.current;
+    if (!requestedAccount) {
+      setVideoState({ accountId: null, items: [] });
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       const [driveFiles, mediaVids] = await Promise.all([
@@ -341,30 +659,41 @@ export default function Videos() {
           mediaItem: m,
         });
       }
-      setVids(list);
+      if (loadToken.current === token) setVideoState({ accountId: requestedAccount, items: list });
     } catch (e: any) {
-      toast('Could not load videos', 'error', e?.message);
-      setVids([]);
+      if (loadToken.current === token) {
+        toast('Could not load videos', 'error', e?.message);
+        setVideoState({ accountId: requestedAccount, items: [] });
+      }
     } finally {
-      setLoading(false);
+      if (loadToken.current === token) setLoading(false);
     }
-  }, []);
+  }, [accountId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setPlayingState(null);
+    setResumeState({ accountId, items: accountId ? loadDriveVideoResume(accountId) : {} });
+    void load();
+    return () => { loadToken.current++; };
+  }, [accountId, load]);
 
   const saveProgress = useCallback((key: string, pos: number, dur: number) => {
-    setResume(prev => {
-      const next = { ...prev };
+    const immutableAccountId = accountId;
+    if (!immutableAccountId) return;
+    setResumeState(previous => {
+      // A late media cleanup from an account that just signed out must not
+      // replace the newly active member's state.
+      if (previous.accountId !== immutableAccountId) return previous;
+      const next = { ...previous.items };
       if (dur > 0 && pos >= dur - 12) {
         // finished — clear from continue-watching
         delete next[key];
       } else {
         next[key] = { pos, dur, at: Date.now() };
       }
-      persistResume(next);
-      return next;
+      return { accountId: immutableAccountId, items: saveDriveVideoResume(immutableAccountId, next) };
     });
-  }, []);
+  }, [accountId]);
 
   const folders = useMemo(() => {
     const map = new Map<string, number>();
@@ -417,15 +746,15 @@ export default function Videos() {
     }
   }
 
-  function play(v: Vid) { setPlaying(v); }
+  function play(v: Vid) { if (accountId) setPlayingState({ accountId, video: v }); }
 
   function closePlayer() {
-    setPlaying(null);
+    setPlayingState(null);
     // Pull fresh media resume state (progressPct) in case a media item advanced.
     if (playing?.source === 'media') load();
   }
 
-  if (loading) return <PageLoader />;
+  if (loading || !accountId || videoState.accountId !== accountId) return <PageLoader />;
 
   const empty = vids.length === 0;
   // Folder sections are a browsing convenience for the default (chronological)

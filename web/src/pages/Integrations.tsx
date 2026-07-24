@@ -74,8 +74,6 @@ const GROUPS: { title: string; cards: CardDef[] }[] = [
       specs: [{ key: 'ACESTEP_URL', label: 'Server URL', placeholder: 'http://192.168.0.10:8001' }] },
     { id: 'whisper', icon: 'Volume', title: 'Whisper voice', subtitle: 'Speech-to-text for dictation and voice commands.', service: 'whisper',
       specs: [{ key: 'WHISPER_URL', label: 'Server URL (Wyoming)', placeholder: 'http://192.168.0.10:10300' }] },
-    { id: 'translate', icon: 'Doc', title: 'Translation', subtitle: 'Default target language for AI translations.',
-      specs: [{ key: 'TRANSLATE_LANG', label: 'Language', placeholder: 'en', hint: 'ISO code, e.g. en, cs, de.' }] },
   ] },
   { title: 'Server addresses', cards: [
     { id: 'server', icon: 'Wifi', title: 'Server addresses', subtitle: 'How apps and devices reach this server.', wide: true,
@@ -85,8 +83,8 @@ const GROUPS: { title: string; cards: CardDef[] }[] = [
         { key: 'LAN_URL', label: 'LAN address', placeholder: 'http://192.168.0.10:8200', hint: 'e.g. http://192.168.0.10:8200' },
       ],
       advanced: [
-        { key: 'CAST_SUBNET', label: 'Cast subnet', placeholder: '192.168.0.0/24', hint: 'Subnet scanned for Chromecast devices.' },
-        { key: 'SERVER_HOST', label: 'Server host', placeholder: '0.0.0.0', hint: 'Bind address of the server process.' },
+        { key: 'CAST_SUBNET', label: 'Cast network address', placeholder: '192.168.0.0', hint: 'An IPv4 address whose /24 network is scanned for Chromecast devices (no CIDR suffix).' },
+        { key: 'SERVER_HOST', label: 'LAN host fallback', placeholder: '192.168.0.10', hint: 'LAN IPv4 used to derive the Cast /24 only when Cast network and Jellyfin URL are blank.' },
       ] },
   ] },
 ];

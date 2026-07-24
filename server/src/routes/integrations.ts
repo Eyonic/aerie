@@ -10,6 +10,8 @@ import { getSetting, setSetting, audit } from '../lib/db.js';
 import { setOverride, hasOverride } from '../lib/overrides.js';
 import { config, cfgVal } from '../config.js';
 import net from 'node:net';
+import { isSealed, seal, unseal } from '../services/secrets.js';
+import { outboundText, validateOutboundUrl } from '../services/outbound-http.js';
 
 const r = Router();
 r.use(requireAdmin);
@@ -37,7 +39,7 @@ function validValue(key: string, value: string): boolean {
   if (value === '') return true;
   if (value.length > 500) return false;
   if (/_URL$/.test(key)) {
-    try { const u = new URL(value); return u.protocol === 'http:' || u.protocol === 'https:'; }
+    try { validateOutboundUrl(value); return true; }
     catch { return false; }
   }
   return !/[\r\n]/.test(value);
@@ -68,7 +70,8 @@ r.put('/', (req: AuthedRequest, res) => {
   }
   for (const [key, raw] of Object.entries(body)) {
     const value = String(raw ?? '').trim();
-    setSetting(SETTING_PREFIX + key, value);
+    const field = FIELD_MAP.get(key)!;
+    setSetting(SETTING_PREFIX + key, field.secret && value ? seal(value, `integration:${key}`) : value);
     setOverride(key, value);
     applied.push(key);
   }
@@ -102,9 +105,12 @@ const TESTS: Record<string, () => Promise<{ ok: boolean; detail: string }>> = {
 async function probeJson(url: string, describe: (d: any) => string, headers: Record<string, string> = {}) {
   if (!/^https?:\/\//.test(url)) return { ok: false, detail: 'not configured' };
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(6000) });
-    if (!res.ok) return { ok: false, detail: `HTTP ${res.status}` };
-    const data = await res.json().catch(() => ({}));
+    const res = await outboundText(url, {
+      headers, timeoutMs: 6_000, maxBytes: 1024 * 1024, requireOk: false,
+    });
+    if (res.status < 200 || res.status >= 300) return { ok: false, detail: `HTTP ${res.status}` };
+    let data: any = {};
+    try { data = JSON.parse(res.body); } catch { /* preserve the prior empty-object fallback */ }
     return { ok: true, detail: describe(data) };
   } catch (e: any) {
     return { ok: false, detail: String(e?.cause?.code || e?.message || 'unreachable').slice(0, 120) };
@@ -114,7 +120,7 @@ async function probeJson(url: string, describe: (d: any) => string, headers: Rec
 function tcpProbe(url: string, defaultPort: number, okMsg: string): Promise<{ ok: boolean; detail: string }> {
   return new Promise(resolve => {
     let host = '', port = defaultPort;
-    try { const u = new URL(url); host = u.hostname; port = Number(u.port) || defaultPort; }
+    try { const u = validateOutboundUrl(url); host = u.hostname; port = Number(u.port) || defaultPort; }
     catch { return resolve({ ok: false, detail: 'not configured' }); }
     const sock = net.connect({ host, port, timeout: 4000 });
     sock.on('connect', () => { sock.destroy(); resolve({ ok: true, detail: okMsg }); });
@@ -135,7 +141,14 @@ export default r;
 // saved settings into the override store.
 export function loadIntegrationOverrides() {
   for (const f of FIELDS) {
-    const v = getSetting(SETTING_PREFIX + f.key, '');
-    if (v) setOverride(f.key, v);
+    const stored = getSetting(SETTING_PREFIX + f.key, '');
+    if (!stored) continue;
+    try {
+      const value = f.secret ? unseal(stored, `integration:${f.key}`) : stored;
+      setOverride(f.key, value);
+      if (f.secret && !isSealed(stored)) setSetting(SETTING_PREFIX + f.key, seal(value, `integration:${f.key}`));
+    } catch (error: any) {
+      console.error(`[integrations] ${f.key} could not be decrypted: ${String(error?.message || error)}`);
+    }
   }
 }

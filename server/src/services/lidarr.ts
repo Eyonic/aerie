@@ -2,19 +2,33 @@
 // talks to Lidarr directly: search artists (MusicBrainz lookup) and add them
 // (monitored + search), which makes Lidarr grab their discography.
 import { config } from '../config.js';
+import { OutboundHttpError, outboundJson, outboundText } from './outbound-http.js';
 const base = () => config.lidarr.url.replace(/\/$/, '');
 const key = () => config.lidarr.apiKey;
 
 export function configured(): boolean { return !!base() && !!key(); }
 
+class LidarrApiError extends Error {
+  constructor(status: number, path: string, readonly duplicate: boolean) {
+    super(`lidarr ${status} ${path}`);
+    this.name = 'LidarrApiError';
+  }
+}
+
 async function ld(path: string, opts: RequestInit = {}): Promise<any> {
-  const res = await fetch(`${base()}/api/v1${path}`, {
+  const res = await outboundText(`${base()}/api/v1${path}`, {
     ...opts,
     headers: { 'X-Api-Key': key(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
-    signal: AbortSignal.timeout(15000),
+    timeoutMs: 15_000,
+    maxBytes: 8 * 1024 * 1024,
+    requireOk: false,
   });
-  if (!res.ok) throw new Error(`lidarr ${res.status} ${path}: ${(await res.text()).slice(0, 200)}`);
-  return res.status === 200 ? res.json() : {};
+  if (res.status < 200 || res.status >= 300) {
+    throw new LidarrApiError(res.status, path, /already been added|already exists/i.test(res.body.slice(0, 200)));
+  }
+  if (res.status !== 200 || !res.body.trim()) return {};
+  try { return JSON.parse(res.body); }
+  catch { throw new OutboundHttpError('invalid_json'); }
 }
 
 export async function status(): Promise<boolean> {
@@ -83,9 +97,10 @@ const normName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
 export async function trendingArtists(): Promise<MusicResult[]> {
   let base = trendCache && Date.now() - trendCache.at < 6 * 3600_000 ? trendCache.items : null;
   if (!base) {
-    const res = await fetch('https://api.deezer.com/chart/0/artists?limit=24', { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) throw new Error(`deezer ${res.status}`);
-    const data: any = await res.json();
+    const res = await outboundJson<any>('https://api.deezer.com/chart/0/artists?limit=24', {
+      timeoutMs: 10_000, maxBytes: 2 * 1024 * 1024,
+    });
+    const data = res.body;
     base = (((data?.data as any[]) || []))
       .filter((d: any) => d?.name)
       .map((d: any) => {
@@ -175,7 +190,7 @@ async function addArtist(artist: any): Promise<{ ok: boolean; name?: string; alr
     const added = await ld('/artist', { method: 'POST', body: JSON.stringify(payload) });
     return { ok: true, name: added?.artistName || artist.artistName, foreignArtistId: artist.foreignArtistId };
   } catch (e: any) {
-    if (/already been added|already exists/i.test(String(e?.message))) {
+    if (e?.duplicate === true || /already been added|already exists/i.test(String(e?.message))) {
       return { ok: true, already: true, name: artist.artistName, foreignArtistId: artist.foreignArtistId };
     }
     throw e;

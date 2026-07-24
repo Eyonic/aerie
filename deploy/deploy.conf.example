@@ -22,8 +22,24 @@ APPDIR=/mnt/user/appdata/aerie
 # builds the image from here).
 SRC_DIR=/root/aerie-src
 
+# Required release gate. run.sh refuses to build unless the server, web and
+# desktop package + lockfile versions all match this exact value, and refuses
+# to promote a candidate whose /api/health reports anything else.
+EXPECTED_VERSION=1.8.3
+
 # Host path of your shared media library (mounted read-mostly at /media).
 MEDIA_DIR=/mnt/user/Media
+
+# Numeric account used by the container process and as owner of Aerie's data,
+# files, and downloads directories. 99:100 is Unraid's nobody:users default;
+# use your host account IDs (commonly 1000:1000) on a regular Linux host.
+AERIE_UID=99
+AERIE_GID=100
+
+# The private (unpublished) candidate must report healthy within this many
+# seconds or the deploy script atomically restores the pre-migration database
+# before restarting the previous container.
+DEPLOY_HEALTH_TIMEOUT=120
 
 # Optional: public HTTPS address of this Aerie (shown in UI hints for
 # casting / mic / PWA install, which need a secure context). Leave empty
@@ -34,7 +50,20 @@ PUBLIC_URL=
 # native apps learn it from /api/health for automatic LAN/cloud failover.
 LAN_URL=
 
-# Optional: second language for the AI "Translate" action (English <-> this).
+# Set to 1 only when requests pass through exactly one trusted reverse proxy.
+# Required for secure HTTPS session cookies when TLS terminates at that proxy.
+TRUST_PROXY=0
+# Optional comma-separated cross-origin browser origins. Same-origin installs
+# should leave this empty.
+CORS_ORIGINS=
+
+# Server-local backup policy written to aerie.env by gen-env.sh.
+AERIE_TIMEZONE=Etc/UTC
+BACKUP_SCHEDULE_HOUR=3
+BACKUP_RETENTION=14
+
+# Legacy upgrade seed only. Translation targets now live in each account's
+# Settings → AI & Privacy page.
 TRANSLATE_LANG=
 
 # --- Reverse proxy (npm-proxy.sh only) -------------------------------

@@ -1,23 +1,58 @@
-# Generic Aerie compose file.
+# Generic hardened Aerie compose file.
 #
+#   mkdir -p appdata/{data,files,downloads,media}
+#   sudo chown -R "${AERIE_UID:-1000}:${AERIE_GID:-1000}" appdata
 #   cp aerie.env.example aerie.env   # then fill in your values
-#   docker compose up -d --build
+#   docker compose up -d --build --wait
 #
 # JWT_SECRET is auto-generated (and persisted under /data) if unset, but
 # setting one explicitly in aerie.env is recommended.
 services:
   aerie:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: aerie:latest
     container_name: aerie
     restart: unless-stopped
+    user: "${AERIE_UID:-1000}:${AERIE_GID:-1000}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     ports:
       - "8200:8200"
     env_file:
       - aerie.env
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777
     volumes:
-      - ./appdata/data:/data
-      - ./appdata/files:/files
-      - ./appdata/downloads:/downloads
-      # Point at your media library (read-only) to enable the media features:
-      # - /path/to/media:/media:ro
+      - ./appdata/data:/data:rw
+      - ./appdata/files:/files:rw
+      - ./appdata/downloads:/downloads:rw
+      - "${AERIE_MEDIA_DIR:-./appdata/media}:/media:ro"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const fs=require('node:fs'); for (const p of
+          ['/data','/files','/downloads'])
+          fs.accessSync(p,fs.constants.R_OK|fs.constants.W_OK);
+          fetch('http://127.0.0.1:' + (process.env.PORT || '8200') +
+          '/api/health').then(async r => { const body = await r.json(); if
+          (!r.ok || body.ok !== true) process.exit(1); }).catch(() =>
+          process.exit(1));
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

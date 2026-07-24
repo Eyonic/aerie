@@ -76,7 +76,7 @@ function DesktopSyncSection() {
   };
 
   return (
-    <Section title="Folder sync — this computer" subtitle="These folders sync with Aerie automatically. Deletes are never synced.">
+    <Section title="Folder sync — this computer" subtitle="Backups only add or update. Two-way folders propagate renames and deletes, while concurrent edits are preserved as conflict copies.">
       <div className="space-y-2">
         {folders.length === 0 ? (
           <EmptyState icon={<Icon.Folder size={28} />} title="No synced folders" subtitle="Choose a local folder to back up or mirror a folder already on the server." />
@@ -127,7 +127,7 @@ function PhoneSyncSection() {
   const hasSync = !!native?.syncList;
   const progress = status?.progress;
   const progressText = progress && typeof progress.done === 'number' && typeof progress.total === 'number'
-    ? `Uploading ${progress.done} of ${progress.total}${progress.folder ? ` — ${progress.folder}` : ''}`
+    ? `Syncing ${progress.done} of ${progress.total}${progress.folder ? ` — ${progress.folder}` : ''}`
     : '';
   const pct = progress?.total ? Math.round((progress.done / progress.total) * 100) : 0;
   const resultCode = String(status?.lastResult || '');
@@ -135,11 +135,14 @@ function PhoneSyncSection() {
     : resultCode === 'unauthorized' ? 'Sign in again — the saved session expired'
       : resultCode === 'deadline' ? 'Paused overnight; remaining files continue next run'
         : resultCode === 'cancelled' ? 'Last sync was cancelled'
+          : resultCode === 'interrupted' ? 'The previous sync was interrupted; it is safe to run again'
+            : resultCode === 'attention_required' ? 'One or more folders need access again'
+              : resultCode === 'sync_incomplete' ? 'Some folders could not finish and will retry'
           : resultCode === 'not_configured' ? 'Server or login is not configured'
             : resultCode === 'schedule_failed' ? 'Android could not schedule the nightly job'
               : resultCode === 'sync_failed' ? 'Last sync failed'
                 : resultCode || 'Waiting for the first run';
-  const resultError = ['unauthorized', 'not_configured', 'schedule_failed', 'sync_failed'].includes(resultCode);
+  const resultError = ['unauthorized', 'not_configured', 'schedule_failed', 'sync_failed', 'sync_incomplete', 'attention_required'].includes(resultCode);
   const lastRun = Number(status?.lastRun || 0);
   const nextRun = Number(status?.nextRun || 0);
   const load = () => {
@@ -155,7 +158,7 @@ function PhoneSyncSection() {
   }, [hasSync]);
   if (!hasSync) return null;
   return (
-    <Section title="Folder sync — this phone" subtitle="Selected folders upload every night while charging on Wi-Fi. Deletes are never synced.">
+    <Section title="Folder sync — this phone" subtitle="Folders sync both ways overnight while charging on Wi-Fi. Camera Backup remains add-only.">
       <div className="grid sm:grid-cols-3 gap-2 mb-4">
         <div className="rounded-xl bg-white/[0.025] border border-white/[0.05] p-3">
           <p className="text-[10px] uppercase tracking-wider muted">Status</p>
@@ -179,17 +182,18 @@ function PhoneSyncSection() {
       )}
       <div className="space-y-2">
         {folders.length === 0 ? (
-          <EmptyState icon={<Icon.Phone size={28} />} title="No phone folders" subtitle="Add a folder to upload it automatically while charging." />
+          <EmptyState icon={<Icon.Phone size={28} />} title="No phone folders" subtitle="Add a folder to keep it in sync automatically while charging." />
         ) : folders.map(f => (
           <div key={f.uri} className="flex items-center gap-3 rounded-xl bg-white/[0.025] border border-white/[0.05] p-3">
             <div className="w-10 h-10 rounded-lg bg-brand-500/15 text-brand-300 grid place-items-center shrink-0"><Icon.Folder size={19} /></div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-white truncate">{f.label}</p>
-              <p className={cx('text-xs truncate flex items-center gap-1.5', progress?.folder === f.label ? 'text-brand-300' : 'muted')}>
+              <div className="flex items-center gap-2"><p className="text-sm font-medium text-white truncate">{f.label}</p><span className={cx('rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide shrink-0', f.mode === 'backup' ? 'bg-slate-500/15 text-slate-300' : 'bg-brand-500/20 text-brand-200')}>{f.mode === 'backup' ? 'Backup' : 'Two-way'}</span></div>
+              <p className={cx('text-xs truncate flex items-center gap-1.5', progress?.folder === f.label ? 'text-brand-300' : f.health?.state === 'permission_required' || f.health?.state === 'error' ? 'text-accent-red' : f.health?.state === 'warning' ? 'text-accent-amber' : 'muted')}>
                 {progress?.folder === f.label && <span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse shrink-0" />}
-                <span className="truncate">{progress?.folder === f.label ? progressText : (status.running ? 'Syncing now...' : (status.lastResult || 'Waiting for next charge-time run'))}</span>
+                <span className="truncate">{progress?.folder === f.label ? progressText : (f.health?.message || (status.running ? 'Waiting for this folder...' : (status.lastResult || 'Waiting for next charge-time run')))}</span>
               </p>
             </div>
+            {f.health?.state === 'permission_required' && <button className="btn-ghost shrink-0" onClick={() => native?.syncAdd?.()}>Grant access</button>}
             <button className="icon-btn text-slate-400 hover:text-accent-red hover:bg-accent-red/10" title="Remove" onClick={() => { native?.syncRemove?.(f.uri); load(); }}><Icon.Trash size={16} /></button>
           </div>
         ))}
@@ -198,8 +202,9 @@ function PhoneSyncSection() {
         <button className="btn-primary" onClick={() => { native?.syncAdd?.(); setTimeout(load, 1200); setTimeout(load, 3500); }}><Icon.Plus size={15} /> Add folder</button>
         {native?.syncAddCamera && <button className="btn-secondary" onClick={() => { native.syncAddCamera?.(); setTimeout(load, 1500); setTimeout(load, 4000); }}><Icon.Photos size={15} /> Enable camera backup</button>}
         <button className="btn-secondary" onClick={() => { native?.syncNow?.(); setTimeout(load, 1000); }}><Icon.Refresh size={15} /> Sync now</button>
+        {status.running && status.manual && native?.syncCancel && <button className="btn-ghost" onClick={() => { native.syncCancel?.(); setTimeout(load, 500); }}>Cancel sync</button>}
       </div>
-      <p className="text-xs text-slate-500 mt-3">First sync starts right away with a progress notification. After that, folders upload automatically overnight while charging on Wi-Fi.</p>
+      <p className="text-xs text-slate-500 mt-3">First sync starts right away. Afterwards, two-way folders reconcile overnight; camera files are only added to Aerie and never remotely removed.</p>
     </Section>
   );
 }
@@ -335,7 +340,7 @@ function DuplicateFilesSection() {
   } else if (state.type === 'remove' && state.status === 'done') {
     body = (
       <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
-        <p className="text-sm text-white">Removed {state.result?.removed || 0} files · freed {formatBytes(state.result?.bytesFreed || 0)}.</p>
+        <p className="text-sm text-white">Moved {state.result?.removed || 0} files ({formatBytes(state.result?.bytesMovedToTrash || 0)}) to trash. Empty trash to reclaim that space.</p>
         <button className="btn-secondary" onClick={startScan}><Icon.Refresh size={15} /> Scan again</button>
       </div>
     );
@@ -346,7 +351,7 @@ function DuplicateFilesSection() {
         <div className="flex flex-col lg:flex-row lg:items-center gap-4 justify-between">
           <div className="min-w-0">
             <p className="text-lg font-semibold text-white">
-              {state.result.sets} duplicate sets · {formatBytes(state.result.bytesRemovable || 0)} reclaimable · {state.result.removable || 0} files
+              {state.result.sets} duplicate sets · {formatBytes(state.result.bytesRemovable || 0)} reclaimable after emptying trash · {state.result.removable || 0} files
             </p>
             {thumbs.length > 0 && (
               <div className="flex gap-2 mt-3 overflow-hidden">
@@ -367,7 +372,7 @@ function DuplicateFilesSection() {
   }
 
   return (
-    <Section title="Duplicate files" subtitle="Find photos and videos stored more than once and reclaim the space. Copies are moved to Files trash, and won't sync back.">
+    <Section title="Duplicate files" subtitle="Find photos and videos stored more than once. Copies move to Files trash and won't sync back; empty trash when you're ready to reclaim the space.">
       {body}
       <ConfirmModal open={confirmOpen} onClose={() => setConfirmOpen(false)} onConfirm={startRemove}
         title="Remove duplicate files" message="Extra copies are moved to Files trash and flagged so your devices won't upload them again." confirmLabel="Remove duplicates" danger />
@@ -403,7 +408,7 @@ export default function FolderSync() {
     <div className="animate-fade-in space-y-6">
       <PageHeader
         title="Folder Sync"
-        subtitle="Keep folders on your devices automatically backed up to Aerie. Deletes are never synced."
+        subtitle="Keep folders consistent across devices with journaled two-way sync, while camera backups stay safely add-only."
         icon={<Icon.Refresh size={22} />}
       />
       <DesktopSyncSection />

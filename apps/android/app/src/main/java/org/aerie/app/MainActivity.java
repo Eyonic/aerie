@@ -1,11 +1,14 @@
 package org.aerie.app;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -21,20 +24,22 @@ import android.util.Base64;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.WebResourceRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 
 import org.json.JSONObject;
 
 import java.lang.ref.WeakReference;
-import java.util.ArrayList;
 
 /**
  * Aerie Android — a full-screen WebView wrapper around the Aerie web app.
@@ -43,6 +48,7 @@ import java.util.ArrayList;
  */
 public class MainActivity extends Activity {
 
+    private static final String STATE_OFFERED_UPDATE_BUILD = "offered_update_build";
     private WebView web;
     private ValueCallback<Uri[]> filePathCallback;
     private static final int FILECHOOSER_RESULT = 1;
@@ -64,6 +70,7 @@ public class MainActivity extends Activity {
     private volatile long lastSwitchAt;
     private ConnectivityManager.NetworkCallback netCallback;
     private AlertDialog urlDialog;
+    private long offeredUpdateBuild = -1;
     private final Runnable failoverTicker = new Runnable() {
         @Override public void run() { checkFailover(); main.postDelayed(this, 10_000); }
     };
@@ -84,6 +91,27 @@ public class MainActivity extends Activity {
         } catch (Exception e) { return null; }
     }
 
+    private boolean trustedNavigation(String url) {
+        String origin = originOf(url);
+        if (origin == null) return false;
+        for (String base : candidates()) {
+            String allowed = originOf(base);
+            if (origin.equals(allowed)) return true;
+        }
+        return false;
+    }
+
+    private boolean openExternalNavigation(String url) {
+        if (trustedNavigation(url)) return false;
+        try {
+            Uri target = Uri.parse(url);
+            if ("http".equalsIgnoreCase(target.getScheme()) || "https".equalsIgnoreCase(target.getScheme())) {
+                startActivity(new Intent(Intent.ACTION_VIEW, target));
+            }
+        } catch (Exception ignored) { }
+        return true;
+    }
+
     /** Called by MediaService (notification taps, headset buttons, lock screen). */
     static void dispatchMediaControl(String action, Double value) {
         MainActivity a = current.get();
@@ -97,11 +125,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (savedInstanceState != null) {
+            offeredUpdateBuild = savedInstanceState.getLong(STATE_OFFERED_UPDATE_BUILD, -1);
+        }
         prefs = getSharedPreferences("aerie", MODE_PRIVATE);
         current = new WeakReference<>(this);
         // WorkManager KEEP semantics make this an inexpensive schedule repair
         // after an app update, force-stop recovery, or OEM job cleanup.
         SyncEngine.schedule(this);
+        UpdateManager.schedule(this);
+        new Thread(() -> ShareBatch.pruneStale(getApplicationContext()), "aerie-share-prune").start();
 
         // Migration: older builds persisted the auto-selected origin into the
         // custom-server slot, which inverted LAN-first probing at home.
@@ -112,21 +145,78 @@ public class MainActivity extends Activity {
             prefs.edit().remove("url").apply();
         }
 
-        // Ask for the microphone (in-app voice) and, on Android 13+, notifications
-        // (the media playback controls badge) up-front.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            ArrayList<String> need = new ArrayList<>();
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-                need.add(Manifest.permission.RECORD_AUDIO);
-            if (Build.VERSION.SDK_INT >= 33
-                    && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-                need.add(Manifest.permission.POST_NOTIFICATIONS);
-            if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 42);
-        }
-
         createWebView();
-        startupNavigate();
+        if (!openPairingIntent(getIntent())) startupNavigate();
         watchNetwork();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        UpdateManager.Release release = UpdateManager.readyForReview(this);
+        if (release == null || release.build == offeredUpdateBuild || isFinishing()) return;
+        // Opening Aerie is the user gesture. The app may present its review here,
+        // but Android's installer still opens only after an explicit Continue tap.
+        offeredUpdateBuild = release.build;
+        startActivity(new Intent(this, UpdateInstallActivity.class));
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        outState.putLong(STATE_OFFERED_UPDATE_BUILD, offeredUpdateBuild);
+        super.onSaveInstanceState(outState);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        openPairingIntent(intent);
+    }
+
+    /** Consume an aerie://pair QR only after its server proves it is Aerie. */
+    private boolean openPairingIntent(Intent intent) {
+        Uri data = intent == null ? null : intent.getData();
+        if (data == null || !"aerie".equalsIgnoreCase(data.getScheme())
+                || !"pair".equalsIgnoreCase(data.getHost())) return false;
+        final String server = normalizeLearned(data.getQueryParameter("server"));
+        final String code = data.getQueryParameter("code");
+        if (server == null || code == null
+                || !code.toUpperCase(java.util.Locale.ROOT).matches("^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$")) {
+            return false;
+        }
+        boolean knownServer = false;
+        for (String candidate : candidates()) {
+            if (server.equals(originOf(candidate))) { knownServer = true; break; }
+        }
+        String existingToken = SecureCredentialStore.getToken(this);
+        if (!knownServer && (candidates().length > 0 || (existingToken != null && !existingToken.isEmpty()))) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Different Aerie server")
+                    .setMessage("For your safety, sign out and change servers before pairing with a different Aerie installation.")
+                    .setPositiveButton("OK", null).show();
+            // On cold start let onCreate continue to the already-configured
+            // server; onNewIntent simply leaves the current page untouched.
+            return false;
+        }
+        new Thread(() -> {
+            final boolean verified = healthy(server);
+            main.post(() -> {
+                if (!verified || web == null) {
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Pairing link unavailable")
+                            .setMessage("This link did not point to a reachable Aerie server.")
+                            .setPositiveButton("OK", null).show();
+                    if (activeBase == null) startupNavigate();
+                    return;
+                }
+                if (urlDialog != null) { try { urlDialog.dismiss(); } catch (Exception ignored) { } urlDialog = null; }
+                prefs.edit().putString("url", server).putString("active_base", server).apply();
+                activeBase = server;
+                web.loadUrl(server + "/pair?code=" + Uri.encode(code.toUpperCase(java.util.Locale.ROOT)));
+            });
+        }, "aerie-pair-link").start();
+        return true;
     }
 
     // ---- Endpoint selection + failover ----
@@ -138,9 +228,12 @@ public class MainActivity extends Activity {
     private String[] candidates() {
         String custom = prefs.getString("url", null);
         java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>();
-        if (custom != null && !custom.trim().isEmpty()) set.add(custom.replaceAll("/+$", ""));
-        if (!LAN_URL.isEmpty()) set.add(LAN_URL);
-        if (!CLOUD_URL.isEmpty()) set.add(CLOUD_URL);
+        String saved = normalizeLearned(custom);
+        if (saved != null) set.add(saved);
+        String bakedLan = normalizeLearned(LAN_URL);
+        String bakedCloud = normalizeLearned(CLOUD_URL);
+        if (bakedLan != null) set.add(bakedLan);
+        if (bakedCloud != null) set.add(bakedCloud);
         // Learned endpoints only ever APPEND: they must not displace the
         // user-set/baked-in ordering above (the set dedups ones already there).
         // Re-validated on read in case an old build wrote something odd.
@@ -151,14 +244,19 @@ public class MainActivity extends Activity {
         return set.toArray(new String[0]);
     }
 
-    /** Trim + strip trailing slashes; null unless it looks like an http(s) origin.
+    /** Trim + strip trailing slashes; null unless it is an unambiguous HTTP(S)
+     *  server base without credentials, a query, or a fragment.
      *  Applied to server-advertised endpoints both when persisting and reading,
      *  so a bad value can never enter candidates() (and thus never be trusted). */
     private static String normalizeLearned(String u) {
-        if (u == null) return null;
-        u = u.trim().replaceAll("/+$", "");
-        if (u.isEmpty() || (!u.startsWith("http://") && !u.startsWith("https://"))) return null;
-        return u;
+        return ServerEndpointResolver.normalize(u);
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        runOnUiThread(() -> requestPermissions(
+                new String[]{Manifest.permission.POST_NOTIFICATIONS}, 43));
     }
 
     private boolean healthy(String base) {
@@ -173,10 +271,10 @@ public class MainActivity extends Activity {
             // hands it the session token). Accept EITHER marker: a new server
             // reports the name "Aerie" (plus a compat "CloudBox" field), while
             // an old server answers with "CloudBox" only.
-            // Read up to 1 KB (looping — one read() may return less): enough for
-            // the marker check AND the optional publicUrl/lanUrl fields a new
-            // server advertises for failover (learned below).
-            byte[] buf = new byte[1024];
+            // Read a small bounded response (looping — one read() may return
+            // less). Four KiB leaves room for configured failover URLs without
+            // letting a bogus endpoint stream an unbounded body at the app.
+            byte[] buf = new byte[4096];
             int n = 0;
             java.io.InputStream in = c.getInputStream();
             while (n < buf.length) {
@@ -187,7 +285,12 @@ public class MainActivity extends Activity {
             c.disconnect();
             if (n <= 0) return false;
             String body = new String(buf, 0, n);
-            if (!body.contains("Aerie") && !body.contains("CloudBox")) return false;
+            JSONObject health = new JSONObject(body);
+            String name = health.optString("name", "");
+            String compat = health.optString("compat", "");
+            if (!health.optBoolean("ok", false)
+                    || (!("Aerie".equals(name) || "CloudBox".equals(name))
+                    && !"CloudBox".equals(compat))) return false;
             // Only a VERIFIED server may teach us new endpoints — and only
             // candidates() (already-trusted origins) are ever probed here.
             learnEndpoints(body);
@@ -197,7 +300,7 @@ public class MainActivity extends Activity {
 
     /** Persist server-advertised failover endpoints (publicUrl/lanUrl in the
      *  health JSON, operator-set on the Integrations page). Best-effort: any
-     *  parse failure — absent fields, old server, body truncated at 1 KB —
+     *  parse failure — absent fields, old server, or a body beyond the cap —
      *  must never affect the health verdict or existing stored values. */
     private void learnEndpoints(String body) {
         try {
@@ -230,6 +333,7 @@ public class MainActivity extends Activity {
                 if (healthy(base)) { best = base; break; }
             }
             final String chosen = best;
+            final String sessionToken = chosen == null ? null : DeviceAuthClient.validToken(MainActivity.this, chosen);
             main.post(() -> {
                 if (web == null) return;
                 if (chosen != null) {
@@ -238,7 +342,7 @@ public class MainActivity extends Activity {
                     prefs.edit().putString("active_base", chosen).apply();
                     // Carry the last-known session token so a cold start on an
                     // origin the user never logged into doesn't show Login.
-                    String tok = prefs.getString("token", null);
+                    String tok = sessionToken;
                     String frag = "";
                     if (tok != null && !tok.isEmpty()) {
                         try {
@@ -332,23 +436,47 @@ public class MainActivity extends Activity {
     }
 
     /** Builds (or rebuilds, after renderer death) the WebView and loads the app. */
+    @SuppressLint("SetJavaScriptEnabled")
     private void createWebView() {
         web = new WebView(this);
-        setContentView(web);
+        // Android 15 enforces edge-to-edge for apps targeting API 35+, so a
+        // bare full-screen WebView starts at y=0 underneath the status icons.
+        // Keep the system-bar/cutout policy native: the dark container paints
+        // behind transparent bars while its padding gives the web viewport a
+        // genuinely safe layout rectangle on every rotation and cutout shape.
+        FrameLayout content = new FrameLayout(this);
+        content.setBackgroundColor(Color.rgb(10, 10, 15));
+        web.setBackgroundColor(Color.rgb(10, 10, 15));
+        content.addView(web, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(content);
+        applySafeWindowInsets(content);
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
-        s.setAllowFileAccess(true);
+        s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        if (Build.VERSION.SDK_INT >= 26) s.setSafeBrowsingEnabled(true);
         s.setUserAgentString(s.getUserAgentString() + " AerieApp/1.0");
 
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return openExternalNavigation(request.getUrl().toString());
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return openExternalNavigation(url);
+            }
+
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 currentOrigin = originOf(url);
@@ -396,11 +524,18 @@ public class MainActivity extends Activity {
             @Override
             public void onPermissionRequest(final PermissionRequest request) {
                 runOnUiThread(() -> {
-                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                        request.grant(request.getResources());
+                    String requestOrigin = request.getOrigin() == null ? null : request.getOrigin().toString();
+                    boolean wantsAudio = false;
+                    for (String resource : request.getResources()) {
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) wantsAudio = true;
+                    }
+                    if (!wantsAudio || !trustedNavigation(requestOrigin)) {
+                        request.deny();
+                    } else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
                     } else {
                         requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 42);
-                        request.grant(request.getResources());
+                        request.deny();
                     }
                 });
             }
@@ -421,10 +556,35 @@ public class MainActivity extends Activity {
         });
 
         web.setDownloadListener((url, userAgent, contentDisposition, mimetype, contentLength) -> {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            try {
+                Uri target = Uri.parse(url);
+                String scheme = target.getScheme();
+                if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
+                    startActivity(new Intent(Intent.ACTION_VIEW, target));
+                }
+            } catch (Exception ignored) { }
         });
         // Navigation happens in startupNavigate() — endpoints are probed first,
         // so the user never sees the server-URL prompt unless nothing answers.
+    }
+
+    /** Reserve the safe drawing area required by enforced edge-to-edge. Older
+     * Android releases still fit the decor automatically, so applying padding
+     * there as well would risk double-insetting the WebView. */
+    private void applySafeWindowInsets(View content) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) return;
+        content.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            int safeTypes = WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout();
+            Insets safe = windowInsets.getInsets(safeTypes);
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+            // The native frame consumed these edges. Send zero values for just
+            // those types to Chromium so viewport-fit=cover / CSS env(safe-area-*)
+            // cannot apply the same inset again; preserve IME and gesture data.
+            return new WindowInsets.Builder(windowInsets)
+                    .setInsets(safeTypes, Insets.NONE)
+                    .build();
+        });
+        content.requestApplyInsets();
     }
 
     private void promptUrl() {
@@ -441,8 +601,29 @@ public class MainActivity extends Activity {
                     String u = input.getText().toString().trim();
                     if (u.isEmpty()) u = BuildConfig.DEFAULT_URL;
                     if (u.isEmpty()) { promptUrl(); return; }
-                    if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
-                    u = u.replaceAll("/+$", "");
+                    String lower = u.toLowerCase(java.util.Locale.ROOT);
+                    if (!lower.startsWith("http://") && !lower.startsWith("https://")) u = "https://" + u;
+                    u = normalizeLearned(u);
+                    if (u == null) {
+                        android.widget.Toast.makeText(MainActivity.this,
+                                "Enter a valid HTTP or HTTPS Aerie address.",
+                                android.widget.Toast.LENGTH_LONG).show();
+                        promptUrl();
+                        return;
+                    }
+                    String nextOrigin = originOf(u);
+                    boolean knownAlias = false;
+                    for (String candidate : candidates()) {
+                        if (nextOrigin != null && nextOrigin.equals(originOf(candidate))) { knownAlias = true; break; }
+                    }
+                    if (!knownAlias) {
+                        // Device ids and JWTs belong to one Aerie installation.
+                        // Never carry them to a manually entered, unrelated host.
+                        DocumentGrantScope.invalidate(MainActivity.this);
+                        SecureCredentialStore.clear(MainActivity.this);
+                        prefs.edit().remove("trusted_device_id").remove("trusted_device_fingerprint")
+                                .remove("device_auth_suspended").apply();
+                    }
                     prefs.edit().putString("url", u).apply();
                     activeBase = u;
                     prefs.edit().putString("active_base", u).apply();
@@ -458,6 +639,7 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    @SuppressLint("WrongConstant")
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == FILECHOOSER_RESULT) {
             if (filePathCallback != null) {
@@ -469,10 +651,18 @@ public class MainActivity extends Activity {
                 Uri uri = data.getData();
                 int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                 try { getContentResolver().takePersistableUriPermission(uri, flags); } catch (Exception ignored) { }
-                SyncEngine.addTree(this, uri, syncCameraPending ? "Camera backup" : labelForTree(uri));
+                String problem = SyncEngine.addTree(this, uri,
+                        syncCameraPending ? "Camera backup" : labelForTree(uri));
                 syncCameraPending = false;
-                SyncEngine.schedule(this);
-                SyncForegroundService.start(this, activeBase);
+                if (problem == null) {
+                    SyncEngine.requestManual(this, activeBase);
+                } else {
+                    new AlertDialog.Builder(this)
+                            .setTitle("Folder access needed")
+                            .setMessage("Aerie could not keep the required folder permission. Select the same folder again and allow access; two-way sync also needs write access.")
+                            .setPositiveButton("OK", null)
+                            .show();
+                }
             }
             syncCameraPending = false;
         } else {
@@ -535,6 +725,7 @@ public class MainActivity extends Activity {
                 String artist = o.optString("artist", "");
                 String artUrl = o.optString("artUrl", "");
                 boolean playing = o.optBoolean("playing", false);
+                if (playing) requestNotificationPermissionIfNeeded();
                 long position = o.optLong("position", 0);
                 long duration = o.optLong("duration", 0);
                 boolean hasQueue = o.optBoolean("hasQueue", false);
@@ -577,8 +768,62 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void authToken(String t) {
             if (!trusted()) return;
-            if (t == null || t.isEmpty()) prefs.edit().remove("token").apply();
-            else prefs.edit().putString("token", t).apply();
+            SecureCredentialStore.setToken(MainActivity.this, t);
+            // A deliberate logout must not be immediately undone by the
+            // background challenge flow. Keep the registration (so re-pairing
+            // is unnecessary) but suspend passwordless authentication until a
+            // subsequent successful login or explicit device registration.
+            prefs.edit().putBoolean("device_auth_suspended", t == null || t.isEmpty()).apply();
+        }
+
+        /** Public-key identity for the server's QR/code pairing flow. The
+         * private key never leaves Android Keystore. */
+        @JavascriptInterface
+        public String deviceIdentity() {
+            if (!trusted()) return "{}";
+            try {
+                String fingerprint = DeviceIdentity.fingerprint();
+                String deviceId = prefs.getString("trusted_device_id", null);
+                String registeredFingerprint = prefs.getString("trusted_device_fingerprint", null);
+                // SharedPreferences may be restored onto a new phone while
+                // AndroidKeyStore keys intentionally are not. Never associate
+                // the restored device id with a different newly-created key.
+                if (deviceId != null && registeredFingerprint != null
+                        && !registeredFingerprint.equals(fingerprint)) {
+                    prefs.edit().remove("trusted_device_id").remove("trusted_device_fingerprint").apply();
+                    deviceId = null;
+                }
+                JSONObject out = new JSONObject();
+                out.put("algorithm", "ES256");
+                out.put("publicKey", DeviceIdentity.publicKey());
+                out.put("fingerprint", fingerprint);
+                out.put("deviceId", deviceId);
+                out.put("name", (Build.MANUFACTURER + " " + Build.MODEL).trim());
+                out.put("type", "android");
+                out.put("persistent", true);
+                out.put("capabilities", new org.json.JSONArray()
+                        .put("sync").put("handoff").put("media-session").put("secure-storage"));
+                return out.toString();
+            } catch (Exception ignored) { return "{}"; }
+        }
+
+        @JavascriptInterface
+        public String signDeviceChallenge(String payload) {
+            if (!trusted() || (prefs.getBoolean("device_auth_suspended", false)
+                    && payload != null && payload.contains(":authenticate:"))) return "";
+            try { return DeviceIdentity.sign(payload); }
+            catch (Exception ignored) { return ""; }
+        }
+
+        @JavascriptInterface
+        public boolean registerTrustedDevice(String deviceId) {
+            if (!trusted() || deviceId == null ||
+                    !deviceId.matches("^device_[A-Za-z0-9_-]{20,64}$")) return false;
+            try {
+                return prefs.edit().putString("trusted_device_id", deviceId)
+                        .putString("trusted_device_fingerprint", DeviceIdentity.fingerprint())
+                        .putBoolean("device_auth_suspended", false).commit();
+            } catch (Exception ignored) { return false; }
         }
 
         @JavascriptInterface
@@ -628,13 +873,32 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void syncNow() {
             if (!trusted()) return;
-            SyncForegroundService.start(MainActivity.this, activeBase);
+            requestNotificationPermissionIfNeeded();
+            SyncEngine.requestManual(MainActivity.this, activeBase);
+        }
+
+        @JavascriptInterface
+        public void syncCancel() {
+            if (!trusted()) return;
+            SyncEngine.cancelManual(MainActivity.this);
         }
 
         @JavascriptInterface
         public String syncStatus() {
             if (!trusted()) return "{\"running\":false,\"folders\":[]}";
             return SyncEngine.statusJson(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public String appVersion() {
+            if (!trusted()) return "{}";
+            try {
+                return new JSONObject()
+                        .put("platform", "android")
+                        .put("version", BuildConfig.VERSION_NAME)
+                        .put("build", BuildConfig.VERSION_CODE)
+                        .toString();
+            } catch (Exception ignored) { return "{}"; }
         }
     }
 

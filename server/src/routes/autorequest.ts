@@ -37,9 +37,10 @@ r.get('/status', (req: AuthedRequest, res) => {
     thisWeek: autorequest.countThisWeek(req.user!.id),
     cap: 3,
     recent: recent.map(row => {
-      let meta = {};
+      let meta: Record<string, unknown> = {};
       try { meta = JSON.parse(row.meta || '{}'); } catch { /* */ }
-      return { title: row.title, ts: row.ts, meta };
+      const title = typeof meta.title === 'string' && meta.title.trim() ? meta.title : row.title;
+      return { title, ts: row.ts, meta };
     }),
   });
 });

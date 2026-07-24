@@ -1,35 +1,83 @@
 {
   "name": "aerie-desktop",
-  "version": "1.0.0",
+  "version": "1.8.3",
+  "aerieBuild": 13,
   "license": "MIT",
   "description": "Aerie — your private cloud, on your desktop",
   "author": "Aerie contributors",
   "homepage": "https://github.com/Eyonic/aerie",
   "main": "main.js",
+  "desktopName": "aerie-desktop.desktop",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --linux --win"
+    "dist": "electron-builder --linux --win",
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "app.aerie.desktop",
     "productName": "Aerie",
-    "directories": { "output": "release" },
-    "files": ["main.js", "preload.js", "sync.js", "config.html", "default-server.json", "build/icon.png"],
+    "protocols": [
+      {
+        "name": "Aerie device pairing",
+        "schemes": [
+          "aerie"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "loadBrowserProcessSpecificV8Snapshot": false,
+      "grantFileProtocolExtraPrivileges": false
+    },
+    "files": [
+      "package.json",
+      "main.js",
+      "preload.js",
+      "sync.js",
+      "sync-journal.js",
+      "mesh.js",
+      "secure-credentials.js",
+      "server-url.js",
+      "bounded-json.js",
+      "desktop-updater.js",
+      "release-signature.js",
+      "release-key.json",
+      "config.html",
+      "default-server.json",
+      "build/icon.png"
+    ],
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Network",
       "icon": "build/icon.png",
-      "maintainer": "Aerie"
+      "maintainer": "Aerie",
+      "syncDesktopName": true
     },
     "deb": {
       "artifactName": "aerie_${version}_${arch}.${ext}"
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.png"
     },
     "nsis": {

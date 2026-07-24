@@ -7,6 +7,7 @@ import { db } from '../lib/db.js';
 import type { User } from '../lib/model.js';
 import { config } from '../config.js';
 import * as storage from './storage.js';
+import { shouldIndexLocation } from './policy.js';
 
 export const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.avif', '.bmp', '.tiff']);
 const running = new Map<number, Promise<number>>();
@@ -21,6 +22,7 @@ export interface NativePhoto {
   camera: string | null;
   lat: number | null;
   lon: number | null;
+  favorite: boolean;
 }
 
 function isImageName(name: string): boolean {
@@ -39,8 +41,8 @@ export function assertPhotoPath(relPath: string): string {
   return clean;
 }
 
-export function resolvePhoto(username: string, relPath: string): string {
-  return storage.resolve(username, assertPhotoPath(relPath));
+export function resolvePhoto(username: string, relPath: string): Promise<string> {
+  return storage.resolveAsync(username, assertPhotoPath(relPath));
 }
 
 function rowToItem(row: any): NativePhoto {
@@ -53,6 +55,7 @@ function rowToItem(row: any): NativePhoto {
     camera: row.camera ?? null,
     lat: row.lat ?? null,
     lon: row.lon ?? null,
+    favorite: !!row.favorite,
   };
 }
 
@@ -149,7 +152,7 @@ function parseExif(exif?: Buffer): { takenAt?: string; camera?: string; lat?: nu
 
 export async function indexFile(user: User, relPath: string): Promise<NativePhoto | null> {
   const clean = assertPhotoPath(relPath);
-  const real = resolvePhoto(user.username, clean);
+  const real = await resolvePhoto(user.username, clean);
   const st = await fsp.stat(real);
   if (!st.isFile()) return null;
   let width: number | null = null, height: number | null = null, camera: string | null = null;
@@ -161,8 +164,10 @@ export async function indexFile(user: User, relPath: string): Promise<NativePhot
     const exif = parseExif(meta.exif);
     takenAt = exif.takenAt || takenAt;
     camera = exif.camera || null;
-    lat = exif.lat ?? null;
-    lon = exif.lon ?? null;
+    if (shouldIndexLocation()) {
+      lat = exif.lat ?? null;
+      lon = exif.lon ?? null;
+    }
   } catch { /* unsupported image: keep filesystem metadata */ }
   db.prepare(`INSERT INTO photo_index
     (user_id,rel_path,taken_at,width,height,size,camera,lat,lon,mtime)
@@ -171,7 +176,8 @@ export async function indexFile(user: User, relPath: string): Promise<NativePhot
       taken_at=excluded.taken_at,width=excluded.width,height=excluded.height,size=excluded.size,
       camera=excluded.camera,lat=excluded.lat,lon=excluded.lon,mtime=excluded.mtime`)
     .run(user.id, clean, takenAt, width, height, st.size, camera, lat, lon, Math.floor(st.mtimeMs));
-  return rowToItem({ rel_path: clean, taken_at: takenAt, width, height, size: st.size, camera, lat, lon });
+  const saved = db.prepare('SELECT favorite FROM photo_index WHERE user_id=? AND rel_path=?').get(user.id, clean) as any;
+  return rowToItem({ rel_path: clean, taken_at: takenAt, width, height, size: st.size, camera, lat, lon, favorite: saved?.favorite || 0 });
 }
 
 async function walkPhotos(dir: string, root: string, out: string[]): Promise<void> {
@@ -186,7 +192,7 @@ async function walkPhotos(dir: string, root: string, out: string[]): Promise<voi
 }
 
 async function runScan(user: User): Promise<number> {
-  const root = storage.userRoot(user.username);
+  const root = await storage.userRootAsync(user.username);
   const photosRoot = path.join(root, 'Photos');
   const found: string[] = [];
   await walkPhotos(photosRoot, root, found);
@@ -250,6 +256,7 @@ export function months(userId: number) {
 // Geotagged photos for the Places map (newest first). Capped so a huge library
 // stays responsive on the client; the map clusters them anyway.
 export function geo(userId: number) {
+  if (!shouldIndexLocation()) return [];
   return db.prepare(`SELECT rel_path path, lat, lon, taken_at takenAt
     FROM photo_index WHERE user_id=? AND lat IS NOT NULL AND lon IS NOT NULL
     ORDER BY taken_at DESC, rel_path ASC LIMIT 5000`).all(userId);
@@ -257,7 +264,7 @@ export function geo(userId: number) {
 
 export async function thumb(user: User, relPath: string): Promise<string> {
   const clean = assertPhotoPath(relPath);
-  const src = resolvePhoto(user.username, clean);
+  const src = await resolvePhoto(user.username, clean);
   const st = await fsp.stat(src);
   const dir = path.join(config.thumbsDir, 'photos', String(user.id));
   await fsp.mkdir(dir, { recursive: true });

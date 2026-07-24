@@ -20,6 +20,8 @@ type ChatMsg = {
   activities?: Activity[];
 };
 
+type AiStatus = Awaited<ReturnType<typeof api.ai.status>>;
+
 // Friendly labels + on-brand icons for each agent tool.
 const TOOL_META: Record<string, { running: string; done: string; icon: React.ComponentType<{ size?: number; className?: string }> }> = {
   search_files: { running: 'Searching your files', done: 'Searched files', icon: Icon.Search },
@@ -539,6 +541,7 @@ export default function Assistant() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -547,6 +550,7 @@ export default function Assistant() {
   // send all bump it; a run whose token is stale must never mutate UI state (prevents
   // a stopped-but-still-draining request from bleeding into the next turn).
   const runIdRef = useRef(0);
+  const runAbortRef = useRef<AbortController | null>(null);
   // Typewriter reveal. The agent generates the whole answer, then emits it word-by-word in
   // a tight loop, so the text events land in one burst — a naive append flashes the entire
   // reply at once after a long silent wait. Instead we buffer the target text and reveal it
@@ -554,6 +558,11 @@ export default function Assistant() {
   const reveal = useRef<{ target: string; shown: number; timer: any; onDone: (() => void) | null }>({ target: '', shown: 0, timer: null, onDone: null });
 
   const disabled = user?.aiMode === 'disabled';
+
+  useEffect(() => {
+    if (!disabled) api.ai.status().then(setAiStatus).catch(() => setAiStatus(null));
+  }, [disabled, user?.aiMode]);
+  useEffect(() => () => runAbortRef.current?.abort(), []);
 
   // Auto-scroll to bottom as content streams, unless the user scrolled up.
   useEffect(() => {
@@ -607,8 +616,11 @@ export default function Assistant() {
   };
 
   // Shared agent-streaming routine used by both send and regenerate.
-  const runAgent = async (history: ChatMsg[]) => {
+  const runAgent = async (history: ChatMsg[], externalConsent = false) => {
     const myRun = ++runIdRef.current;
+    runAbortRef.current?.abort();
+    const controller = new AbortController();
+    runAbortRef.current = controller;
     stopReveal();
     reveal.current = { target: '', shown: 0, timer: null, onDone: null };
     setMessages([...history, { role: 'assistant', content: '', activities: [] }]);
@@ -644,7 +656,7 @@ export default function Assistant() {
         } else if (e.type === 'done') {
           patchLast(m => ({ ...m, activities: (m.activities || []).map(a => ({ ...a, done: true })) }));
         }
-      });
+      }, { externalConsent, signal: controller.signal });
       // Finalize: if the agent produced nothing at all, surface a gentle notice.
       // (If this run was stopped/superseded, stop() already finalized the UI — don't touch it.)
       if (runIdRef.current !== myRun) return;
@@ -660,7 +672,7 @@ export default function Assistant() {
         return { ...m, activities: acts };
       });
     } catch (e: any) {
-      if (runIdRef.current !== myRun) {
+      if (runIdRef.current !== myRun || e?.name === 'AbortError') {
         // Stopped by the user or superseded by a newer request — abort cleanly, no error toast.
       } else {
         toast('Assistant error', 'error', e?.message || 'The assistant could not be reached.');
@@ -678,7 +690,13 @@ export default function Assistant() {
           setStreaming(false);
         }
       }
+      if (runAbortRef.current === controller) runAbortRef.current = null;
     }
+  };
+
+  const externalConsentForRequest = () => {
+    if (!aiStatus?.consentRequired) return false;
+    return window.confirm('Use the configured external AI for this request? Your prompt and any tool results needed to answer it may leave this server. Choose Cancel to keep this request local.');
   };
 
   const send = async (raw?: string) => {
@@ -686,7 +704,7 @@ export default function Assistant() {
     if (!text || streaming || disabled) return;
     setInput('');
     resetComposer();
-    await runAgent([...messages, { role: 'user', content: text }]);
+    await runAgent([...messages, { role: 'user', content: text }], externalConsentForRequest());
   };
 
   // Auto-ask when opened from the ⌘K command palette (/assistant?q=…).
@@ -702,6 +720,8 @@ export default function Assistant() {
   const stop = () => {
     if (!streaming) return;
     runIdRef.current++;
+    runAbortRef.current?.abort();
+    runAbortRef.current = null;
     stopReveal();
     setStreaming(false);
     // Show everything the agent already sent (the reveal may have been mid-animation) rather
@@ -726,7 +746,7 @@ export default function Assistant() {
     let cut = messages.length;
     while (cut > 0 && messages[cut - 1].role === 'assistant') cut--;
     if (cut === 0) return;
-    await runAgent(messages.slice(0, cut));
+    await runAgent(messages.slice(0, cut), externalConsentForRequest());
   };
 
   const copyMessage = async (idx: number, text: string) => {
@@ -740,7 +760,7 @@ export default function Assistant() {
   };
 
   const newChat = () => {
-    if (streaming) { runIdRef.current++; setStreaming(false); }
+    if (streaming) { runIdRef.current++; runAbortRef.current?.abort(); runAbortRef.current = null; setStreaming(false); }
     stopReveal();
     setMessages([]);
     setInput('');
@@ -773,9 +793,12 @@ export default function Assistant() {
           <p className="muted text-xs sm:text-sm hidden sm:block mt-0.5 truncate">Agentic help across your files, photos, and media.</p>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          <span className="chip !py-1.5 flex items-center gap-1.5" title="Powered by DeepSeek V4 (cloud)">
-            <Icon.Cloud size={14} className="text-accent-cyan shrink-0" />
-            <span className="truncate text-xs font-medium">DeepSeek V4</span>
+          <span className="chip !py-1.5 flex items-center gap-1.5"
+            title={aiStatus ? `${aiStatus.external ? 'External' : 'Local'} AI provider${aiStatus.available ? '' : ' (unavailable)'}` : 'Checking AI provider'}>
+            {aiStatus?.external
+              ? <Icon.Cloud size={14} className="text-accent-cyan shrink-0" />
+              : <Icon.Cpu size={14} className="text-accent-green shrink-0" />}
+            <span className="truncate text-xs font-medium">{aiStatus?.provider || 'Checking AI…'}</span>
           </span>
           {!empty && (
             <button onClick={newChat} className="icon-btn" title="New chat" aria-label="New chat">
@@ -939,7 +962,9 @@ export default function Assistant() {
             <p className="text-[11px] text-slate-600 text-center mt-2 px-2">
               {streaming
                 ? 'Working — tap stop to interrupt.'
-                : 'Uses DeepSeek V4 (external cloud AI). Enter to send, Shift+Enter for a new line.'}
+                : `${aiStatus
+                  ? `Uses ${aiStatus.provider} (${aiStatus.external ? 'external cloud' : 'local'} AI).`
+                  : 'Checking the configured AI provider…'} Enter to send, Shift+Enter for a new line.`}
             </p>
           </div>
         </div>

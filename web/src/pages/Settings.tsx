@@ -6,7 +6,9 @@ import { Icon } from '../lib/icons';
 import { cx, formatRelative, initials, copyText } from '../lib/utils';
 import { useAuth, toast } from '../lib/store';
 import { PageLoader, EmptyState, PageHeader, ConfirmModal, Modal, Spinner, Badge } from '../components/ui';
-import type { User, Device, Notification, AiMode } from '../lib/model';
+import type {
+  User, Device, Notification, AiMode, TranslationCapabilities, TranslationPreferences, TranslationProvider,
+} from '../lib/model';
 import { applyAppearance, cacheAppearance, DEFAULT_APPEARANCE, type AppearancePrefs } from '../lib/preferences';
 
 type TabKey = 'profile' | 'security' | 'devices' | 'ai' | 'notifications' | 'preferences';
@@ -173,7 +175,7 @@ function SecurityTab() {
 
   const strength = useMemo(() => {
     let s = 0;
-    if (next.length >= 8) s++;
+    if (next.length >= 12) s++;
     if (/[A-Z]/.test(next) && /[a-z]/.test(next)) s++;
     if (/\d/.test(next)) s++;
     if (/[^A-Za-z0-9]/.test(next)) s++;
@@ -184,7 +186,7 @@ function SecurityTab() {
 
   const save = async () => {
     if (!cur) { toast('Enter your current password', 'warning'); return; }
-    if (next.length < 8) { toast('New password must be at least 8 characters', 'warning'); return; }
+    if (next.length < 12) { toast('New password must be at least 12 characters', 'warning'); return; }
     if (next !== confirm) { toast('Passwords do not match', 'warning'); return; }
     if (next === cur) { toast('New password must differ from the current one', 'warning'); return; }
     setSaving(true);
@@ -196,7 +198,8 @@ function SecurityTab() {
       // Map raw API error codes to human-friendly messages — never surface the code.
       const friendly: Record<string, string> = {
         wrong_password: 'Your current password is incorrect.',
-        weak_password: 'That password is too weak. Try a longer one.',
+        password_too_short: 'Use at least 12 characters. A long passphrase works well.',
+        password_unchanged: 'Choose a password different from the current one.',
         unauthorized: 'Your session expired. Please sign in again.',
       };
       toast('Could not change password', 'error', friendly[e?.message] || 'Something went wrong. Please try again.');
@@ -236,7 +239,7 @@ function SecurityTab() {
 
 // ---------------- Two-factor authentication ----------------
 function TwoFactorSection() {
-  const [status, setStatus] = useState<{ enabled: boolean } | null>(null);
+  const [status, setStatus] = useState<{ enabled: boolean; recoveryCodesRemaining: number } | null>(null);
 
   // Enable / setup flow
   const [setupOpen, setSetupOpen] = useState(false);
@@ -247,6 +250,9 @@ function TwoFactorSection() {
   const [codeError, setCodeError] = useState('');
   const [verifying, setVerifying] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [setupPassword, setSetupPassword] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [recoveryAcknowledgementRequired, setRecoveryAcknowledgementRequired] = useState(false);
 
   // Disable flow
   const [disableOpen, setDisableOpen] = useState(false);
@@ -255,21 +261,27 @@ function TwoFactorSection() {
 
   const load = async () => {
     try { setStatus(await api.settings.twoFa.status()); }
-    catch { setStatus({ enabled: false }); }
+    catch { setStatus({ enabled: false, recoveryCodesRemaining: 0 }); }
   };
   useEffect(() => { load(); }, []);
 
   const startSetup = async () => {
-    setCode(''); setCodeError(''); setSecret(''); setQrDataUrl(''); setCopied(false);
-    setSetupOpen(true); setSetupLoading(true);
+    setCode(''); setCodeError(''); setSecret(''); setQrDataUrl(''); setCopied(false); setSetupPassword(''); setRecoveryCodes([]); setRecoveryAcknowledgementRequired(false);
+    setSetupOpen(true);
+  };
+
+  const beginSetup = async () => {
+    if (!setupPassword) { setCodeError('Enter your account password first.'); return; }
+    setSetupLoading(true); setCodeError('');
     try {
-      const { secret, otpauth } = await api.settings.twoFa.setup();
+      const { secret, otpauth } = await api.settings.twoFa.setup(setupPassword);
       setSecret(secret);
       try { setQrDataUrl(await QRCode.toDataURL(otpauth, { margin: 1, width: 200 })); }
       catch { setQrDataUrl(''); }
     } catch (e: any) {
       toast('Could not start 2FA setup', 'error', e?.message);
-      setSetupOpen(false);
+      if (e?.message === 'wrong_password') setCodeError('Your account password is incorrect.');
+      else setSetupOpen(false);
     } finally { setSetupLoading(false); }
   };
 
@@ -277,9 +289,10 @@ function TwoFactorSection() {
     if (code.length !== 6) { setCodeError('Enter the 6-digit code from your app.'); return; }
     setVerifying(true); setCodeError('');
     try {
-      await api.settings.twoFa.enable(code);
-      toast('Two-factor authentication enabled', 'success', 'Your account is now protected.');
-      setSetupOpen(false);
+      const result = await api.settings.twoFa.enable(code);
+      setRecoveryCodes(result.recoveryCodes || []);
+      setRecoveryAcknowledgementRequired(true);
+      toast('Two-factor authentication enabled', 'success', 'Save the recovery codes before closing this window.');
       await load();
     } catch (e: any) {
       if (e?.message === 'invalid_code') setCodeError('That code is incorrect. Check your app and try again.');
@@ -306,6 +319,23 @@ function TwoFactorSection() {
     } else { toast('Could not copy', 'error', 'Copy the key manually.'); }
   };
 
+  const closeSetup = () => {
+    if (verifying || recoveryAcknowledgementRequired) return;
+    setSetupOpen(false);
+  };
+
+  const acknowledgeRecoveryCodes = () => {
+    // Clearing the one-time material from component state is part of the
+    // acknowledgement; the server deliberately cannot show these codes again.
+    setRecoveryCodes([]);
+    setRecoveryAcknowledgementRequired(false);
+    setSecret('');
+    setQrDataUrl('');
+    setCode('');
+    setSetupPassword('');
+    setSetupOpen(false);
+  };
+
   return (
     <Section title="Two-factor authentication" subtitle="Add an extra layer of security using an authenticator app.">
       {status === null ? (
@@ -324,7 +354,7 @@ function TwoFactorSection() {
             </div>
             <p className="text-xs muted mt-0.5">
               {status.enabled
-                ? 'Sign-in requires a time-based code from your authenticator app.'
+                ? `Sign-in requires a time-based code. ${status.recoveryCodesRemaining} unused recovery codes remain.`
                 : 'Sign-in currently only requires your password.'}
             </p>
           </div>
@@ -335,13 +365,28 @@ function TwoFactorSection() {
       )}
 
       {/* Enable / setup */}
-      <Modal open={setupOpen} onClose={() => !verifying && setSetupOpen(false)} title="Enable two-factor authentication" size="sm"
+      <Modal open={setupOpen} onClose={closeSetup} dismissible={!verifying && !recoveryAcknowledgementRequired}
+        title="Enable two-factor authentication" size="sm"
         footer={<>
-          <button className="btn-secondary" disabled={verifying} onClick={() => setSetupOpen(false)}>Cancel</button>
-          <button className="btn-primary" disabled={verifying || setupLoading || code.length !== 6} onClick={verify}>{verifying ? <Spinner size={16} /> : 'Verify & enable'}</button>
+          {!recoveryAcknowledgementRequired && <button className="btn-secondary" disabled={verifying} onClick={closeSetup}>Cancel</button>}
+          {recoveryAcknowledgementRequired ? <button className="btn-primary" onClick={acknowledgeRecoveryCodes}>I saved these codes</button> :
+           secret ? <button className="btn-primary" disabled={verifying || setupLoading || code.length !== 6} onClick={verify}>{verifying ? <Spinner size={16} /> : 'Verify & enable'}</button> :
+           <button className="btn-primary" disabled={setupLoading || !setupPassword} onClick={beginSetup}>{setupLoading ? <Spinner size={16} /> : 'Continue'}</button>}
         </>}>
         {setupLoading ? (
           <div className="grid place-items-center py-10 text-brand-400"><Spinner size={26} /></div>
+        ) : recoveryAcknowledgementRequired ? (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-accent-amber/30 bg-accent-amber/10 p-3 text-sm text-amber-100">Each recovery code works once. Store them somewhere separate from this server; they cannot be shown again.</div>
+            <div className="grid grid-cols-2 gap-2">{recoveryCodes.map(value => <code key={value} className="rounded-lg bg-ink-800 px-2 py-2 text-center text-xs text-slate-200 select-all">{value}</code>)}</div>
+            {recoveryCodes.length > 0 && <button className="btn-secondary w-full" onClick={() => copyText(recoveryCodes.join('\n')).then(ok => toast(ok ? 'Recovery codes copied' : 'Copy failed', ok ? 'success' : 'error'))}><Icon.Copy size={15} /> Copy all codes</button>}
+          </div>
+        ) : !secret ? (
+          <div className="space-y-4">
+            <p className="text-sm muted">Confirm your account password before creating a new authenticator secret.</p>
+            <Field label="Account password"><input className="input" type="password" autoComplete="current-password" value={setupPassword} onChange={e => { setSetupPassword(e.target.value); setCodeError(''); }} onKeyDown={e => { if (e.key === 'Enter') void beginSetup(); }} /></Field>
+            {codeError && <p className="text-xs text-accent-red">{codeError}</p>}
+          </div>
         ) : (
           <div className="space-y-4">
             <p className="text-sm muted">Scan this code with an authenticator app (Google Authenticator, 1Password, Authy), then enter the 6-digit code to confirm.</p>
@@ -486,16 +531,67 @@ function DevicesTab() {
 
 // ---------------- AI & Privacy ----------------
 const AI_MODES: { key: AiMode; label: string; desc: string; icon: React.ReactNode; color: string }[] = [
-  { key: 'local_only', label: 'Local-only', color: '#10b981', icon: <Icon.Cpu size={18} />, desc: 'AI runs entirely on your own hardware. Your data never leaves the server — private, but limited to installed models.' },
-  { key: 'ask_before_send', label: 'Ask before sending', color: '#f59e0b', icon: <Icon.Shield size={18} />, desc: 'Prefer local models, but prompt you for permission before any request is sent to an external provider.' },
+  { key: 'local_only', label: 'Local provider only', color: '#10b981', icon: <Icon.Cpu size={18} />, desc: 'Send AI requests only to the local provider endpoint configured by your administrator (for example, Ollama). Network exposure depends on where that endpoint is hosted.' },
+  { key: 'ask_before_send', label: 'Ask before sending', color: '#f59e0b', icon: <Icon.Shield size={18} />, desc: 'Use the configured local provider first, and ask for permission before sending a request to a configured cloud AI provider.' },
   { key: 'external_allowed', label: 'External allowed', color: '#6366f1', icon: <Icon.Cloud size={18} />, desc: 'Automatically use external AI providers when helpful. Best quality, but selected content may leave your server.' },
   { key: 'disabled', label: 'Disabled', color: '#64748b', icon: <Icon.Close size={18} />, desc: 'Turn off all AI features across Aerie. No prompts, suggestions, or generation.' },
 ];
 
+const COMMON_TRANSLATION_LANGUAGES = [
+  'en', 'nl', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'cs', 'da', 'sv', 'no', 'tr', 'uk', 'ar', 'hi', 'ja', 'ko', 'zh',
+];
+
+function canonicalLanguage(value: string): string | null {
+  const raw = value.trim().replace(/_/g, '-');
+  if (!/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(raw)) return null;
+  try { return Intl.getCanonicalLocales(raw)[0] || null; } catch { return null; }
+}
+
+function languageLabel(code: string): string {
+  try { return new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(code) || code; }
+  catch { return code; }
+}
+
+function translationSettingsError(value: unknown): string {
+  const message = String(value || 'Translation settings could not be saved.');
+  if (message === 'external_translation_provider_unavailable') return 'The configured cloud provider is unavailable or external AI is not permitted for this account.';
+  if (message === 'local_translation_provider_unavailable') return 'The local AI provider is not configured.';
+  if (message === 'ai_disabled' || message === 'feature_disabled') return 'AI features are disabled for this account.';
+  if (message === 'translation_language_required') return 'Choose at least one target language.';
+  if (message === 'translation_language_limit') return 'Choose no more than 12 target languages.';
+  if (message === 'translation_language_invalid' || message === 'translation_languages_invalid') return 'One of the target language codes is invalid.';
+  return message;
+}
+
 function AiTab({ user }: { user: User }) {
   const [mode, setMode] = useState<AiMode>(user.aiMode);
   const [saving, setSaving] = useState(false);
+  const [translation, setTranslation] = useState<TranslationPreferences | null>(null);
+  const [savedTranslation, setSavedTranslation] = useState<TranslationPreferences | null>(null);
+  const [translationCaps, setTranslationCaps] = useState<TranslationCapabilities | null>(null);
+  const [translationSaving, setTranslationSaving] = useState(false);
+  const [translationLoadError, setTranslationLoadError] = useState(false);
+  const [customLanguage, setCustomLanguage] = useState('');
   const setUser = useAuth.getState().setUser;
+
+  const loadTranslation = async (preserveEdits = false) => {
+    setTranslationLoadError(false);
+    try {
+      const result = await api.settings.get();
+      const current = result.preferences?.translation as TranslationPreferences;
+      const capabilities = result.translationCapabilities;
+      setTranslation(previous => {
+        if (!preserveEdits || !previous) return current;
+        return {
+          ...previous,
+          provider: previous.provider === 'external' && !capabilities.externalAllowed ? current.provider : previous.provider,
+        };
+      });
+      setSavedTranslation(current);
+      setTranslationCaps(capabilities);
+    } catch { setTranslationLoadError(true); }
+  };
+  useEffect(() => { void loadTranslation(); }, []);
 
   const pick = async (m: AiMode) => {
     if (m === mode || saving) return;
@@ -505,19 +601,70 @@ function AiTab({ user }: { user: User }) {
       const updated = await api.settings.profile({ aiMode: m });
       setUser(updated);
       toast('AI privacy mode updated', 'success', AI_MODES.find(x => x.key === m)?.label);
+      await loadTranslation(true);
     } catch (e: any) {
       setMode(prev);
       toast('Could not update AI mode', 'error', e?.message);
     } finally { setSaving(false); }
   };
 
-  return (
+  const setProvider = (provider: TranslationProvider) => {
+    const aiAllowed = mode !== 'disabled' && user.features?.ai !== false;
+    if (!translation || !aiAllowed
+      || (provider === 'local' && !translationCaps?.localConfigured)
+      || (provider === 'external' && (mode === 'local_only' || !translationCaps?.externalAllowed))) return;
+    setTranslation({ ...translation, provider });
+  };
+
+  const toggleLanguage = (code: string) => {
+    if (!translation) return;
+    const canonical = canonicalLanguage(code);
+    if (!canonical) return;
+    const present = translation.languages.some(language => language.toLowerCase() === canonical.toLowerCase());
+    if (present && translation.languages.length === 1) { toast('Keep at least one translation language', 'warning'); return; }
+    if (!present && translation.languages.length >= 12) { toast('Translation language limit reached', 'warning', 'Choose up to 12 languages.'); return; }
+    setTranslation({ ...translation, languages: present
+      ? translation.languages.filter(language => language.toLowerCase() !== canonical.toLowerCase())
+      : [...translation.languages, canonical] });
+  };
+
+  const addCustomLanguage = () => {
+    const language = canonicalLanguage(customLanguage);
+    if (!language) { toast('Invalid language code', 'warning', 'Use a BCP 47 code such as en, nl, pt-BR or zh-Hant.'); return; }
+    if (!translation?.languages.some(item => item.toLowerCase() === language.toLowerCase())) toggleLanguage(language);
+    setCustomLanguage('');
+  };
+
+  const saveTranslation = async () => {
+    if (!translation) return;
+    setTranslationSaving(true);
+    try {
+      const result = await api.settings.preferences({ translation });
+      const saved = result.preferences.translation as TranslationPreferences;
+      setTranslation(saved); setSavedTranslation(saved);
+      toast('Translation settings saved', 'success');
+    } catch (error: any) { toast('Could not save translation settings', 'error', translationSettingsError(error?.message)); }
+    finally { setTranslationSaving(false); }
+  };
+
+  const accountAiAllowed = mode !== 'disabled' && user.features?.ai !== false;
+  const localAvailable = accountAiAllowed && !!translationCaps?.localConfigured;
+  const externalAvailable = accountAiAllowed && mode !== 'local_only' && !!translationCaps?.externalAllowed;
+  const externalUnavailableMessage = !translationCaps?.externalConfigured
+    ? `${translationCaps?.externalName || 'The cloud provider'} is not configured on this server.`
+    : mode === 'local_only'
+      ? 'Choose “Ask before sending” or “External allowed” above to permit cloud translation.'
+      : mode === 'disabled' || user.features?.ai === false
+        ? 'AI features are disabled for this account.'
+        : 'External AI is disabled by the server administrator.';
+
+  return <div className="space-y-6">
     <Section title="AI & Privacy" subtitle="Control if and how your data is used by AI features.">
       <div className="grid gap-3 sm:grid-cols-2">
         {AI_MODES.map(m => {
           const active = mode === m.key;
           return (
-            <button key={m.key} onClick={() => pick(m.key)} disabled={saving}
+            <button key={m.key} type="button" aria-pressed={active} onClick={() => pick(m.key)} disabled={saving}
               className={cx('text-left card !rounded-xl p-4 border transition-all',
                 active ? 'border-brand-500 bg-brand-500/[0.06] shadow-glow' : 'border-white/[0.05] card-hover')}>
               <div className="flex items-start gap-3">
@@ -538,7 +685,44 @@ function AiTab({ user }: { user: User }) {
       </div>
       <p className="text-xs text-slate-500 mt-4 flex items-center gap-1.5"><Icon.Info size={13} /> Changes apply immediately across all AI features.</p>
     </Section>
-  );
+    <Section title="Translation" subtitle="Choose where translations run and which target languages appear in editors and subtitle tools."
+      footer={<button className="btn-primary" disabled={!translation || translationSaving || JSON.stringify(translation) === JSON.stringify(savedTranslation)} onClick={() => void saveTranslation()}>{translationSaving ? <Spinner size={16} /> : 'Save translation settings'}</button>}>
+      {!translation || !translationCaps ? translationLoadError ? (
+        <div className="rounded-xl border border-accent-red/30 bg-accent-red/10 p-4" role="alert">
+          <p className="text-sm font-medium text-white">Translation settings could not be loaded.</p>
+          <p className="mt-1 text-xs text-slate-400">Your existing settings were not changed.</p>
+          <button type="button" className="btn-secondary mt-3" onClick={() => void loadTranslation()}>Try again</button>
+        </div>
+      ) : <div className="grid place-items-center py-8" role="status" aria-label="Loading translation settings"><Spinner /></div> : <div className="space-y-6">
+        {translationLoadError && <div className="rounded-xl border border-accent-amber/30 bg-accent-amber/10 p-3 text-xs text-accent-amber" role="alert">The latest translation availability could not be checked. Your unsaved choices are still shown.</div>}
+        {!accountAiAllowed && <div className="rounded-xl border border-accent-amber/30 bg-accent-amber/10 p-3 text-xs text-accent-amber" role="status">AI features are disabled for this account. You can keep language choices ready, but translation actions will remain unavailable until AI is enabled.</div>}
+        <div>
+          <p className="mb-2 text-sm font-medium text-slate-200">Translation engine</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <button type="button" disabled={!localAvailable} aria-pressed={translation.provider === 'local'} onClick={() => setProvider('local')} className={cx('card !rounded-xl p-4 text-left border disabled:cursor-not-allowed disabled:opacity-50', translation.provider === 'local' ? 'border-brand-500 bg-brand-500/[0.06]' : 'border-white/[0.05]')}>
+              <div className="flex items-center gap-3"><span className="grid h-9 w-9 place-items-center rounded-lg bg-accent-green/15 text-accent-green"><Icon.Cpu size={18} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-white">{translationCaps.localName}</span><span className="block text-xs muted">Runs through your configured local endpoint.</span></span>{translation.provider === 'local' && <Icon.Check size={17} className="text-brand-300" />}</div>
+              {!translationCaps.localConfigured && <p className="mt-2 text-xs text-accent-amber">A local provider is not configured yet.</p>}
+            </button>
+            <button type="button" disabled={!externalAvailable} aria-pressed={translation.provider === 'external'} onClick={() => setProvider('external')} className={cx('card !rounded-xl p-4 text-left border disabled:cursor-not-allowed disabled:opacity-50', translation.provider === 'external' ? 'border-brand-500 bg-brand-500/[0.06]' : 'border-white/[0.05]')}>
+              <div className="flex items-center gap-3"><span className="grid h-9 w-9 place-items-center rounded-lg bg-brand-500/15 text-brand-300"><Icon.Cloud size={18} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-white">{translationCaps.externalName}</span><span className="block text-xs muted">Sends only the text being translated to the configured provider.</span></span>{translation.provider === 'external' && <Icon.Check size={17} className="text-brand-300" />}</div>
+              {externalAvailable && <p className="mt-2 text-xs text-slate-500">Saving this choice gives standing permission to use this provider for translations. Change back to Local at any time.</p>}
+              {!externalAvailable && <p className="mt-2 text-xs text-accent-amber">{externalUnavailableMessage}</p>}
+            </button>
+          </div>
+        </div>
+        <div>
+          <div className="mb-2"><p className="text-sm font-medium text-slate-200">Target languages</p><p className="text-xs muted">Every selected language becomes a separate Translate action; nothing is guessed from the source language.</p></div>
+          <div className="flex flex-wrap gap-2">{COMMON_TRANSLATION_LANGUAGES.map(code => {
+            const active = translation.languages.some(language => language.toLowerCase() === code.toLowerCase());
+            return <button type="button" key={code} aria-pressed={active} onClick={() => toggleLanguage(code)} className={cx('rounded-full border px-3 py-1.5 text-sm transition', active ? 'border-brand-400/50 bg-brand-500/15 text-white' : 'border-white/[0.08] text-slate-400 hover:text-white')}>{active && <Icon.Check size={13} className="mr-1 inline" />}{languageLabel(code)}</button>;
+          })}</div>
+          {translation.languages.filter(code => !COMMON_TRANSLATION_LANGUAGES.some(common => common.toLowerCase() === code.toLowerCase())).length > 0 && <div className="mt-2 flex flex-wrap gap-2">{translation.languages.filter(code => !COMMON_TRANSLATION_LANGUAGES.some(common => common.toLowerCase() === code.toLowerCase())).map(code => <button type="button" key={code} aria-pressed="true" onClick={() => toggleLanguage(code)} className="rounded-full border border-brand-400/50 bg-brand-500/15 px-3 py-1.5 text-sm text-white"><Icon.Check size={13} className="mr-1 inline" />{languageLabel(code)} ({code})</button>)}</div>}
+          <div className="mt-3 flex max-w-md gap-2"><input className="input" value={customLanguage} onChange={event => setCustomLanguage(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addCustomLanguage(); } }} placeholder="Add language code, e.g. pt-BR" aria-label="Custom translation language code" /><button type="button" className="btn-secondary shrink-0" onClick={addCustomLanguage}>Add</button></div>
+          <p className="mt-2 text-xs text-slate-500" aria-live="polite">Selected: {translation.languages.map(code => `${languageLabel(code)} (${code})`).join(', ')}</p>
+        </div>
+      </div>}
+    </Section>
+  </div>;
 }
 
 // ---------------- Notifications ----------------
@@ -606,12 +790,12 @@ function NotificationsTab() {
 // Only controls that produce a real, observable effect live here. Both are applied
 // app-wide by toggling classes on <html> (persist across SPA navigation) backed by an
 // injected stylesheet, and are cached to localStorage in addition to the server.
-type Prefs = AppearancePrefs & Record<string, any>;
+type Prefs = AppearancePrefs;
 const DEFAULT_PREFS: Prefs = { ...DEFAULT_APPEARANCE };
 
-function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ label, on, onChange }: { label: string; on: boolean; onChange: (v: boolean) => void }) {
   return (
-    <button role="switch" aria-checked={on} onClick={() => onChange(!on)}
+    <button type="button" role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)}
       className={cx('w-11 h-6 rounded-full relative transition-colors shrink-0', on ? 'bg-brand-500' : 'bg-white/[0.12]')}>
       <span className={cx('absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all', on ? 'left-[22px]' : 'left-0.5')} />
     </button>
@@ -631,8 +815,6 @@ function PrefRow({ title, desc, children }: { title: string; desc: string; child
 }
 
 function PreferencesTab() {
-  // `prefs` also carries any preference keys owned by other pages (e.g. Music); we
-  // preserve them on save by spreading the loaded object back to the server.
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [autoRequest, setAutoRequest] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
@@ -643,7 +825,14 @@ function PreferencesTab() {
   useEffect(() => {
     api.settings.get()
       .then(r => {
-        const merged = { ...DEFAULT_PREFS, ...(r.preferences || {}) };
+        const loaded = r.preferences || {};
+        const merged: Prefs = {
+          reduceMotion: loaded.reduceMotion === true,
+          compact: loaded.compact === true,
+          highContrast: loaded.highContrast === true,
+          largeText: loaded.largeText === true,
+          language: loaded.language === 'nl' ? 'nl' : DEFAULT_PREFS.language,
+        };
         applyAppearance(merged); cacheAppearance(merged);
         setPrefs(merged);
       })
@@ -665,7 +854,13 @@ function PreferencesTab() {
     if (!prefs) return;
     setSaving(true);
     try {
-      await api.settings.preferences(prefs);
+      await api.settings.preferences({
+        reduceMotion: prefs.reduceMotion,
+        compact: prefs.compact,
+        highContrast: prefs.highContrast,
+        largeText: prefs.largeText,
+        language: prefs.language,
+      });
       toast('Preferences saved', 'success');
     } catch (e: any) {
       toast('Could not save preferences', 'error', e?.message);
@@ -696,16 +891,16 @@ function PreferencesTab() {
         footer={<button className="btn-primary" disabled={saving} onClick={save}>{saving ? <Spinner size={16} /> : 'Save preferences'}</button>}>
         <div>
           <PrefRow title="Compact density" desc="Tighten spacing and text size across the whole app.">
-            <Toggle on={prefs.compact} onChange={v => update({ compact: v })} />
+            <Toggle label="Compact density" on={prefs.compact} onChange={v => update({ compact: v })} />
           </PrefRow>
           <PrefRow title="Reduce motion" desc="Minimize animations and transitions everywhere.">
-            <Toggle on={prefs.reduceMotion} onChange={v => update({ reduceMotion: v })} />
+            <Toggle label="Reduce motion" on={prefs.reduceMotion} onChange={v => update({ reduceMotion: v })} />
           </PrefRow>
           <PrefRow title="High contrast" desc="Strengthen borders, focus indicators and text contrast.">
-            <Toggle on={prefs.highContrast} onChange={v => update({ highContrast: v })} />
+            <Toggle label="High contrast" on={prefs.highContrast} onChange={v => update({ highContrast: v })} />
           </PrefRow>
           <PrefRow title="Larger text" desc="Increase interface text and controls without browser zoom.">
-            <Toggle on={prefs.largeText} onChange={v => update({ largeText: v })} />
+            <Toggle label="Larger text" on={prefs.largeText} onChange={v => update({ largeText: v })} />
           </PrefRow>
           <PrefRow title="Interface language" desc="Use Aerie in English or Dutch.">
             <select className="input !w-36" value={prefs.language} onChange={e => update({ language: e.target.value as 'en' | 'nl' })}><option value="en">English</option><option value="nl">Nederlands</option></select>
@@ -713,7 +908,7 @@ function PreferencesTab() {
           <PrefRow title="Auto-add movies, shows & music I'll like" desc="Up to 3 a week, based on your history. You'll get a notification for each.">
             {autoRequest === null ? <Spinner size={16} /> : (
               <div className={cx(autoSaving && 'opacity-60 pointer-events-none')}>
-                <Toggle on={autoRequest} onChange={toggleAutoRequest} />
+                <Toggle label="Auto-add movies, shows and music" on={autoRequest} onChange={toggleAutoRequest} />
               </div>
             )}
           </PrefRow>

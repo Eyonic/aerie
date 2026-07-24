@@ -46,26 +46,106 @@ export function PageHeader({ title, subtitle, icon, actions }: { title: string; 
   );
 }
 
-export function Modal({ open, onClose, title, children, footer, size = 'md' }:
-  { open: boolean; onClose: () => void; title?: string; children: React.ReactNode; footer?: React.ReactNode; size?: 'sm' | 'md' | 'lg' | 'xl' }) {
+const FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  'audio[controls]',
+  'video[controls]',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',');
+
+function visibleFocusableElements(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true' && element.getClientRects().length > 0);
+}
+
+export function Modal({ open, onClose, title, children, footer, size = 'md', dismissible = true, ariaLabel = 'Dialog' }:
+  { open: boolean; onClose: () => void; title?: string; children: React.ReactNode; footer?: React.ReactNode; size?: 'sm' | 'md' | 'lg' | 'xl'; dismissible?: boolean; ariaLabel?: string }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const dismissibleRef = useRef(dismissible);
+  const titleId = React.useId();
+  onCloseRef.current = onClose;
+  dismissibleRef.current = dismissible;
   useEffect(() => {
     if (!open) return;
-    const h = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [open, onClose]);
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overlay = dialog.parentElement;
+    const background = Array.from(document.body.children)
+      .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== overlay)
+      .map(element => ({
+        element,
+        inert: (element as HTMLElement & { inert: boolean }).inert,
+        inertAttribute: element.getAttribute('inert'),
+        ariaHidden: element.getAttribute('aria-hidden'),
+      }));
+    for (const item of background) {
+      (item.element as HTMLElement & { inert: boolean }).inert = true;
+      item.element.setAttribute('inert', '');
+      item.element.setAttribute('aria-hidden', 'true');
+    }
+
+    const requestedInitialFocus = dialog.querySelector<HTMLElement>('[data-modal-initial-focus], [autofocus]');
+    if (!dialog.contains(document.activeElement)) (requestedInitialFocus || dialog).focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && dismissibleRef.current) {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = visibleFocusableElements(dialog);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === dialog || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      for (const item of background) {
+        (item.element as HTMLElement & { inert: boolean }).inert = item.inert;
+        if (item.inertAttribute === null) item.element.removeAttribute('inert');
+        else item.element.setAttribute('inert', item.inertAttribute);
+        if (item.ariaHidden === null) item.element.removeAttribute('aria-hidden');
+        else item.element.setAttribute('aria-hidden', item.ariaHidden);
+      }
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, [open]);
   if (!open) return null;
   const w = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl' }[size];
   // Portal to <body> so the modal is positioned relative to the viewport, not a
   // page ancestor with a CSS transform (animate-fade-in) — that was shifting/clipping
   // modals off-center. max-h + inner scroll keeps tall modals inside the screen.
   return createPortal(
-    <div className="fixed inset-0 z-[200] grid place-items-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={onClose}>
-      <div className={cx('glass-strong rounded-2xl shadow-float w-full max-h-[92vh] flex flex-col animate-scale-in', w)} onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[200] grid place-items-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={dismissible ? onClose : undefined}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={title ? titleId : undefined}
+        aria-label={title ? undefined : ariaLabel} tabIndex={-1}
+        className={cx('glass-strong rounded-2xl shadow-float w-full max-h-[92vh] flex flex-col animate-scale-in', w)} onClick={e => e.stopPropagation()}>
         {title && (
           <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06] shrink-0">
-            <h2 className="font-semibold text-white">{title}</h2>
-            <button className="icon-btn" onClick={onClose}><Icon.Close size={18} /></button>
+            <h2 id={titleId} className="font-semibold text-white">{title}</h2>
+            {dismissible && <button type="button" className="icon-btn" onClick={onClose} aria-label="Close dialog"><Icon.Close size={18} /></button>}
           </div>
         )}
         <div className="p-5 overflow-y-auto">{children}</div>
@@ -129,14 +209,19 @@ export function Toaster() {
   const iconFor = (l: string) => l === 'success' ? <Icon.Check size={18} /> : l === 'error' ? <Icon.Warning size={18} /> : l === 'warning' ? <Icon.Warning size={18} /> : <Icon.Info size={18} />;
   const colorFor = (l: string) => l === 'success' ? 'text-accent-green' : l === 'error' ? 'text-accent-red' : l === 'warning' ? 'text-accent-amber' : 'text-brand-300';
   return (
-    <div className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 w-80 max-w-[calc(100vw-2rem)]">
+    <div className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 w-80 max-w-[calc(100vw-2rem)]" aria-label="Notifications">
       {toasts.map(t => (
-        <div key={t.id} className="glass-strong rounded-xl shadow-float p-3.5 flex gap-3 animate-scale-in cursor-pointer" onClick={() => dismiss(t.id)}>
-          <div className={cx('mt-0.5', colorFor(t.level))}>{iconFor(t.level)}</div>
+        <div key={t.id} role={t.level === 'error' || t.level === 'warning' ? 'alert' : 'status'}
+          aria-live={t.level === 'error' || t.level === 'warning' ? 'assertive' : 'polite'} aria-atomic="true"
+          className="glass-strong rounded-xl shadow-float p-3.5 flex gap-3 animate-scale-in cursor-pointer" onClick={() => dismiss(t.id)}>
+          <div aria-hidden="true" className={cx('mt-0.5', colorFor(t.level))}>{iconFor(t.level)}</div>
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium text-white">{t.title}</p>
             {t.body && <p className="text-xs muted mt-0.5">{t.body}</p>}
           </div>
+          <button type="button" className="icon-btn !w-7 !h-7 shrink-0" aria-label={`Dismiss ${t.title}`} onClick={() => dismiss(t.id)}>
+            <Icon.Close size={14} />
+          </button>
         </div>
       ))}
     </div>

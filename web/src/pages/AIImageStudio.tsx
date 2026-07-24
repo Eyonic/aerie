@@ -3,9 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatRelative, copyText } from '../lib/utils';
-import { toast } from '../lib/store';
+import { toast, useAuth } from '../lib/store';
 import { Spinner, PageLoader, EmptyState, PageHeader, Modal, ConfirmModal, Badge } from '../components/ui';
 import type { GeneratedImage } from '../lib/model';
+import {
+  aiPromptHistoryKey,
+  loadAiPromptHistory,
+  saveAiPromptHistory,
+  switchScopedSnapshot,
+} from '../lib/request-local-state';
 
 // ---- size presets ----
 type Preset = { id: string; label: string; ratio: number; w: number; h: number };
@@ -26,14 +32,6 @@ function AspectGlyph({ r }: { r: number }) {
       <rect x={(16 - w) / 2} y={(16 - h) / 2} width={w} height={h} rx="2.5" stroke="currentColor" strokeWidth="1.5" />
     </svg>
   );
-}
-
-const PROMPT_STORE = 'cb_ai_prompt_history';
-function loadHistory(): string[] {
-  try { return JSON.parse(localStorage.getItem(PROMPT_STORE) || '[]'); } catch { return []; }
-}
-function saveHistory(list: string[]) {
-  try { localStorage.setItem(PROMPT_STORE, JSON.stringify(list.slice(0, 12))); } catch { /* ignore */ }
 }
 
 const IDEAS = [
@@ -79,9 +77,21 @@ function Slider({ label, value, min, max, step = 1, onChange, hint, accent }: {
 
 export default function AIImageStudio() {
   const nav = useNavigate();
+  const accountId = useAuth(state => state.user?.id ?? null);
+  const historyScopeKey = accountId ? aiPromptHistoryKey(accountId) : null;
   const [available, setAvailable] = useState<boolean | null>(null);
   const [gallery, setGallery] = useState<GeneratedImage[] | null>(null);
-  const [history, setHistory] = useState<string[]>(loadHistory());
+  const [historySnapshot, setHistorySnapshot] = useState(() => ({
+    scopeKey: historyScopeKey,
+    value: loadAiPromptHistory(accountId),
+  }));
+  const visibleHistorySnapshot = switchScopedSnapshot(
+    historySnapshot,
+    historyScopeKey,
+    () => loadAiPromptHistory(accountId),
+  );
+  if (visibleHistorySnapshot !== historySnapshot) setHistorySnapshot(visibleHistorySnapshot);
+  const history = visibleHistorySnapshot.value;
 
   const [prompt, setPrompt] = useState('');
   const [negative, setNegative] = useState('');
@@ -117,11 +127,13 @@ export default function AIImageStudio() {
 
   function pushHistory(p: string) {
     const next = [p, ...history.filter(h => h !== p)].slice(0, 12);
-    setHistory(next); saveHistory(next);
+    setHistorySnapshot({ scopeKey: historyScopeKey, value: next });
+    saveAiPromptHistory(accountId, next);
   }
 
   function clearHistory() {
-    setHistory([]); saveHistory([]);
+    setHistorySnapshot({ scopeKey: historyScopeKey, value: [] });
+    saveAiPromptHistory(accountId, []);
   }
 
   function surprise() {

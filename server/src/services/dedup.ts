@@ -6,6 +6,7 @@ import { db, notify } from '../lib/db.js';
 import type { User } from '../lib/model.js';
 import * as storage from './storage.js';
 import { IMAGE_EXT } from './photolib.js';
+import { markFileCatalogStale } from './file-catalog.js';
 
 type WalkFile = { rel: string; size: number; mtimeMs: number };
 type Group = { hash: string; size: number; keep: string; remove: string[] };
@@ -61,7 +62,7 @@ function pickKeep(items: WalkFile[]) {
 }
 
 export async function groupsFor(user: User, onProgress?: (p: number) => void) {
-  const root = storage.userRoot(user.username);
+  const root = await storage.userRootAsync(user.username);
   const files = await walkFiles(root);
   const bySize = new Map<number, WalkFile[]>();
   for (const f of files) {
@@ -104,15 +105,23 @@ export async function groupsFor(user: User, onProgress?: (p: number) => void) {
 }
 
 function progress(id: string, p: number) {
-  db.prepare('UPDATE jobs SET progress=? WHERE id=?').run(Math.max(0, Math.min(0.99, p)), id);
+  const updated = db.prepare(`UPDATE jobs SET progress=? WHERE id=? AND status='running' AND EXISTS
+    (SELECT 1 FROM users WHERE id=jobs.user_id AND disabled_at IS NULL)`)
+    .run(Math.max(0, Math.min(0.99, p)), id);
+  if (!updated.changes) throw new Error('job_cancelled');
 }
 
 function enqueue(userId: number, prompt: 'scan' | 'remove', run: (jobId: string) => Promise<any>) {
+  const pending = db.prepare("SELECT COUNT(*) count FROM jobs WHERE user_id=? AND type='dedup' AND status IN ('queued','running')")
+    .get(userId) as any;
+  if (Number(pending?.count || 0) >= 2) throw Object.assign(new Error('too_many_active_dedup_jobs'), { status: 429 });
   const id = uid('job');
   db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,payload,progress) VALUES (?,?,?,?,?,?,0)')
     .run(id, userId, 'dedup', 'queued', prompt, JSON.stringify({ kind: prompt }));
   queue.push({ id, userId, run, done: result => {
-    db.prepare("UPDATE jobs SET status='done', progress=1, result_urls=?, finished_at=datetime('now') WHERE id=?").run(JSON.stringify(result), id);
+    db.prepare(`UPDATE jobs SET status='done', progress=1, result_urls=?, finished_at=datetime('now')
+      WHERE id=? AND status='running' AND EXISTS
+        (SELECT 1 FROM users WHERE id=jobs.user_id AND disabled_at IS NULL)`).run(JSON.stringify(result), id);
   } });
   drain();
   return id;
@@ -123,13 +132,16 @@ async function drain() {
   const task = queue.shift();
   if (!task) return;
   active = true;
-  db.prepare("UPDATE jobs SET status='running', progress=0 WHERE id=?").run(task.id);
+  const claimed = db.prepare(`UPDATE jobs SET status='running', progress=0 WHERE id=? AND status='queued' AND EXISTS
+    (SELECT 1 FROM users WHERE id=jobs.user_id AND disabled_at IS NULL)`).run(task.id);
+  if (!claimed.changes) { active = false; drain(); return; }
   try {
     task.done(await task.run(task.id));
   } catch (e: any) {
     const msg = String(e?.message || 'dedup job failed');
-    db.prepare("UPDATE jobs SET status='error', error=?, finished_at=datetime('now') WHERE id=?").run(msg, task.id);
-    notify(task.userId, 'Duplicate cleanup failed', msg, 'error');
+    const failed = db.prepare("UPDATE jobs SET status='error', error=?, finished_at=datetime('now') WHERE id=? AND status='running'")
+      .run(msg, task.id);
+    if (failed.changes) notify(task.userId, 'Duplicate cleanup failed', msg, 'error');
   } finally {
     active = false;
     drain();
@@ -137,6 +149,7 @@ async function drain() {
 }
 
 async function execute(user: User, kind: 'scan' | 'remove', jobId: string) {
+  progress(jobId, 0);
   if (kind === 'scan') {
     const r = await groupsFor(user, p => progress(jobId, p));
     notify(user.id, 'Duplicate scan complete', `Found ${r.sets} duplicate sets.`, 'success');
@@ -153,20 +166,23 @@ async function execute(user: User, kind: 'scan' | 'remove', jobId: string) {
   }
   const r = await groupsFor(user);
     const total = r.removable;
-    let removed = 0, bytesFreed = 0;
+    let removed = 0, bytesMovedToTrash = 0;
     for (const g of r.groups) {
       for (const rel of g.remove) {
+        progress(jobId, total ? removed / total : 0);
         await storage.trash(user.username, user.id, rel);
         if (isImagePath(rel)) db.prepare('DELETE FROM photo_index WHERE user_id=? AND rel_path=?').run(user.id, rel);
         db.prepare(`INSERT OR REPLACE INTO dedup_removed (user_id,rel_path,size,hash,removed_at)
           VALUES (?,?,?,?,datetime('now'))`).run(user.id, rel, g.size, g.hash);
         removed++;
-        bytesFreed += g.size;
+        bytesMovedToTrash += g.size;
         progress(jobId, total ? removed / total : 1);
       }
     }
-    notify(user.id, 'Duplicates removed', `Removed ${removed} duplicate files, freed ${bytesFreed} bytes.`, 'success');
-    return { removed, bytesFreed };
+    notify(user.id, 'Duplicates moved to trash',
+      `Moved ${removed} duplicate files (${bytesMovedToTrash} bytes) to trash. Empty trash to reclaim the space.`, 'success');
+    if (removed) markFileCatalogStale(user.id);
+    return { removed, bytesMovedToTrash };
 }
 
 export function scan(user: User) {
@@ -203,9 +219,9 @@ export function clearTombstone(userId: number, vpath: string) {
   db.prepare('DELETE FROM dedup_removed WHERE user_id=? AND rel_path=?').run(userId, rel);
 }
 
-function recoverJobs() {
+export function recoverDedupJobs() {
   const rows = db.prepare(`SELECT j.id,j.user_id userId,j.prompt,u.username FROM jobs j
-    JOIN users u ON u.id=j.user_id WHERE j.type='dedup' AND j.status IN ('queued','running')
+    JOIN users u ON u.id=j.user_id WHERE j.type='dedup' AND j.status IN ('queued','running') AND u.disabled_at IS NULL
     ORDER BY j.created_at,j.rowid`).all() as any[];
   for (const row of rows) {
     const kind = row.prompt === 'remove' ? 'remove' : row.prompt === 'scan' ? 'scan' : null;
@@ -216,11 +232,14 @@ function recoverJobs() {
     const user = { id: row.userId, username: row.username } as User;
     db.prepare("UPDATE jobs SET status='queued',progress=0,error=NULL,finished_at=NULL WHERE id=?").run(row.id);
     queue.push({ id: row.id, userId: row.userId, run: id => execute(user, kind, id), done: result => {
-      db.prepare("UPDATE jobs SET status='done',progress=1,result_urls=?,finished_at=datetime('now') WHERE id=?")
+      db.prepare("UPDATE jobs SET status='done',progress=1,result_urls=?,finished_at=datetime('now') WHERE id=? AND status='running'")
         .run(JSON.stringify(result), row.id);
     } });
   }
   drain();
 }
 
-recoverJobs();
+// Persisted integration/config overrides and every route module finish loading
+// before recovery gets CPU time. This avoids a recovered job observing a
+// half-initialized process during deployment.
+setTimeout(recoverDedupJobs, 0).unref();

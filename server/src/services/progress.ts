@@ -33,6 +33,20 @@ export function get(userId: number, itemId: string): ProgressRow | null {
   return row ? mapRow(row) : null;
 }
 
+/** Remove a progress row after its upstream item is definitively gone. */
+export function remove(userId: number, itemId: string): boolean {
+  if (!itemId) return false;
+  return db.prepare('DELETE FROM playback_progress WHERE user_id=? AND item_id=?')
+    .run(userId, itemId).changes > 0;
+}
+
+/** Remove episode progress after Jellyfin confirms that the parent series is gone. */
+export function removeSeries(userId: number, seriesId: string): number {
+  if (!seriesId) return 0;
+  return db.prepare('DELETE FROM playback_progress WHERE user_id=? AND series_id=?')
+    .run(userId, seriesId).changes;
+}
+
 export function report(userId: number, itemId: string, media: ProgressMedia, positionTicks: number, durationTicks = 0, seriesId?: string) {
   if (!itemId) return;
   const pos = Math.max(0, Math.round(positionTicks || 0));

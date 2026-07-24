@@ -40,6 +40,10 @@ const dataDir = env.DATA_DIR || '/data';
 
 export const config = {
   port: parseInt(env.PORT || '8200', 10),
+  // Trust exactly one reverse-proxy hop only when the operator opts in. This
+  // keeps client IP/protocol decisions from accepting arbitrary X-Forwarded-*.
+  trustProxy: env.TRUST_PROXY === '1' ? 1 : false,
+  corsOrigins: (env.CORS_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   jwtSecret: jwtSecret(dataDir),
   // Public HTTPS address of this Aerie server (optional). Shown in UI hints
   // for features that need a secure context (casting, mic, PWA install).
@@ -57,7 +61,8 @@ export const config = {
   get thumbsDir() { return path.join(this.dataDir, 'thumbs'); },
   get downloadsDir() { return env.DOWNLOADS_DIR || path.join(this.dataDir, 'downloads'); },
 
-  // Per-user file storage root. Each user gets DATA_ROOT/<username>.
+  // Per-user file storage root. Each user gets FILES_ROOT/<immutable storage_id>
+  // so renames cannot orphan data and usernames never become path components.
   filesRoot: env.FILES_ROOT || '/files',
 
   // Shared media library roots (read-mostly, imported into sections)
@@ -99,11 +104,14 @@ export const config = {
   whisper: {
     get url() { return cfgVal('WHISPER_URL'); },
   },
-  get translateLang() { return cfgVal('TRANSLATE_LANG', 'nl'); },
+  // Legacy single-target setting, used only to seed accounts that have never
+  // saved the newer per-user translation preferences.
+  get translateLang() { return cfgVal('TRANSLATE_LANG', ''); },
   // Optional "jellyfinPrefix=ourPrefix,..." map for finding Jellyfin's files on our mount.
   get mediaPathMap() { return cfgVal('MEDIA_PATH_MAP', ''); },
   server: {
-    // Host address used for on-box stats via a lightweight agent (optional)
+    // Legacy LAN IPv4 fallback used to derive the Chromecast discovery /24.
+    // This is not the HTTP bind address; Aerie listens according to PORT.
     get host() { return cfgVal('SERVER_HOST') || cfgVal('TOWER_HOST'); },
   },
 } as const;

@@ -1,81 +1,121 @@
-// Backups dashboard. Reports on the Aerie DB + real backup dirs, plus a manual
-// backup action that snapshots the Aerie database.
+// Comprehensive recovery bundles. A backup is one portable tar.gz containing
+// a WAL-safe SQLite snapshot, user files and durable generated/config data,
+// with an internal manifest plus whole-archive and per-file SHA-256 checksums.
 import { Router } from 'express';
-import fs from 'node:fs';
-import fsp from 'node:fs/promises';
-import path from 'node:path';
 import { requireAdmin, type AuthedRequest } from '../lib/auth.js';
-import { config } from '../config.js';
-import type { BackupStatus } from '../lib/model.js';
+import { notify } from '../lib/db.js';
+import {
+  backupPaths,
+  backupRetention,
+  backupStatuses as serviceBackupStatuses,
+  createBackup,
+  listBackupHistory,
+  stageRestore,
+} from '../services/backup.js';
+import { sqliteBackupCallbacks } from '../services/sqlite-backup.js';
+import { automationEnabled } from '../services/automations.js';
+import { localScheduleTime, nextNightlyBackup, serverTimeZone } from '../lib/backup-schedule.js';
+import type { BackupConfiguration } from '../lib/model.js';
 
 const r = Router();
-const backupDir = path.join(config.dataDir, 'backups');
-fs.mkdirSync(backupDir, { recursive: true });
+r.use(requireAdmin);
 
-export async function backupStatuses(): Promise<BackupStatus[]> {
-  const out: BackupStatus[] = [];
-  // Aerie database backup
-  const dbBackups = fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter(f => f.endsWith('.db')).sort() : [];
-  const last = dbBackups[dbBackups.length - 1];
-  let lastStat: fs.Stats | null = null;
-  if (last) { try { lastStat = fs.statSync(path.join(backupDir, last)); } catch { /* */ } }
-  out.push({
-    key: 'db', name: 'Aerie database', lastRun: lastStat?.mtime.toISOString() || null,
-    success: !!last, sizeBytes: lastStat?.size,
-    nextRun: 'Tonight 03:00', note: last ? undefined : 'No backup yet — run one now',
-  });
-  // File/config backups (representative — reflect real app data presence)
-  const dataSize = (() => { try { return fs.statSync(config.dbPath).size; } catch { return 0; } });
-  out.push({ key: 'files', name: 'User files snapshot', lastRun: lastStat?.mtime.toISOString() || null, success: !!last, sizeBytes: dataSize(), nextRun: 'Tonight 03:30' });
-  out.push({ key: 'config', name: 'Config backup', lastRun: lastStat?.mtime.toISOString() || null, success: !!last, nextRun: 'Weekly (Sun)' });
-  out.push({ key: 'offsite', name: 'Off-site (encrypted)', lastRun: null, success: false, nextRun: null, note: 'Not configured yet' });
-  return out;
+export async function backupStatuses() {
+  return serviceBackupStatuses();
+}
+
+export function backupConfiguration(now = new Date()): BackupConfiguration {
+  const enabled = automationEnabled('nightly-recovery-bundle');
+  return {
+    retention: backupRetention(),
+    nightly: {
+      enabled,
+      localTime: localScheduleTime(),
+      timeZone: serverTimeZone(),
+      nextRunAt: enabled ? nextNightlyBackup(now).toISOString() : null,
+    },
+  };
+}
+
+function restoreErrorStatus(error: unknown): number | null {
+  const message = String((error as any)?.message || error);
+  if (message.includes('backup_not_found') || message.includes('ENOENT')) return 404;
+  if (message.includes('restore_already') || message.includes('backup_already_running')) return 409;
+  if (message.includes('invalid_backup_name')) return 400;
+  if (message.includes('integrity') || message.includes('checksum') || message.includes('manifest')
+    || message.includes('unsupported')) return 422;
+  return null;
 }
 
 r.get('/', async (_req, res, next) => {
-  try { res.json(await backupStatuses()); } catch (e) { next(e); }
+  try { res.json(await backupStatuses()); } catch (error) { next(error); }
 });
 
-r.get('/history', (_req, res) => {
-  const files = fs.existsSync(backupDir) ? fs.readdirSync(backupDir).filter(f => f.endsWith('.db')) : [];
-  const rows = files.map(f => {
-    const st = fs.statSync(path.join(backupDir, f));
-    return { name: f, sizeBytes: st.size, createdAt: st.mtime.toISOString(), success: true };
-  }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  res.json(rows);
-});
-
-r.post('/run', requireAdmin, async (req: AuthedRequest, res, next) => {
+r.get('/configuration', (_req, res, next) => {
   try {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(backupDir, `aerie-${stamp}.db`);
-    const { db } = await import('../lib/db.js');
-    // VACUUM INTO writes a complete, consistent snapshot (WAL-safe) — a plain
-    // file copy would miss data still in the -wal file.
-    db.prepare('VACUUM INTO ?').run(dest);
-    const st = await fsp.stat(dest);
-    const { notify } = await import('../lib/db.js');
-    notify(req.user!.id, 'Backup complete', 'Manual database backup finished.', 'success', '/backups');
-    res.json({ ok: true, name: path.basename(dest), sizeBytes: st.size, createdAt: st.mtime.toISOString() });
-  } catch (e) { next(e); }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(backupConfiguration());
+  } catch (error) { next(error); }
 });
 
-// Restore a backup: snapshot the current DB first (safety), then note that a
-// full restore requires a container restart to reopen the DB cleanly.
-r.post('/restore', requireAdmin, async (req: AuthedRequest, res, next) => {
+r.get('/history', async (_req, res, next) => {
+  try { res.json(await listBackupHistory()); } catch (error) { next(error); }
+});
+
+r.post('/run', async (req: AuthedRequest, res, next) => {
   try {
-    const { name } = req.body || {};
-    const src = path.join(backupDir, path.basename(String(name || '')));
-    if (!fs.existsSync(src) || !src.endsWith('.db')) return res.status(404).json({ error: 'backup_not_found' });
-    // safety snapshot of the live DB before overwriting
-    const safety = path.join(backupDir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-')}.db`);
-    const { db } = await import('../lib/db.js');
-    db.prepare('VACUUM INTO ?').run(safety); // consistent snapshot of current state
-    await fsp.copyFile(src, config.dbPath);
-    // drop stale WAL/SHM so the restored file loads cleanly on next open
-    for (const ext of ['-wal', '-shm']) { try { await fsp.rm(config.dbPath + ext); } catch { /* */ } }
-    res.json({ ok: true, restored: path.basename(src), safetyCopy: path.basename(safety), note: 'Restart the Aerie container to load the restored database.' });
-  } catch (e) { next(e); }
+    const paths = backupPaths();
+    const result = await createBackup({ paths, ...sqliteBackupCallbacks(paths.dbPath) });
+    notify(
+      req.user!.id,
+      'Backup complete',
+      'Verified recovery bundle includes the database, user files and available durable app data.',
+      'success',
+      '/backups',
+    );
+    res.json({
+      ok: true,
+      name: result.name,
+      sizeBytes: result.sizeBytes,
+      createdAt: result.createdAt,
+      sha256: result.sha256,
+      components: result.manifest.components,
+    });
+  } catch (error) {
+    const status = restoreErrorStatus(error);
+    if (status) return res.status(status).json({ error: String((error as any)?.message || error) });
+    next(error);
+  }
+});
+
+// Never replace the database under the running process. This validates the
+// requested artifact and writes a durable handoff marker. The container
+// entrypoint applies it in maintenance mode before Node opens SQLite again.
+r.post('/restore', async (req: AuthedRequest, res, next) => {
+  try {
+    const paths = backupPaths();
+    const request = await stageRestore(String(req.body?.name || ''), req.user!.id, {
+      paths,
+      validateDatabase: sqliteBackupCallbacks(paths.dbPath).validateDatabase,
+    });
+    notify(
+      req.user!.id,
+      'Restore staged',
+      'The verified restore will be applied before SQLite opens on the next container restart.',
+      'warning',
+      '/backups',
+    );
+    res.status(202).json({
+      ok: true,
+      staged: true,
+      restored: request.artifact,
+      note: 'Restore validated and staged safely. Restart the Aerie container to apply it before the database opens.',
+    });
+  } catch (error) {
+    const status = restoreErrorStatus(error);
+    if (status) return res.status(status).json({ error: String((error as any)?.message || error) });
+    next(error);
+  }
 });
 
 export default r;

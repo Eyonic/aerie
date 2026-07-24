@@ -5,8 +5,8 @@ import { subscribe } from '../services/events.js';
 
 const r = Router();
 
-// Live notification stream (Server-Sent Events). Auth via ?token= (EventSource
-// can't set headers). Pushes {type:'notification',...} as jobs complete.
+// Live notification stream. Same-origin EventSource requests carry the
+// HttpOnly account cookie; account credentials never need to appear in URLs.
 r.get('/stream', (req: AuthedRequest, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -16,7 +16,17 @@ r.get('/stream', (req: AuthedRequest, res) => {
   res.write(`data: ${JSON.stringify({ type: 'hello' })}\n\n`);
   const unsub = subscribe(req.user!.id, res);
   const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* */ } }, 25000);
-  req.on('close', () => { clearInterval(ping); unsub(); });
+  ping.unref?.();
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearInterval(ping);
+    unsub();
+  };
+  req.once('close', cleanup);
+  res.once('close', cleanup);
+  res.once('finish', cleanup);
 });
 
 r.get('/', (req: AuthedRequest, res) => {

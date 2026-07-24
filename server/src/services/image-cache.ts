@@ -5,6 +5,7 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 import sharp from 'sharp';
 import { config } from '../config.js';
+import { OutboundHttpError, outboundBytes } from './outbound-http.js';
 
 type Fit = 'cover' | 'contain' | 'fill' | 'inside' | 'outside';
 
@@ -91,9 +92,21 @@ export function imageWidth(value: unknown, fallback: number, max = 1280): number
 }
 
 export async function fetchImage(url: string, init?: RequestInit): Promise<Buffer> {
-  const res = await fetch(url, { ...init, signal: init?.signal || AbortSignal.timeout(15000) });
-  if (!res.ok) throw Object.assign(new Error(`image_upstream_${res.status}`), { status: res.status === 404 ? 404 : 502 });
-  const len = Number(res.headers.get('content-length') || 0);
-  if (len > 40 * 1024 * 1024) throw Object.assign(new Error('image_too_large'), { status: 413 });
-  return Buffer.from(await res.arrayBuffer());
+  try {
+    const result = await outboundBytes(url, {
+      method: init?.method,
+      headers: init?.headers,
+      body: init?.body,
+      signal: init?.signal,
+      timeoutMs: 15_000,
+      maxBytes: 40 * 1024 * 1024,
+    });
+    return result.body;
+  } catch (error) {
+    if (error instanceof OutboundHttpError) {
+      if (error.code === 'response_too_large') throw Object.assign(new Error('image_too_large'), { status: 413 });
+      if (error.upstreamStatus === 404) throw Object.assign(new Error('image_upstream_404'), { status: 404 });
+    }
+    throw Object.assign(new Error('image_upstream_failed'), { status: 502 });
+  }
 }

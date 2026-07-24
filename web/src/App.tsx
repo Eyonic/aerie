@@ -5,6 +5,8 @@ import { Layout } from './components/Layout';
 import { PageLoader } from './components/ui';
 import Login from './pages/Login'; // eager: it's the entry point / first paint
 import SharePage from './pages/SharePage'; // eager: public route, outside Suspense
+import PairDevice from './pages/PairDevice'; // public native pairing entry point
+import Join from './pages/Join'; // public one-time household invitation
 
 // Every other page is code-split into its own chunk so the initial mobile load
 // only downloads the shell + the page you land on. Huge win on phones/slow links.
@@ -37,6 +39,8 @@ const Downloads = lazy(() => import('./pages/Downloads'));
 const Jobs = lazy(() => import('./pages/Jobs'));
 const Collections = lazy(() => import('./pages/Collections'));
 const LibraryTools = lazy(() => import('./pages/LibraryTools'));
+const DeviceHub = lazy(() => import('./pages/DeviceHub'));
+const TimeMachine = lazy(() => import('./pages/TimeMachine'));
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -45,12 +49,19 @@ function Protected({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function AdminOnly({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  return user?.role === 'admin' ? <>{children}</> : <Navigate to="/" replace />;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/s/:id" element={<SharePage />} />
+        <Route path="/pair" element={<PairDevice />} />
+        <Route path="/join/:token" element={<Join />} />
         <Route element={<Protected><Layout /></Protected>}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/files" element={<Files />} />
@@ -71,7 +82,7 @@ export default function App() {
           <Route path="/music-studio" element={<MusicStudio />} />
           <Route path="/assistant" element={<Assistant />} />
           <Route path="/automations" element={<Automations />} />
-          <Route path="/backups" element={<Backups />} />
+          <Route path="/backups" element={<AdminOnly><Backups /></AdminOnly>} />
           <Route path="/sync" element={<FolderSync />} />
           <Route path="/monitoring" element={<Monitoring />} />
           <Route path="/admin" element={<Admin />} />
@@ -83,6 +94,8 @@ export default function App() {
           <Route path="/collections" element={<Collections />} />
           <Route path="/library-tools" element={<LibraryTools />} />
           <Route path="/jobs" element={<Jobs />} />
+          <Route path="/devices" element={<DeviceHub />} />
+          <Route path="/time-machine" element={<TimeMachine />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -3,10 +3,13 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatRelative } from '../lib/utils';
-import { toast } from '../lib/store';
+import { toast, useAuth } from '../lib/store';
 import { voice } from '../lib/voice';
 import { Spinner, EmptyState, Modal, Badge } from '../components/ui';
 import type { FileEntry, GeneratedImage } from '../lib/model';
+import {
+  clearImageRecoveryDraft, loadImageRecoveryDraft, saveImageRecoveryDraft, type ImageRecoveryDraft,
+} from '../lib/image-recovery';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,7 +40,7 @@ interface Adjustments {
   temperature: number; tint: number; hue: number; sharpen: number; blur: number; vignette: number;
 }
 interface Snapshot {
-  w: number; h: number; activeId: string;
+  w: number; h: number; activeId: string; stateId: number;
   layers: { id: string; name: string; visible: boolean; opacity: number; blend: Blend; data: ImageData }[];
 }
 
@@ -98,8 +101,10 @@ function sharpenImage(img: ImageData, amount: number): ImageData {
 export default function ImageEditor() {
   const [params, setParams] = useSearchParams();
   const nav = useNavigate();
+  const accountId = useAuth(state => state.user?.id || 0);
   const path = params.get('path') || '';
   const src = params.get('src') || '';
+  const recoveryKey = path || src;
 
   // ---- canvases / refs ----
   const viewRef = useRef<HTMLCanvasElement>(null);      // composited display
@@ -112,6 +117,12 @@ export default function ImageEditor() {
   const historyRef = useRef<Snapshot[]>([]);
   const redoRef = useRef<Snapshot[]>([]);
   const pendingRef = useRef<HTMLImageElement | null>(null);
+  const currentStateIdRef = useRef(0);
+  const savedStateIdRef = useRef(0);
+  const nextStateIdRef = useRef(0);
+  const recoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recoveryGenerationRef = useRef(0);
+  const recoveryWrittenRef = useRef(false);
 
   const pointers = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinch = useRef<{ dist: number; zoom: number; mx: number; my: number; px: number; py: number } | null>(null);
@@ -128,6 +139,11 @@ export default function ImageEditor() {
   const [srcName, setSrcName] = useState('untitled');
   const [, forceTick] = useState(0);
   const bump = () => forceTick(t => t + 1);
+  const [projectVersion, setProjectVersion] = useState(0);
+  const [recoveryDraft, setRecoveryDraft] = useState<ImageRecoveryDraft | null>(null);
+  const [recoveryState, setRecoveryState] = useState<'idle' | 'saving' | 'saved' | 'unavailable'>('idle');
+  const [recovering, setRecovering] = useState(false);
+  const [closeConfirm, setCloseConfirm] = useState(false);
 
   const [tool, setTool] = useState<Tool>('move');
   const [shapeKind, setShapeKind] = useState<ShapeKind>('rect');
@@ -172,6 +188,7 @@ export default function ImageEditor() {
   const [mobileH, setMobileH] = useState<number | null>(null);
 
   const dirty = adjDirty(adj);
+  const projectDirty = loaded && (dirty || currentStateIdRef.current !== savedStateIdRef.current);
   const previewFilter = dirty ? cssFilter(adj) : 'none';
 
   // ---- layer helpers ----
@@ -213,9 +230,22 @@ export default function ImageEditor() {
     return c;
   }
 
+  const markProjectChanged = () => {
+    currentStateIdRef.current = ++nextStateIdRef.current;
+    setProjectVersion(currentStateIdRef.current);
+  };
+  const markProjectSaved = () => {
+    savedStateIdRef.current = currentStateIdRef.current;
+    recoveryWrittenRef.current = false;
+    setRecoveryDraft(null);
+    setRecoveryState('idle');
+    if (accountId && recoveryKey) void clearImageRecoveryDraft(accountId, recoveryKey).catch(() => setRecoveryState('unavailable'));
+    setProjectVersion(v => v + 1);
+  };
+
   // ---- history ----
   const snapshot = (): Snapshot => ({
-    w: dims.w, h: dims.h, activeId,
+    w: dims.w, h: dims.h, activeId, stateId: currentStateIdRef.current,
     layers: layersRef.current.map(L => ({
       id: L.id, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend,
       data: L.canvas.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, L.canvas.width, L.canvas.height),
@@ -236,6 +266,9 @@ export default function ImageEditor() {
     });
     setDims({ w: s.w, h: s.h });
     setActiveId(s.activeId);
+    currentStateIdRef.current = s.stateId;
+    nextStateIdRef.current = Math.max(nextStateIdRef.current, s.stateId);
+    setProjectVersion(v => v + 1);
     setAdj(ADJ0);
     requestAnimationFrame(renderComposite);
     bump();
@@ -263,7 +296,7 @@ export default function ImageEditor() {
   const clearOverlay = () => { const o = overlayRef.current; if (o) o.getContext('2d')!.clearRect(0, 0, o.width, o.height); };
 
   // ---- loading ----
-  const initFromImage = (img: HTMLImageElement) => {
+  const initFromImage = (img: HTMLImageElement, recovered = false) => {
     const w = img.naturalWidth, h = img.naturalHeight;
     const base = newCanvas(w, h);
     base.getContext('2d')!.drawImage(img, 0, 0);
@@ -272,14 +305,25 @@ export default function ImageEditor() {
     setActiveId(id);
     setDims({ w, h });
     historyRef.current = []; redoRef.current = [];
+    nextStateIdRef.current = recovered ? 1 : 0;
+    currentStateIdRef.current = recovered ? 1 : 0;
+    savedStateIdRef.current = 0;
+    setProjectVersion(v => v + 1);
+    setRecoveryDraft(null);
+    recoveryWrittenRef.current = false;
+    setRecoveryState(recovered ? 'saved' : 'idle');
     setAdj(ADJ0); setCrop(null); setTool('move'); setPan({ x: 0, y: 0 });
     requestAnimationFrame(() => {
       syncSurfaces(w, h);
       renderComposite();
       fit(w, h);
-      pushHistory();
       bump();
     });
+    if (!recovered && accountId && recoveryKey) {
+      void loadImageRecoveryDraft(accountId, recoveryKey)
+        .then(draft => { if (draft) setRecoveryDraft(draft); })
+        .catch(() => setRecoveryState('unavailable'));
+    }
   };
   const placeImage = (img: HTMLImageElement) => {
     if (viewRef.current) initFromImage(img);
@@ -342,6 +386,73 @@ export default function ImageEditor() {
     if (path || src || loaded) return;
     api.files.recent(60).then(list => setRecentImgs(list.filter(f => f.kind === 'image'))).catch(() => setRecentImgs([]));
   }, [path, src, loaded]);
+
+  // Persist a flattened PNG after edits settle. The working layer history stays
+  // in memory; the recovery copy's purpose is to prevent total loss after a
+  // crash or reload, and PNG keeps its storage footprint bounded in IndexedDB.
+  useEffect(() => {
+    const generation = ++recoveryGenerationRef.current;
+    if (recoveryTimerRef.current) clearTimeout(recoveryTimerRef.current);
+    if (!accountId || !recoveryKey || !loaded) return;
+    if (!projectDirty) {
+      setRecoveryState('idle');
+      if (recoveryWrittenRef.current) {
+        recoveryWrittenRef.current = false;
+        void clearImageRecoveryDraft(accountId, recoveryKey).catch(() => setRecoveryState('unavailable'));
+      }
+      return;
+    }
+    setRecoveryState('saving');
+    recoveryTimerRef.current = setTimeout(() => {
+      const canvas = flatten(true);
+      canvas.toBlob(blob => {
+        if (!blob || generation !== recoveryGenerationRef.current) return;
+        void saveImageRecoveryDraft({ accountId, sourceKey: recoveryKey, name: srcName, width: dims.w, height: dims.h, blob })
+          .then(() => { if (generation === recoveryGenerationRef.current) { recoveryWrittenRef.current = true; setRecoveryState('saved'); } })
+          .catch(() => { if (generation === recoveryGenerationRef.current) setRecoveryState('unavailable'); });
+      }, 'image/png');
+    }, 1200);
+    return () => { if (recoveryTimerRef.current) clearTimeout(recoveryTimerRef.current); };
+    // projectVersion is the commit signal for canvas/layer mutations; adj covers
+    // live adjustment previews that have not yet been baked into a layer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectVersion, adj, loaded, accountId, recoveryKey]);
+
+  useEffect(() => {
+    if (!projectDirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [projectDirty]);
+
+  const restoreLocalRecovery = () => {
+    if (!recoveryDraft) return;
+    setRecovering(true);
+    const url = URL.createObjectURL(recoveryDraft.blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      setSrcName(recoveryDraft.name || srcName);
+      initFromImage(img, true);
+      setRecovering(false);
+      toast('Recovered local image draft', 'success', 'The recovery copy is flattened; save it to Files when ready.');
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      setRecovering(false);
+      toast('Could not recover image draft', 'error');
+    };
+    img.src = url;
+  };
+
+  const discardLocalRecovery = async () => {
+    if (!accountId || !recoveryKey) return;
+    try { await clearImageRecoveryDraft(accountId, recoveryKey); recoveryWrittenRef.current = false; setRecoveryDraft(null); }
+    catch { toast('Could not discard recovery draft', 'error'); }
+  };
+
+  const performClose = () => ((path || src) ? nav(-1) : setLoaded(false));
+  const requestClose = () => projectDirty ? setCloseConfirm(true) : performClose();
 
   // recomposite on meaningful change
   useEffect(() => { renderComposite(); /* eslint-disable-next-line */ }, [adj, activeId, dims.w, dims.h]);
@@ -518,7 +629,7 @@ export default function ImageEditor() {
         if (tool === 'shape') drawShapeOn(g, gestureStart.current, p);
         else drawGradientOn(g, gestureStart.current, p);
       }
-      clearOverlay(); renderComposite(); bump();
+      clearOverlay(); renderComposite(); markProjectChanged(); bump();
     } else if (tool === 'move' && (moveDelta.current.x || moveDelta.current.y)) {
       const L = activeLayer();
       if (L) {
@@ -527,8 +638,8 @@ export default function ImageEditor() {
         const g = L.canvas.getContext('2d')!; g.clearRect(0, 0, L.canvas.width, L.canvas.height); g.drawImage(tmp, 0, 0);
       }
       moveDelta.current = { x: 0, y: 0 };
-      renderComposite(); bump();
-    } else if (tool === 'brush' || tool === 'eraser') bump();
+      renderComposite(); markProjectChanged(); bump();
+    } else if (tool === 'brush' || tool === 'eraser') { markProjectChanged(); bump(); }
     drawing.current = false; lastPt.current = null; gestureStart.current = null;
   };
 
@@ -541,6 +652,7 @@ export default function ImageEditor() {
     });
     setDims({ w: nw, h: nh });
     requestAnimationFrame(() => { syncSurfaces(nw, nh); renderComposite(); fit(nw, nh); clearMask(); });
+    markProjectChanged();
     bump();
   };
   const rotate90 = (dir: -1 | 1) => remapAll(dims.h, dims.w, (g, from) => {
@@ -596,7 +708,7 @@ export default function ImageEditor() {
       grd.addColorStop(1, `rgba(0,0,0,${(adj.vignette / 100) * 0.85})`);
       g.save(); g.globalCompositeOperation = 'source-over'; g.fillStyle = grd; g.fillRect(0, 0, w, h); g.restore();
     }
-    setAdj(ADJ0); renderComposite(); bump();
+    setAdj(ADJ0); renderComposite(); markProjectChanged(); bump();
     toast('Adjustments applied', 'success', 'Undo to revert');
   };
   const applyPreset = (name: string, filter: string, vignette = 0) => {
@@ -611,7 +723,7 @@ export default function ImageEditor() {
       grd.addColorStop(0, 'rgba(0,0,0,0)'); grd.addColorStop(1, `rgba(0,0,0,${vignette})`);
       g.fillStyle = grd; g.fillRect(0, 0, w, h);
     }
-    renderComposite(); bump();
+    renderComposite(); markProjectChanged(); bump();
     toast(`${name} filter applied`, 'success', 'Undo to revert');
   };
 
@@ -629,16 +741,17 @@ export default function ImageEditor() {
         g.textBaseline = 'top';
         g.fillText(t, textBox.x, textBox.y);
         g.restore();
-        renderComposite(); bump();
+        renderComposite(); markProjectChanged(); bump();
       }
     }
     setTextBox(null);
   };
 
   // ---- layers ops ----
-  const setLayer = (id: string, patch: Partial<Layer>) => {
+  const setLayer = (id: string, patch: Partial<Layer>, recordHistory = true) => {
+    if (recordHistory) pushHistory();
     layersRef.current = layersRef.current.map(L => (L.id === id ? { ...L, ...patch } : L));
-    renderComposite(); bump();
+    renderComposite(); markProjectChanged(); bump();
   };
   const addLayer = () => {
     pushHistory();
@@ -647,7 +760,7 @@ export default function ImageEditor() {
     const idx = layersRef.current.findIndex(l => l.id === activeId);
     const layer: Layer = { id, name: `Layer ${layersRef.current.length + 1}`, visible: true, opacity: 1, blend: 'source-over', canvas: c };
     const arr = [...layersRef.current]; arr.splice(idx + 1, 0, layer);
-    layersRef.current = arr; setActiveId(id); renderComposite(); bump();
+    layersRef.current = arr; setActiveId(id); renderComposite(); markProjectChanged(); bump();
   };
   const duplicateLayer = (id: string) => {
     pushHistory();
@@ -656,7 +769,7 @@ export default function ImageEditor() {
     const nid = uid();
     const idx = layersRef.current.findIndex(l => l.id === id);
     const arr = [...layersRef.current]; arr.splice(idx + 1, 0, { ...L, id: nid, name: L.name + ' copy', canvas: c });
-    layersRef.current = arr; setActiveId(nid); renderComposite(); bump();
+    layersRef.current = arr; setActiveId(nid); renderComposite(); markProjectChanged(); bump();
   };
   const deleteLayer = (id: string) => {
     if (layersRef.current.length <= 1) { toast('Keep at least one layer', 'warning'); return; }
@@ -664,7 +777,7 @@ export default function ImageEditor() {
     const idx = layersRef.current.findIndex(l => l.id === id);
     layersRef.current = layersRef.current.filter(l => l.id !== id);
     if (activeId === id) setActiveId(layersRef.current[Math.max(0, idx - 1)].id);
-    renderComposite(); bump();
+    renderComposite(); markProjectChanged(); bump();
   };
   const moveLayer = (id: string, dir: -1 | 1) => {
     const arr = [...layersRef.current];
@@ -673,7 +786,7 @@ export default function ImageEditor() {
     if (j < 0 || j >= arr.length) return;
     pushHistory();
     [arr[i], arr[j]] = [arr[j], arr[i]];
-    layersRef.current = arr; renderComposite(); bump();
+    layersRef.current = arr; renderComposite(); markProjectChanged(); bump();
   };
 
   // ---- AI ----
@@ -730,7 +843,7 @@ export default function ImageEditor() {
         layersRef.current = [...layersRef.current, { id, name: aiMode === 'inpaint' ? 'AI Inpaint' : 'AI Variation', visible: true, opacity: 1, blend: 'source-over', canvas: c }];
         setActiveId(id);
         URL.revokeObjectURL(obj); clearMask(); setAiResult(null); setTool('move');
-        renderComposite(); bump();
+        renderComposite(); markProjectChanged(); bump();
         toast('Added AI result as a layer', 'success');
       };
       img.onerror = () => { URL.revokeObjectURL(obj); toast('Could not load result', 'error'); };
@@ -776,6 +889,8 @@ export default function ImageEditor() {
       const a = document.createElement('a');
       a.href = flatten(false).toDataURL('image/png');
       a.download = `${srcName}-edited.png`; a.click();
+      markProjectSaved();
+      toast('Export prepared', 'success', 'Your browser is downloading the edited PNG.');
     } catch { toast('Export blocked (image is cross-origin)', 'error'); }
   };
   const openSave = () => { setSaveName(`${srcName}-edited`); setSaveOpen(true); };
@@ -793,6 +908,7 @@ export default function ImageEditor() {
       await ensureDir(dir);
       await api.files.upload(dir, [new File([blob], fname, { type: 'image/png' })]);
       toast('Saved to Files', 'success', `${dir === '/' ? '' : dir}/${fname}`);
+      markProjectSaved();
       setSaveOpen(false);
     } catch (err: any) {
       toast('Save failed', 'error', err?.message || 'Could not export (image may be cross-origin)');
@@ -960,7 +1076,8 @@ export default function ImageEditor() {
               <p className="text-xs text-white truncate">{L.name}</p>
               <input type="range" min={0} max={100} value={Math.round(L.opacity * 100)}
                 onClick={e => e.stopPropagation()}
-                onChange={e => setLayer(L.id, { opacity: +e.target.value / 100 })}
+                onFocus={pushHistory}
+                onChange={e => setLayer(L.id, { opacity: +e.target.value / 100 }, false)}
                 className="w-full accent-brand-500 h-1" />
             </div>
             <div className="flex flex-col shrink-0">
@@ -1097,7 +1214,7 @@ export default function ImageEditor() {
         {listening && <p className="text-[11px] text-accent-red text-center">Listening… tap the mic again to stop</p>}
         {transcribing && <p className="text-[11px] text-slate-500 text-center flex items-center justify-center gap-1.5"><Spinner size={11} /> Transcribing…</p>}
         {gpuBusy && <p className="text-[11px] text-accent-amber flex items-center gap-1.5"><Icon.Warning size={13} /> GPU is busy generating music — image edits may queue.</p>}
-        <button onClick={runAi} disabled={aiBusy} className="btn-primary w-full !py-2 disabled:opacity-60">
+        <button onClick={() => { void runAi(); }} disabled={aiBusy} className="btn-primary w-full !py-2 disabled:opacity-60">
           {aiBusy ? <><Spinner size={14} /> Generating…</> : <><Icon.Sparkles size={15} /> {aiMode === 'inpaint' ? 'Inpaint' : 'Generate variation'}</>}
         </button>
         {aiBusy && <p className="text-[11px] text-slate-500 text-center">Krea2 usually takes 15–30s…</p>}
@@ -1186,10 +1303,15 @@ export default function ImageEditor() {
       {/* Top bar */}
       <div className="mb-3 sm:mb-4">
         <div className="flex items-center gap-2 sm:gap-3">
-          <button className="icon-btn shrink-0" onClick={() => ((path || src) ? nav(-1) : setLoaded(false))} title="Close"><Icon.ChevronLeft size={18} /></button>
+          <button className="icon-btn shrink-0" onClick={requestClose} title="Close"><Icon.ChevronLeft size={18} /></button>
           <div className="min-w-0 flex-1">
             <h1 className="text-base sm:text-lg font-semibold text-white truncate leading-tight">{srcName}</h1>
-            <p className="text-xs muted truncate">{dims.w} × {dims.h}px · {layersRef.current.length} layer{layersRef.current.length > 1 ? 's' : ''}</p>
+            <p className="text-xs muted truncate flex items-center gap-1.5">
+              <span>{dims.w} × {dims.h}px · {layersRef.current.length} layer{layersRef.current.length > 1 ? 's' : ''}</span>
+              {projectDirty && <span className="text-accent-amber">· Unsaved</span>}
+              {projectDirty && recoveryState === 'saved' && <span className="text-accent-green">· Recovery saved</span>}
+              {projectDirty && recoveryState === 'unavailable' && <span className="text-accent-red">· Local recovery unavailable</span>}
+            </p>
           </div>
           {/* desktop keeps history + zoom inline */}
           <div className="hidden sm:flex items-center gap-2 sm:gap-3">
@@ -1341,6 +1463,31 @@ export default function ImageEditor() {
       )}
 
       {/* Save modal */}
+      <Modal open={!!recoveryDraft} onClose={() => {}} title="Recover unsaved image" size="md" dismissible={false}
+        footer={<>
+          <button className="btn-danger" disabled={recovering} onClick={() => void discardLocalRecovery()}>Discard recovery</button>
+          <button className="btn-primary" disabled={recovering} onClick={restoreLocalRecovery}>
+            {recovering ? <Spinner size={14} /> : <Icon.Refresh size={15} />} Recover image
+          </button>
+        </>}>
+        <div role="alert" className="space-y-2 text-sm text-slate-300">
+          <p>A local recovery copy from {formatRelative(recoveryDraft?.savedAt)} is available. Recovering it will replace the currently opened image.</p>
+          <p className="text-xs muted">Recovery snapshots are flattened PNGs, so the visible result is preserved even though individual layers cannot be restored.</p>
+        </div>
+      </Modal>
+
+      <Modal open={closeConfirm} onClose={() => setCloseConfirm(false)} title="Leave Image Editor?" size="sm"
+        footer={<>
+          <button className="btn-secondary" onClick={() => setCloseConfirm(false)}>Keep editing</button>
+          <button className="btn-danger" onClick={() => { setCloseConfirm(false); performClose(); }}>Leave editor</button>
+        </>}>
+        <p className="text-sm text-slate-300">
+          You have unsaved image changes. {accountId && recoveryKey && recoveryState === 'saved'
+            ? 'A flattened recovery copy is stored locally and will be offered next time.'
+            : 'Save or export now to avoid losing them.'}
+        </p>
+      </Modal>
+
       <Modal open={saveOpen} onClose={() => setSaveOpen(false)} title="Save as copy" size="sm"
         footer={<>
           <button className="btn-ghost" onClick={() => setSaveOpen(false)}>Cancel</button>

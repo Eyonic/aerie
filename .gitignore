@@ -3,6 +3,7 @@ node_modules/
 
 # build outputs
 web/dist/
+server/dist/
 apps/desktop/release/
 apps/desktop/default-server.json
 apps/android/.gradle/

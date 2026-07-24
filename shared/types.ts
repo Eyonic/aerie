@@ -76,6 +76,10 @@ export interface MediaItem {
   episodeNumber?: number;
   albumArtist?: string;
   album?: string;
+  replayGain?: {
+    trackDb?: number;
+    albumDb?: number;
+  };
   genres?: string[];
   communityRating?: number;
 }
@@ -294,8 +298,11 @@ export interface DashboardData {
 export interface SearchResult {
   id: string;
   kind: string;        // 'file' | 'photo' | 'movie' | 'song' | 'book' | ...
+  fileKind?: FileKind;
   title: string;
   subtitle?: string;
+  snippet?: string;
+  match?: 'name' | 'content' | 'name-content';
   thumbUrl?: string;
   link: string;        // in-app route
 }
@@ -303,4 +310,14 @@ export interface SearchResult {
 export interface SearchResponse {
   query: string;
   groups: { kind: string; label: string; results: SearchResult[] }[];
+  contentIndex?: {
+    ready: boolean;
+    refreshing: boolean;
+    stale: boolean;
+    indexedCount: number;
+    skippedCount: number;
+    truncatedCount: number;
+    indexedChars: number;
+    completedAtMs: number;
+  };
 }

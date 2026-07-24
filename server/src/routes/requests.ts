@@ -5,6 +5,13 @@ import { audit, db } from '../lib/db.js';
 import * as js from '../services/jellyseerr.js';
 import * as lidarr from '../services/lidarr.js';
 import { cachedWebp, imageWidth } from '../services/image-cache.js';
+import {
+  MAX_REQUEST_OWNERSHIP_AUDIT_ROWS,
+  mediaRequestAuditRecord,
+  requestOwnershipAuditTargets,
+  requestsOwnedByUser,
+  validateMediaRequestInput,
+} from '../services/request-ownership.js';
 
 const r = Router();
 
@@ -32,12 +39,12 @@ r.get('/music/trending', async (_req, res) => {
   try { res.json(await lidarr.trendingArtists()); } catch { res.json([]); }
 });
 
-// Music "My requests": audit log (who/when) merged with live Lidarr status.
-r.get('/music/mine', async (_req, res, next) => {
+// Music "My requests": this member's audit timestamps merged with live Lidarr status.
+r.get('/music/mine', async (req: AuthedRequest, res, next) => {
   try {
     const rows = db.prepare(
-      "SELECT ts, username, target, meta FROM audit WHERE action='music_requested' ORDER BY ts DESC LIMIT 100",
-    ).all() as any[];
+      "SELECT ts, target, meta FROM audit WHERE user_id=? AND action='music_requested' ORDER BY ts DESC LIMIT 100",
+    ).all(req.user!.id) as any[];
     const lib = await lidarr.artistStatuses();
     const seen = new Set<string>();
     const out: any[] = [];
@@ -57,7 +64,6 @@ r.get('/music/mine', async (_req, res, next) => {
         posterUrl: live?.posterUrl,
         status: live?.status || 'removed',
         percent: live?.percent ?? 0,
-        requestedBy: row.username,
         // sqlite datetime('now') is UTC without a zone marker — make it ISO.
         createdAt: row.ts ? `${String(row.ts).replace(' ', 'T')}Z` : undefined,
       });
@@ -93,15 +99,35 @@ r.get('/trending', async (_req, res, next) => {
   try { res.json(await js.trending()); } catch (e) { if (!js.configured()) return res.json([]); next(e); }
 });
 
-r.get('/', async (_req, res, next) => {
-  try { res.json(await js.listRequests()); } catch (e) { if (!js.configured()) return res.json([]); next(e); }
+r.get('/', async (req: AuthedRequest, res, next) => {
+  try {
+    const requests = await js.listRequests();
+    const targets = requestOwnershipAuditTargets(requests);
+    if (!targets.length) return res.json([]);
+    const placeholders = targets.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT id, ts, user_id, action, target, meta
+      FROM audit
+      WHERE user_id IS NOT NULL AND action IN ('media_requested','auto_requested')
+        AND target IN (${placeholders})
+      ORDER BY ts DESC, id DESC
+      LIMIT ?
+    `).all(...targets, MAX_REQUEST_OWNERSHIP_AUDIT_ROWS + 1) as any[];
+    // More than the fixed reconciliation budget is abnormal. Fail closed
+    // instead of making an ownership decision from a truncated audit history.
+    if (rows.length > MAX_REQUEST_OWNERSHIP_AUDIT_ROWS) return res.json([]);
+    res.json(requestsOwnedByUser(requests, rows, req.user!.id));
+  } catch (e) { if (!js.configured()) return res.json([]); next(e); }
 });
 
 r.post('/', async (req: AuthedRequest, res, next) => {
   try {
-    const { mediaType, mediaId, seasons } = req.body || {};
-    const result = await js.requestMedia(mediaType, Number(mediaId), seasons);
-    audit(req.user!.id, req.user!.username, 'media_requested', `${mediaType}:${mediaId}`);
+    const parsed = validateMediaRequestInput(req.body);
+    if (parsed.ok === false) return res.status(400).json({ error: parsed.error });
+    const { mediaType, mediaId, seasons } = parsed.value;
+    const result = await js.requestMedia(mediaType, mediaId, seasons);
+    const record = mediaRequestAuditRecord(parsed.value, result);
+    audit(req.user!.id, req.user!.username, 'media_requested', record.target, req.ip, record.meta);
     res.json({ ok: true, request: result });
   } catch (e) { next(e); }
 });

@@ -1,12 +1,13 @@
 // Universal search across files, media, photos, books.
 import { Router } from 'express';
 import { type AuthedRequest } from '../lib/auth.js';
-import fs from 'node:fs';
 import path from 'node:path';
-import * as storage from '../services/storage.js';
 import * as jf from '../services/jellyfin.js';
 import * as abs from '../services/audiobookshelf.js';
 import { db } from '../lib/db.js';
+import { ensureFileCatalog, searchFileCatalog } from '../services/file-catalog.js';
+import { ensureContentSearchIndex, searchContentIndex } from '../services/content-search.js';
+import type { FileKind } from '../lib/model.js';
 
 const r = Router();
 
@@ -49,41 +50,83 @@ function mediaAllowed(user: any, type: string) {
   return user.features?.music !== false;
 }
 
+function fileKinds(filter: string): FileKind[] | undefined {
+  if (filter === 'document') return ['document', 'markdown', 'text'];
+  if (filter === 'spreadsheet') return ['spreadsheet', 'csv'];
+  if (filter === 'pdf') return ['pdf'];
+  return undefined;
+}
+
+function modifiedAfter(value: unknown): number | undefined {
+  const durations: Record<string, number> = { day: 1, week: 7, month: 31, year: 366 };
+  const duration = durations[String(value || '')];
+  return duration ? Date.now() - duration * 86400_000 : undefined;
+}
+
+function fileLink(item: { path: string; parent: string; kind: string }): string {
+  if (item.kind === 'document' || item.kind === 'markdown' || item.kind === 'text') {
+    return `/documents?path=${encodeURIComponent(item.path)}`;
+  }
+  if (item.kind === 'spreadsheet' || item.kind === 'csv') {
+    return `/spreadsheets?path=${encodeURIComponent(item.path)}`;
+  }
+  return `/files?path=${encodeURIComponent(item.parent)}`;
+}
+
 r.get('/', async (req: AuthedRequest, res) => {
   const q = String(req.query.q || '').trim();
   const user = req.user!;
   const audiobooksEnabled = user.features?.audiobooks !== false;
   const only = String(req.query.kind || 'all');
+  const kinds = fileKinds(only);
+  const after = modifiedAfter(req.query.modified);
   if (!q) return res.json({ query: q, groups: [] });
 
-  // Files (name match)
-  const fileResults: any[] = [];
-  if (user.features?.files !== false && (only === 'all' || only === 'file')) try {
-    const root = storage.userRoot(user.username);
-    let scanned = 0;
-    const walk = (dir: string, d: number) => {
-      if (d > 8 || scanned > 10_000) return;
-      let names: string[]; try { names = fs.readdirSync(dir); } catch { return; }
-      for (const n of names) {
-        if (n.startsWith('.')) continue;
-        scanned++;
-        const full = path.join(dir, n);
-        let st: fs.Stats; try { st = fs.statSync(full); } catch { continue; }
-        const score = fuzzyScore(q, n);
-        if (score > 0) {
-          const v = storage.toVirtual(user.username, full);
-          fileResults.push({ id: v, kind: 'file', title: n, subtitle: path.posix.dirname(v),
-            thumbUrl: /\.(jpg|jpeg|png|gif|webp)$/i.test(n) ? `/api/files/thumb?path=${encodeURIComponent(v)}` : undefined,
-            link: `/files?path=${encodeURIComponent(st.isDirectory() ? v : path.posix.dirname(v))}`, score });
-        }
-        if (st.isDirectory()) walk(full, d + 1);
+  const fileFilter = only === 'all' || only === 'file' || !!kinds;
+  const filesEnabled = user.features?.files !== false && fileFilter;
+  let contentIndex: Awaited<ReturnType<typeof ensureContentSearchIndex>> | undefined;
+  const [fileResults, media, books, photos] = await Promise.all([
+    filesEnabled ? safe((async () => {
+      const [, nextIndex] = await Promise.all([
+        ensureFileCatalog(user),
+        ensureContentSearchIndex(user),
+      ]);
+      contentIndex = nextIndex;
+      const names = searchFileCatalog(user.id, q, {
+        limit: 18, includeFolders: !kinds, kinds, modifiedAfterMs: after,
+      });
+      const contents = searchContentIndex(user.id, q, { limit: 14, kinds, modifiedAfterMs: after });
+      const merged = new Map<string, any>();
+      for (const entry of names) merged.set(entry.path, {
+        id: entry.path,
+        kind: 'file',
+        fileKind: entry.kind,
+        title: entry.name,
+        subtitle: entry.parent,
+        thumbUrl: entry.kind === 'image' ? `/api/files/thumb?path=${encodeURIComponent(entry.path)}` : undefined,
+        link: entry.isFolder
+          ? `/files?path=${encodeURIComponent(entry.path)}`
+          : fileLink(entry),
+        match: 'name',
+      });
+      for (const entry of contents) {
+        const existing = merged.get(entry.path);
+        if (existing) {
+          existing.snippet = entry.snippet;
+          existing.match = 'name-content';
+        } else merged.set(entry.path, {
+          id: entry.path,
+          kind: 'file',
+          fileKind: entry.kind,
+          title: entry.name,
+          subtitle: entry.parent,
+          snippet: entry.snippet,
+          link: fileLink(entry),
+          match: 'content',
+        });
       }
-    };
-    walk(root, 0);
-    fileResults.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title));
-  } catch { /* */ }
-
-  const [media, books, photos] = await Promise.all([
+      return [...merged.values()].slice(0, 20);
+    })(), [] as any[]) : Promise.resolve([]),
     only === 'all' || only === 'media' ? safe(Promise.all([jf.search(q), q.length >= 3 ? jf.listAllByType('Movie,Series,Audio,MusicAlbum') : Promise.resolve([])]).then(([direct, all]) =>
       [...direct.map((m: any) => ({ ...m, _score: 1100 })), ...all.map((m: any) => ({ ...m, _score: fuzzyScore(q, `${m.name} ${m.albumArtist || ''} ${m.album || ''}`) }))]
         .filter((m: any) => m._score > 0 && mediaAllowed(user, m.type)).sort((a: any, b: any) => b._score - a._score)
@@ -93,7 +136,7 @@ r.get('/', async (req: AuthedRequest, res) => {
   ]);
 
   const groups: any[] = [];
-  if (fileResults.length) groups.push({ kind: 'file', label: 'Files', results: fileResults.slice(0, 12) });
+  if (fileResults.length) groups.push({ kind: 'file', label: 'Files & contents', results: fileResults });
   if (media.length) groups.push({ kind: 'media', label: 'Movies, TV & Music', results: media.map(m => ({
     id: m.id, kind: m.type, title: m.name, subtitle: m.year ? String(m.year) : m.type, thumbUrl: m.posterUrl,
     link: m.type === 'Movie' ? '/movies' : m.type === 'Series' ? '/tv' : '/music' })) });
@@ -103,7 +146,7 @@ r.get('/', async (req: AuthedRequest, res) => {
     id: p.path, kind: 'photo', title: path.posix.basename(p.path), subtitle: p.takenAt ? new Date(p.takenAt).toLocaleDateString() : '',
     thumbUrl: `/api/photos/native/thumb?path=${encodeURIComponent(p.path)}`, link: '/photos' })) });
 
-  res.json({ query: q, groups });
+  res.json({ query: q, groups, contentIndex });
 });
 
 export default r;

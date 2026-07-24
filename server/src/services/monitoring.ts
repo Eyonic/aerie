@@ -4,6 +4,7 @@ import net from 'node:net';
 import fs from 'node:fs/promises';
 import { config } from '../config.js';
 import type { ServiceStatus, SystemHealth } from '../lib/model.js';
+import { outboundJson, outboundVoid } from './outbound-http.js';
 
 // probe: HTTP path, OR tcp:true for line/socket protocols (e.g. Wyoming Whisper,
 // which is NOT HTTP — an HTTP GET returns nothing and falsely reads as offline).
@@ -11,7 +12,7 @@ const SERVICES = (): { key: string; name: string; url: string; probe: string; tc
   { key: 'aerie', name: 'Aerie Web', url: `http://127.0.0.1:${config.port}`, probe: '/api/health' },
   { key: 'jellyfin', name: 'Media Engine (Jellyfin)', url: config.jellyfin.url, probe: '/System/Info/Public' },
   { key: 'abs', name: 'Audiobook Engine', url: config.audiobookshelf.url, probe: '/healthcheck' },
-  { key: 'ai', name: 'AI Engine (DeepSeek V4)', url: config.deepseek.apiKey ? config.deepseek.url : config.ollama.url, probe: config.deepseek.apiKey ? '/models' : '/api/tags' },
+  { key: 'ai', name: config.deepseek.apiKey ? `AI Engine (DeepSeek ${config.deepseek.model})` : `AI Engine (Local ${config.ollama.model})`, url: config.deepseek.apiKey ? config.deepseek.url : config.ollama.url, probe: config.deepseek.apiKey ? '/models' : '/api/tags' },
   { key: 'comfyui', name: 'AI Image (ComfyUI)', url: config.sd.url, probe: '/system_stats' },
   { key: 'acestep', name: 'AI Music (ACE-Step)', url: config.acestep.url, probe: '/health' },
   { key: 'whisper', name: 'Transcription (Whisper)', url: config.whisper.url, probe: '', tcp: true },
@@ -39,7 +40,9 @@ export async function serviceStatuses(): Promise<ServiceStatus[]> {
       }
       const headers: any = {};
       if (s.key === 'ai' && config.deepseek.apiKey) headers.Authorization = `Bearer ${config.deepseek.apiKey}`;
-      const res = await fetch(s.url.replace(/\/$/, '') + s.probe, { signal: AbortSignal.timeout(3000), headers });
+      const res = await outboundVoid(s.url.replace(/\/$/, '') + s.probe, {
+        timeoutMs: 3_000, headers, requireOk: false,
+      });
       return { key: s.key, name: s.name, online: res.status < 500, latencyMs: Date.now() - start, url: s.url };
     } catch {
       return { key: s.key, name: s.name, online: false, url: s.url, detail: 'unreachable' };
@@ -103,7 +106,8 @@ async function gpuStats(): Promise<{ name: string; memUsed: number; memTotal: nu
   } catch { /* fall through to ComfyUI */ }
   // Fallback: ComfyUI /system_stats exposes real VRAM (no util%, but accurate memory).
   try {
-    const d = await fetch(`${config.sd.url}/system_stats`, { signal: AbortSignal.timeout(3000) }).then(r => r.json());
+    const d = (await outboundJson<any>(`${config.sd.url}/system_stats`,
+      { timeoutMs: 3000, maxBytes: 2 * 1024 * 1024 })).body;
     const dev = (d.devices || []).find((x: any) => x.type === 'cuda') || d.devices?.[0];
     if (dev && dev.vram_total) {
       const total = dev.vram_total / 1048576, free = (dev.vram_free ?? 0) / 1048576;

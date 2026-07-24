@@ -1,6 +1,7 @@
 // Jellyseerr client — search + request movies/TV. Optional integration:
 // unset JELLYSEERR_URL/JELLYSEERR_API_KEY simply disables the Requests page.
 import { config } from '../config.js';
+import { OutboundHttpError, outboundBytes, outboundJson } from './outbound-http.js';
 
 const base = () => config.jellyseerr.url.replace(/\/$/, '');
 const key = () => config.jellyseerr.apiKey;
@@ -8,13 +9,19 @@ const key = () => config.jellyseerr.apiKey;
 export function configured(): boolean { return !!base() && !!key(); }
 
 async function js(path: string, opts: RequestInit = {}): Promise<any> {
-  const res = await fetch(base() + path, {
-    ...opts,
-    headers: { 'X-Api-Key': key(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
-    signal: AbortSignal.timeout(12000),
-  });
-  if (!res.ok) throw new Error(`jellyseerr ${res.status} ${path}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
+  try {
+    return (await outboundJson<any>(base() + path, {
+      ...opts,
+      headers: { 'X-Api-Key': key(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      timeoutMs: 12_000,
+      maxBytes: 8 * 1024 * 1024,
+    })).body;
+  } catch (error) {
+    if (error instanceof OutboundHttpError && error.upstreamStatus) {
+      throw new Error(`jellyseerr ${error.upstreamStatus} ${path}`, { cause: error });
+    }
+    throw error;
+  }
 }
 
 function posterUrl(p?: string, width = 480): string | undefined {
@@ -58,7 +65,7 @@ export async function trending(): Promise<any[]> {
   } catch { return []; }
 }
 
-export async function requestMedia(mediaType: 'movie' | 'tv', mediaId: number, seasons?: string): Promise<any> {
+export async function requestMedia(mediaType: 'movie' | 'tv', mediaId: number, seasons?: 'all' | number[]): Promise<any> {
   const body: any = { mediaType, mediaId };
   if (mediaType === 'tv') body.seasons = seasons === undefined ? 'all' : seasons;
   return js('/api/v1/request', { method: 'POST', body: JSON.stringify(body) });
@@ -80,7 +87,8 @@ async function tmdbDetail(mediaType: string, tmdbId: number): Promise<{ title?: 
 
 export async function listRequests(): Promise<any[]> {
   const data = await js('/api/v1/request?take=40&sort=added');
-  return Promise.all((data.results || []).map(async (r: any) => {
+  const results = Array.isArray(data?.results) ? data.results.slice(0, 40) : [];
+  return Promise.all(results.map(async (r: any) => {
     let title = r.media?.title || r.media?.name;
     let posterPath = r.media?.posterPath;
     const tmdbId = r.media?.tmdbId;
@@ -98,7 +106,6 @@ export async function listRequests(): Promise<any[]> {
       tmdbId,
       posterUrl: posterUrl(posterPath),
       mediaStatus: r.media?.status,
-      requestedBy: r.requestedBy?.displayName,
       createdAt: r.createdAt,
     };
   }));
@@ -122,8 +129,7 @@ export async function imageProxy(p: string, width = 480): Promise<{ buf: Buffer;
       const tmdbSize = width <= 320 ? 'w342' : width <= 480 ? 'w500' : width <= 960 ? 'w780' : 'w1280';
       url = `https://image.tmdb.org/t/p/${tmdbSize}${clean}`;
     }
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-    if (!res.ok) return null;
-    return { buf: Buffer.from(await res.arrayBuffer()), type: res.headers.get('content-type') || 'image/jpeg' };
+    const res = await outboundBytes(url, { timeoutMs: 10_000, maxBytes: 16 * 1024 * 1024 });
+    return { buf: res.body, type: res.headers.get('content-type') || 'image/jpeg' };
   } catch { return null; }
 }

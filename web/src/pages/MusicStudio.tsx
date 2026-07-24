@@ -10,7 +10,7 @@ interface GenTrack {
   id: string;
   prompt: string;
   lyrics?: string;
-  status: 'running' | 'done' | 'error';
+  status: 'queued' | 'running' | 'done' | 'error';
   url?: string;
   durationSec?: number;
   error?: string;
@@ -133,8 +133,9 @@ export default function MusicStudio() {
     }).catch(() => { /* keep skew 0 */ });
   }, [loadStatus, loadTracks]);
 
-  // Poll while anything is running
-  const anyRunning = (tracks || []).some(t => t.status === 'running');
+  // Poll while work is queued or running. The durable server queue exposes the
+  // distinction so a track waiting for the shared GPU is not called running.
+  const anyRunning = (tracks || []).some(t => t.status === 'queued' || t.status === 'running');
   useEffect(() => {
     if (anyRunning) {
       if (!pollRef.current) {
@@ -360,11 +361,12 @@ function TrackCard({ t, skewMs = 0, onDelete, onPlay }: { t: GenTrack; skewMs?: 
           t.status === 'done' ? 'bg-gradient-to-br from-pink-500/30 to-purple-600/30 text-pink-200'
             : t.status === 'error' ? 'bg-red-500/20 text-red-300'
               : 'bg-purple-500/20 text-purple-200')}>
-          {t.status === 'running' ? <Spinner size={18} /> : <Icon.Music size={18} />}
+          {t.status === 'running' || t.status === 'queued' ? <Spinner size={18} /> : <Icon.Music size={18} />}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-white leading-snug line-clamp-2 break-words">{t.prompt || 'Untitled track'}</p>
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 text-[11px] text-slate-500">
+            {t.status === 'queued' && <span className="text-purple-300 font-medium">Waiting for the GPU…</span>}
             {t.status === 'running' && <span className="text-purple-300 font-medium">Composing…</span>}
             {t.status === 'done' && <Badge color="green">Done</Badge>}
             {t.status === 'error' && <Badge color="red">Error</Badge>}
@@ -393,20 +395,17 @@ function TrackCard({ t, skewMs = 0, onDelete, onPlay }: { t: GenTrack; skewMs?: 
       )}
 
       {t.status === 'done' && audioUrl && (
-        <>
-          <audio controls preload="none" src={audioUrl} className="w-full h-10 rounded-lg" />
-          <div className="flex flex-wrap gap-2">
-            <button onClick={onPlay} className="btn-secondary flex-1 justify-center min-w-[120px]">
-              <Icon.Play size={14} /> Play in Aerie
-            </button>
-            <a href={audioUrl} download={`aerie-track-${t.id}.mp3`} className="btn-secondary justify-center px-3" aria-label="Download">
-              <Icon.Download size={15} />
-            </a>
-            <button onClick={onDelete} className="btn-danger justify-center px-3" aria-label="Delete">
-              <Icon.Trash size={15} />
-            </button>
-          </div>
-        </>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={onPlay} className="btn-secondary flex-1 justify-center min-w-[120px]">
+            <Icon.Play size={14} /> Play in Aerie
+          </button>
+          <a href={audioUrl} download={`aerie-track-${t.id}.mp3`} className="btn-secondary justify-center px-3" aria-label="Download">
+            <Icon.Download size={15} />
+          </a>
+          <button onClick={onDelete} className="btn-danger justify-center px-3" aria-label="Delete">
+            <Icon.Trash size={15} />
+          </button>
+        </div>
       )}
 
       {t.status !== 'done' && (

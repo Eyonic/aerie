@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { config } from '../config.js';
@@ -60,7 +60,7 @@ export async function jellyfinSource(itemId: string): Promise<{ source: string; 
   const parts = reported.split(/[\\/]+/).filter(Boolean);
   for (let i = 0; i < parts.length; i++) candidates.push(path.join(config.mediaRoot, ...parts.slice(i)));
   for (const source of candidates) {
-    try { const stat = fs.statSync(source); if (stat.isFile()) return { source, mtimeMs: stat.mtimeMs }; } catch { /* next mapping */ }
+    try { const stat = await fsp.stat(source); if (stat.isFile()) return { source, mtimeMs: stat.mtimeMs }; } catch { /* next mapping */ }
   }
   return { source: jf.directVideoStreamUrl(itemId) };
 }

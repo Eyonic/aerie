@@ -1,8 +1,11 @@
 import { db, audit, notify } from '../lib/db.js';
 import * as jf from './jellyfin.js';
 import * as jellyseerr from './jellyseerr.js';
+import { mediaRequestAuditRecord } from './request-ownership.js';
 import * as lidarr from './lidarr.js';
 import * as ai from './ai.js';
+import { aiDecision } from './policy.js';
+import { findUserById, rowToUser } from '../lib/auth.js';
 
 type Profile = {
   topArtists: string[];
@@ -96,7 +99,7 @@ function stripJson(raw: string): string {
   return raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
 }
 
-async function ask(profile: Profile, idx: LibraryIndex): Promise<any | null> {
+async function ask(profile: Profile, idx: LibraryIndex, provider: 'local' | 'external'): Promise<any | null> {
   const exclude = [
     ...[...idx.movieTitles].slice(0, 20),
     ...[...idx.seriesTitles].slice(0, 20),
@@ -114,7 +117,7 @@ async function ask(profile: Profile, idx: LibraryIndex): Promise<any | null> {
   ].join('\n');
   for (let i = 0; i < 2; i++) {
     try {
-      const raw = await ai.instruct('You are a media recommender. Given a person\'s taste, suggest specific real titles they\'d likely enjoy. Return ONLY compact JSON.', prompt, 0.7);
+      const raw = await ai.instruct('You are a media recommender. Given a person\'s taste, suggest specific real titles they\'d likely enjoy. Return ONLY compact JSON.', prompt, 0.7, { provider });
       return JSON.parse(stripJson(raw));
     } catch { /* retry once */ }
   }
@@ -172,9 +175,14 @@ export async function suggest(userId: number): Promise<Suggestions> {
   if (cached && Date.now() - cached.at < 15 * 60_000) return cached.value;
   const prof = await profile(userId);
   if (prof.noHistory) return { movies: [], tv: [], artists: [], reason: 'no history yet' };
-  if (!(await ai.available().catch(() => false))) return { movies: [], tv: [], artists: [], reason: 'ai unavailable', profile: { topGenres: prof.topGenres, topArtists: prof.topArtists } };
+  const row = findUserById(userId);
+  if (!row) return { movies: [], tv: [], artists: [], reason: 'user unavailable' };
+  let provider: 'local' | 'external';
+  try { provider = aiDecision(rowToUser(row)).provider; }
+  catch { return { movies: [], tv: [], artists: [], reason: 'ai disabled', profile: { topGenres: prof.topGenres, topArtists: prof.topArtists } }; }
+  if (!(await ai.available({ provider }).catch(() => false))) return { movies: [], tv: [], artists: [], reason: 'ai unavailable', profile: { topGenres: prof.topGenres, topArtists: prof.topArtists } };
   const idx = await libraryIndex();
-  const raw = await ask(prof, idx);
+  const raw = await ask(prof, idx, provider);
   if (!raw) return { movies: [], tv: [], artists: [], profile: { topGenres: prof.topGenres, topArtists: prof.topArtists } };
   const [movies, tv] = await Promise.all([
     validateMedia(raw.movies, 'movie', idx),
@@ -209,17 +217,24 @@ export async function runFor(userId: number, _opts: { manual?: boolean } = {}): 
     const prof = await profile(userId);
     if (prof.noHistory) return { noHistory: true };
     const s = await suggest(userId);
-    const user = db.prepare('SELECT username FROM users WHERE id=?').get(userId) as any;
+    const user = db.prepare('SELECT username FROM users WHERE id=? AND disabled_at IS NULL').get(userId) as any;
+    if (!user) return { none: true };
     for (const c of ranked(s, prof)) {
       try {
+        let auditTarget = c.title;
+        let requestOwnership: Record<string, unknown> = {};
         if (c.kind === 'artist') {
           const res = await lidarr.requestArtistByName(c.title);
           if (!res.ok || res.already) continue;
         } else {
           const item = c.item as AutoMovie;
-          await jellyseerr.requestMedia(item.mediaType, item.tmdbId);
+          const result = await jellyseerr.requestMedia(item.mediaType, item.tmdbId);
+          const record = mediaRequestAuditRecord({ mediaType: item.mediaType, mediaId: item.tmdbId }, result);
+          auditTarget = record.target;
+          requestOwnership = record.meta;
         }
-        audit(userId, user?.username || 'system', 'auto_requested', c.title, undefined, { kind: c.kind, why: c.why });
+        audit(userId, user?.username || 'system', 'auto_requested', auditTarget, undefined,
+          { kind: c.kind, title: c.title, why: c.why, ...requestOwnership });
         notify(userId, 'Added something you might like', `${c.title} — ${c.why}`, 'success', '/requests');
         suggestionCache.delete(userId);
         indexCache = null;

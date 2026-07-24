@@ -3,10 +3,12 @@
 // qwen_image_vae, SamplerCustomAdvanced, 8 steps euler — ~16s). Falls back to a
 // FLUX-dev checkpoint graph if the Krea2 assets aren't present. Degrades to
 // "offline" gracefully when ComfyUI is unreachable.
-import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { config } from '../config.js';
 import * as gpu from './gpu.js';
+import { outboundBytes, outboundJson, outboundVoid } from './outbound-http.js';
 
 const base = () => config.sd.url.replace(/\/$/, '');
 
@@ -28,15 +30,15 @@ let engineChecked = 0;
 
 export async function available(): Promise<boolean> {
   try {
-    const res = await fetch(`${base()}/system_stats`, { signal: AbortSignal.timeout(3000) });
-    return res.ok;
+    await outboundVoid(`${base()}/system_stats`, { timeoutMs: 3000 });
+    return true;
   } catch { return false; }
 }
 
 async function optionList(node: string, input: string): Promise<string[]> {
   try {
-    const res = await fetch(`${base()}/object_info/${node}`, { signal: AbortSignal.timeout(5000) });
-    const d = await res.json();
+    const d = (await outboundJson<any>(`${base()}/object_info/${encodeURIComponent(node)}`,
+      { timeoutMs: 5000, maxBytes: 16 * 1024 * 1024 })).body;
     return d?.[node]?.input?.required?.[input]?.[0] || [];
   } catch { return []; }
 }
@@ -112,12 +114,10 @@ function fluxTxt2Img(p: TxtImgParams, seed: number): any {
 }
 
 async function submit(graph: any): Promise<string> {
-  const res = await fetch(`${base()}/prompt`, {
+  const data = (await outboundJson<any>(`${base()}/prompt`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: graph, client_id: 'aerie' }), signal: AbortSignal.timeout(15000),
-  });
-  if (!res.ok) throw new Error(`comfyui submit ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const data = await res.json();
+    body: JSON.stringify({ prompt: graph, client_id: 'aerie' }), timeoutMs: 15_000, maxBytes: 2 * 1024 * 1024,
+  })).body;
   if (data.error) throw new Error(`comfyui: ${JSON.stringify(data.error).slice(0, 200)}`);
   return data.prompt_id;
 }
@@ -127,9 +127,8 @@ async function waitForImages(promptId: string, timeoutMs = 240000): Promise<any[
   while (Date.now() - start < timeoutMs) {
     await new Promise(r => setTimeout(r, 1500));
     try {
-      const res = await fetch(`${base()}/history/${promptId}`, { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) continue;
-      const hist = await res.json();
+      const hist = (await outboundJson<any>(`${base()}/history/${encodeURIComponent(promptId)}`,
+        { timeoutMs: 8000, maxBytes: 16 * 1024 * 1024 })).body;
       const entry = hist[promptId];
       if (!entry) continue;
       if (entry.status?.status_str === 'error') throw new Error('comfyui execution error: ' + JSON.stringify(entry.status?.messages || '').slice(0, 200));
@@ -146,17 +145,17 @@ async function fetchImage(img: any): Promise<string> {
   u.searchParams.set('filename', img.filename);
   u.searchParams.set('subfolder', img.subfolder || '');
   u.searchParams.set('type', img.type || 'output');
-  const res = await fetch(u, { signal: AbortSignal.timeout(30000) });
-  return Buffer.from(await res.arrayBuffer()).toString('base64');
+  const res = await outboundBytes(u, { timeoutMs: 30_000, maxBytes: 64 * 1024 * 1024 });
+  return res.body.toString('base64');
 }
 
 async function uploadImage(b64: string, filename: string): Promise<string> {
   const form = new FormData();
   form.append('image', new Blob([Buffer.from(b64, 'base64')], { type: 'image/png' }), filename);
   form.append('overwrite', 'true');
-  const res = await fetch(`${base()}/upload/image`, { method: 'POST', body: form, signal: AbortSignal.timeout(20000) });
-  if (!res.ok) throw new Error(`comfyui upload ${res.status}`);
-  const data = await res.json();
+  const data = (await outboundJson<any>(`${base()}/upload/image`, {
+    method: 'POST', body: form, timeoutMs: 20_000, maxBytes: 2 * 1024 * 1024,
+  })).body;
   return data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
 }
 
@@ -208,10 +207,17 @@ async function img2imgInner(eng: 'krea' | 'flux', p: any, seed: number, initName
   return Promise.all((await waitForImages(id)).map(fetchImage));
 }
 
-export function saveGenerated(userId: number, b64: string): { filename: string; fullPath: string } {
+export async function saveGenerated(userId: number, b64: string): Promise<{ filename: string; fullPath: string }> {
   const clean = b64.replace(/^data:image\/\w+;base64,/, '');
-  const filename = `gen_${userId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
+  const filename = `gen_${userId}_${crypto.randomUUID()}.png`;
   const full = path.join(config.generatedDir, filename);
-  fs.writeFileSync(full, Buffer.from(clean, 'base64'));
+  const temporary = `${full}.partial`;
+  try {
+    await fsp.writeFile(temporary, Buffer.from(clean, 'base64'), { flag: 'wx', mode: 0o600 });
+    await fsp.rename(temporary, full);
+  } catch (error) {
+    await fsp.rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
   return { filename, fullPath: full };
 }

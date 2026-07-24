@@ -16,6 +16,11 @@ const HEARTBEAT_NS = 'urn:x-cast:com.google.cast.tp.heartbeat';
 const MEDIA_NS = 'urn:x-cast:com.google.cast.media';
 const DEFAULT_RECEIVER = 'CC1AD845'; // Google's Default Media Receiver
 
+export function mediaControllerGeneration(mediaStatus: any): string | null {
+  const generation = mediaStatus?.media?.customData?.aerieControllerGeneration;
+  return typeof generation === 'string' ? generation : null;
+}
+
 // ---- CastMessage protobuf (the only message shape the protocol uses) ----
 // 1 protocol_version(enum)=0, 2 source_id, 3 destination_id, 4 namespace,
 // 5 payload_type(enum)=0(string), 6 payload_utf8
@@ -151,7 +156,7 @@ class CastClient {
     return app ? { transportId: app.transportId, sessionId: app.sessionId } : null;
   }
 
-  async play(media: { url: string; contentType: string; title: string; subtitle?: string; imageUrl?: string; startTime?: number }): Promise<void> {
+  async play(media: { url: string; contentType: string; title: string; subtitle?: string; imageUrl?: string; startTime?: number; controllerGeneration: string }): Promise<void> {
     this.lastUsed = Date.now();
     await this.connect();
     // Reuse a running media app or launch the Default Media Receiver.
@@ -171,6 +176,7 @@ class CastClient {
         contentId: media.url,
         contentType: media.contentType,
         streamType: 'BUFFERED',
+        customData: { aerieControllerGeneration: media.controllerGeneration },
         metadata: {
           metadataType: 0,
           title: media.title,
@@ -186,27 +192,41 @@ class CastClient {
     }
   }
 
-  async control(action: 'play' | 'pause' | 'stop' | 'seek' | 'quit', value?: number): Promise<boolean> {
+  async control(action: 'play' | 'pause' | 'stop' | 'seek' | 'quit', value?: number,
+    expectedGeneration?: string): Promise<boolean> {
     this.lastUsed = Date.now();
     await this.connect();
     const app = await this.mediaApp();
     if (!app) return false;
-    if (action === 'quit') {
-      await this.request('receiver-0', RECEIVER_NS, { type: 'STOP', sessionId: app.sessionId });
+    // Rolling-upgrade compatibility: sessions created by an older Aerie client
+    // do not know their receiver generation. Its explicit Quit still owns the
+    // registered Default Media Receiver app and must work while it is idle.
+    if (action === 'quit' && !expectedGeneration) {
+      const stopped = await this.request('receiver-0', RECEIVER_NS, { type: 'STOP', sessionId: app.sessionId });
+      if (!stopped) throw new Error('tv_not_responding');
       return true;
     }
     this.connectTransport(app.transportId);
     const st = await this.request(app.transportId, MEDIA_NS, { type: 'GET_STATUS' });
-    const sess = st?.status?.[0]?.mediaSessionId;
-    if (!sess) return false;
+    if (!st) throw new Error('tv_not_responding');
+    const mediaStatus = st?.status?.[0];
+    if (!mediaStatus?.mediaSessionId) return false;
+    if (expectedGeneration && mediaControllerGeneration(mediaStatus) !== expectedGeneration) return false;
+    if (action === 'quit') {
+      const stopped = await this.request('receiver-0', RECEIVER_NS, { type: 'STOP', sessionId: app.sessionId });
+      if (!stopped) throw new Error('tv_not_responding');
+      return true;
+    }
+    const sess = mediaStatus.mediaSessionId;
     const type = action === 'play' ? 'PLAY' : action === 'pause' ? 'PAUSE' : action === 'stop' ? 'STOP' : 'SEEK';
     const payload: any = { type, mediaSessionId: sess };
     if (action === 'seek' && value != null) payload.currentTime = value;
-    await this.request(app.transportId, MEDIA_NS, payload);
+    const controlled = await this.request(app.transportId, MEDIA_NS, payload);
+    if (!controlled) throw new Error('tv_not_responding');
     return true;
   }
 
-  async status(): Promise<{ active: boolean; playerState?: string; idleReason?: string; currentTime?: number; duration?: number; title?: string }> {
+  async status(): Promise<{ active: boolean; playerState?: string; idleReason?: string; currentTime?: number; duration?: number; title?: string; controllerGeneration?: string }> {
     this.lastUsed = Date.now();
     await this.connect();
     const app = await this.mediaApp();
@@ -223,6 +243,7 @@ class CastClient {
       currentTime: s.currentTime,
       duration: s.media?.duration,
       title: s.media?.metadata?.title,
+      controllerGeneration: mediaControllerGeneration(s) || undefined,
     };
   }
 }
@@ -239,6 +260,152 @@ setInterval(() => {
     if (Date.now() - c.lastUsed > 10 * 60_000) { c.close(); clients.delete(ip); }
   }
 }, 60_000).unref();
+
+/** Account ownership for active receiver sessions. The Cast protocol itself has
+ * no Aerie account concept, so without this registry any signed-in member can
+ * inspect or control another member's TV session by IP address. */
+export class CastSessionRegistry {
+  private owners = new Map<string, { userId: number; generation: string; requiresGeneration: boolean }>();
+  private attempts = new Map<string, Map<string, {
+    userId: number;
+    generation: string;
+    requiresGeneration: boolean;
+    createdAt: number;
+  }>>();
+
+  private pruneAttempts(ip: string) {
+    const attempts = this.attempts.get(ip);
+    if (!attempts) return;
+    const cutoff = Date.now() - 12 * 60 * 60_000;
+    for (const [generation, attempt] of attempts) {
+      if (attempt.createdAt < cutoff) attempts.delete(generation);
+    }
+    while (attempts.size > 8) attempts.delete(attempts.keys().next().value!);
+    if (!attempts.size) this.attempts.delete(ip);
+  }
+
+  private pendingOwner(ip: string): number | null {
+    this.pruneAttempts(ip);
+    const attempts = this.attempts.get(ip);
+    if (!attempts?.size) return null;
+    return Array.from(attempts.values()).at(-1)?.userId ?? null;
+  }
+
+  owner(ip: string): number | null { return this.owners.get(ip)?.userId ?? this.pendingOwner(ip); }
+
+  claim(ip: string, userId: number, generation = crypto.randomBytes(16).toString('hex'), requiresGeneration = true): string {
+    this.releaseAttempt(ip, generation);
+    this.owners.set(ip, { userId, generation, requiresGeneration });
+    return generation;
+  }
+
+  beginAttempt(ip: string, userId: number, generation: string, requiresGeneration = true): void {
+    this.pruneAttempts(ip);
+    let attempts = this.attempts.get(ip);
+    if (!attempts) { attempts = new Map(); this.attempts.set(ip, attempts); }
+    attempts.set(generation, { userId, generation, requiresGeneration, createdAt: Date.now() });
+    this.pruneAttempts(ip);
+  }
+
+  hasAttempt(ip: string, generation: string): boolean {
+    this.pruneAttempts(ip);
+    return this.attempts.get(ip)?.has(generation) === true;
+  }
+
+  releaseAttempt(ip: string, generation: string): boolean {
+    const attempts = this.attempts.get(ip);
+    const released = attempts?.delete(generation) === true;
+    if (attempts && !attempts.size) this.attempts.delete(ip);
+    return released;
+  }
+
+  generation(ip: string): string | null { return this.owners.get(ip)?.generation ?? null; }
+
+  authorize(ip: string, userId: number, administrator = false): boolean {
+    if (administrator) return true;
+    const owner = this.owners.get(ip)?.userId;
+    const pendingOwner = owner == null ? this.pendingOwner(ip) : null;
+    if (owner == null && pendingOwner != null && pendingOwner !== userId) {
+      throw Object.assign(new Error('cast_session_forbidden'), { status: 403 });
+    }
+    if (owner == null) return false;
+    if (owner !== userId) throw Object.assign(new Error('cast_session_forbidden'), { status: 403 });
+    return true;
+  }
+
+  matches(ip: string, userId: number, generation: string, administrator = false): boolean {
+    if (!this.authorize(ip, userId, administrator)) return false;
+    return this.owners.get(ip)?.generation === generation;
+  }
+
+  generationAccess(ip: string, userId: number, generation: string, administrator = false): 'active' | 'attempt' | null {
+    const owner = this.owners.get(ip);
+    if (owner?.generation === generation) {
+      if (!administrator && owner.userId !== userId) throw Object.assign(new Error('cast_session_forbidden'), { status: 403 });
+      return 'active';
+    }
+    this.pruneAttempts(ip);
+    const attempt = this.attempts.get(ip)?.get(generation);
+    if (attempt) {
+      if (!administrator && attempt.userId !== userId) throw Object.assign(new Error('cast_session_forbidden'), { status: 403 });
+      return 'attempt';
+    }
+    const claimedOwner = owner?.userId ?? this.pendingOwner(ip);
+    if (!administrator && claimedOwner != null && claimedOwner !== userId) {
+      throw Object.assign(new Error('cast_session_forbidden'), { status: 403 });
+    }
+    return null;
+  }
+
+  promoteAttempt(ip: string, userId: number, generation: string): boolean {
+    const attempt = this.attempts.get(ip)?.get(generation);
+    if (!attempt || attempt.userId !== userId) return false;
+    this.claim(ip, userId, generation, attempt.requiresGeneration);
+    return true;
+  }
+
+  allowsUnscoped(ip: string): boolean {
+    return this.owners.get(ip)?.requiresGeneration === false;
+  }
+
+  release(ip: string, expectedGeneration?: string): boolean {
+    if (expectedGeneration && this.owners.get(ip)?.generation !== expectedGeneration) return false;
+    return this.owners.delete(ip);
+  }
+
+  revokeUser(userId: number): number {
+    const revokedIps = new Set<string>();
+    for (const [ip, owner] of this.owners) if (owner.userId === userId) {
+      this.owners.delete(ip);
+      revokedIps.add(ip);
+    }
+    for (const [ip, attempts] of this.attempts) {
+      for (const [generation, attempt] of attempts) if (attempt.userId === userId) {
+        attempts.delete(generation);
+        revokedIps.add(ip);
+      }
+      if (!attempts.size) this.attempts.delete(ip);
+    }
+    return revokedIps.size;
+  }
+}
+
+const castSessions = new CastSessionRegistry();
+const castDeviceOperations = new Map<string, Promise<void>>();
+
+async function withCastDevice<T>(ip: string, operation: () => Promise<T>): Promise<T> {
+  const previous = castDeviceOperations.get(ip) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>(resolve => { release = resolve; });
+  const chain = previous.then(() => current);
+  castDeviceOperations.set(ip, chain);
+  await previous;
+  try { return await operation(); }
+  finally {
+    release();
+    if (castDeviceOperations.get(ip) === chain) castDeviceOperations.delete(ip);
+  }
+}
 
 // ---- Discovery ----
 export interface CastDevice { ip: string; name: string; }
@@ -335,26 +502,159 @@ async function doDiscover(): Promise<CastDevice[]> {
 // The TV must never see the Jellyfin api_key (Cast broadcasts contentId to every
 // paired sender), so casts go through /api/cast-stream/<random token> on Aerie,
 // which proxies the real Jellyfin URL server-side.
-const streamTokens = new Map<string, { url: string; contentType: string; expires: number }>();
+export type CastStreamToken = {
+  url: string;
+  contentType: string;
+  userId: number;
+  feature: 'videos' | 'movies' | 'tv' | 'music' | 'audiobooks';
+  expires: number;
+};
+const streamTokens = new Map<string, CastStreamToken>();
 
-export function mintStreamToken(url: string, contentType: string): string {
+export function mintStreamToken(url: string, contentType: string, userId: number, feature: CastStreamToken['feature']): string {
   for (const [t, v] of streamTokens) if (v.expires < Date.now()) streamTokens.delete(t);
+  while (streamTokens.size >= 10_000) streamTokens.delete(streamTokens.keys().next().value!);
   const token = crypto.randomBytes(16).toString('hex');
-  streamTokens.set(token, { url, contentType, expires: Date.now() + 12 * 3600_000 });
+  streamTokens.set(token, { url, contentType, userId, feature, expires: Date.now() + 12 * 3600_000 });
   return token;
 }
 
-export function resolveStreamToken(token: string): { url: string; contentType: string } | null {
+export function resolveStreamToken(token: string): CastStreamToken | null {
   const v = streamTokens.get(token);
-  return v && v.expires > Date.now() ? v : null;
+  if (!v || v.expires <= Date.now()) {
+    if (v) streamTokens.delete(token);
+    return null;
+  }
+  return v;
 }
 
-export async function play(ip: string, media: { url: string; contentType: string; title: string; subtitle?: string; imageUrl?: string; startTime?: number }) {
-  return client(ip).play(media);
+export function revokeStreamTokensForUser(userId: number): number {
+  let revoked = 0;
+  for (const [token, value] of streamTokens) {
+    if (value.userId !== userId) continue;
+    streamTokens.delete(token);
+    revoked++;
+  }
+  return revoked;
 }
-export async function control(ip: string, action: 'play' | 'pause' | 'stop' | 'seek' | 'quit', value?: number) {
-  return client(ip).control(action, value);
+
+export function revokeCastSessionsForUser(userId: number): number {
+  return castSessions.revokeUser(userId);
 }
-export async function status(ip: string) {
-  return client(ip).status();
+
+function castSessionEnded(current: Awaited<ReturnType<CastClient['status']>>): boolean {
+  return !current.active || (current.playerState === 'IDLE'
+    && ['FINISHED', 'CANCELLED', 'ERROR', 'INTERRUPTED'].includes(String(current.idleReason || '')));
+}
+
+export function receiverGenerationMatches(
+  current: Awaited<ReturnType<CastClient['status']>>,
+  expectedGeneration: string,
+): boolean {
+  if (current.controllerGeneration === expectedGeneration) return true;
+  // Google Cast permits MediaStatus.media to be omitted. Terminal IDLE status
+  // can therefore lose the customData that carried our generation even though
+  // it is the final status of the owner-bound session we confirmed at LOAD.
+  // A present-but-different generation is never accepted.
+  return current.controllerGeneration == null && current.playerState === 'IDLE'
+    && ['FINISHED', 'CANCELLED', 'ERROR', 'INTERRUPTED'].includes(String(current.idleReason || ''));
+}
+
+export async function play(ip: string, media: { url: string; contentType: string; title: string; subtitle?: string; imageUrl?: string; startTime?: number },
+  userId: number, administrator = false, requestedGeneration?: string): Promise<string> {
+  return withCastDevice(ip, async () => {
+    const owner = castSessions.owner(ip);
+    if (!administrator && owner != null && owner !== userId) {
+      // Clear stale ownership only after the receiver confirms that no media
+      // session remains. Network failures fail closed and preserve the owner.
+      const current = await client(ip).status().catch(() => null);
+      if (!current || !castSessionEnded(current)) throw Object.assign(new Error('cast_session_forbidden'), { status: 403 });
+      castSessions.release(ip);
+    }
+    const generation = requestedGeneration || crypto.randomBytes(16).toString('hex');
+    castSessions.beginAttempt(ip, userId, generation, requestedGeneration != null);
+    try {
+      await client(ip).play({ ...media, controllerGeneration: generation });
+      return castSessions.claim(ip, userId, generation, requestedGeneration != null);
+    } catch (error) {
+      // A receiver may accept LOAD while its MEDIA_STATUS reply is lost. Probe
+      // the receiver generation directly while this device lock is held; never
+      // rely on an active-session claim that confirmation never reached.
+      try {
+        const stopped = await client(ip).control('quit', undefined, generation);
+        if (stopped) castSessions.release(ip);
+        castSessions.releaseAttempt(ip, generation);
+      } catch {
+        scheduleFailedLoadCleanup(ip, generation);
+      }
+      throw error;
+    }
+  });
+}
+export async function control(ip: string, action: 'play' | 'pause' | 'stop' | 'seek' | 'quit', value: number | undefined,
+  userId: number, administrator = false, expectedGeneration?: string) {
+  return withCastDevice(ip, async () => {
+    const access = expectedGeneration
+      ? castSessions.generationAccess(ip, userId, expectedGeneration, administrator)
+      : null;
+    if (expectedGeneration) {
+      if (!access || (access === 'attempt' && action !== 'quit')) return false;
+    } else {
+      if (!castSessions.authorize(ip, userId, administrator) || !castSessions.allowsUnscoped(ip)) return false;
+    }
+    const controlled = await client(ip).control(action, value, expectedGeneration);
+    if (!controlled) {
+      if (access === 'attempt') castSessions.releaseAttempt(ip, expectedGeneration!);
+      else castSessions.release(ip, expectedGeneration);
+    } else if (action === 'quit') {
+      castSessions.release(ip);
+      if (expectedGeneration) castSessions.releaseAttempt(ip, expectedGeneration);
+    }
+    return controlled;
+  });
+}
+export async function status(ip: string, userId: number, administrator = false, expectedGeneration?: string) {
+  return withCastDevice(ip, async () => {
+    const access = expectedGeneration
+      ? castSessions.generationAccess(ip, userId, expectedGeneration, administrator)
+      : null;
+    if (expectedGeneration) {
+      if (!access) return { active: false };
+    } else if (!castSessions.authorize(ip, userId, administrator) || !castSessions.allowsUnscoped(ip)) {
+      return { active: false };
+    }
+    const current = await client(ip).status();
+    if (expectedGeneration && current.active && !receiverGenerationMatches(current, expectedGeneration)) {
+      if (access === 'attempt') castSessions.releaseAttempt(ip, expectedGeneration);
+      else castSessions.release(ip, expectedGeneration);
+      return { active: false };
+    }
+    if (access === 'attempt' && expectedGeneration && current.active) {
+      castSessions.promoteAttempt(ip, userId, expectedGeneration);
+    }
+    if (castSessionEnded(current)) {
+      castSessions.release(ip, expectedGeneration);
+      if (expectedGeneration) castSessions.releaseAttempt(ip, expectedGeneration);
+    }
+    return current;
+  });
+}
+
+function scheduleFailedLoadCleanup(ip: string, generation: string, retry = 0): void {
+  const delays = [1_500, 5_000, 15_000, 60_000];
+  if (retry >= delays.length || !castSessions.hasAttempt(ip, generation)) return;
+  const timer = setTimeout(() => {
+    void withCastDevice(ip, async () => {
+      if (!castSessions.hasAttempt(ip, generation)) return true;
+      try {
+        const stopped = await client(ip).control('quit', undefined, generation);
+        if (stopped) castSessions.release(ip);
+        castSessions.releaseAttempt(ip, generation);
+        return true;
+      } catch {
+        return false;
+      }
+    }).then(done => { if (!done) scheduleFailedLoadCleanup(ip, generation, retry + 1); });
+  }, delays[retry]);
+  timer.unref();
 }

@@ -6,6 +6,7 @@ import { cx, formatDuration } from '../lib/utils';
 import { PageLoader, EmptyState, PageHeader, Modal, ProgressBar, Badge, Spinner } from '../components/ui';
 import type { Book, Chapter } from '../lib/model';
 import { imageSrcSet } from '../lib/images';
+import { getAudioEngine } from '../lib/audio-engine';
 
 type ShowDetail = Book & { chapters: Chapter[]; overview?: string };
 
@@ -13,14 +14,14 @@ const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 
 // ---- shared audio helpers (talk to the single global <audio> element) ----
 function getAudio(): HTMLAudioElement | null {
-  return document.querySelector('audio');
+  return getAudioEngine();
 }
 
-let sessionSpeed = 1;
 function applySpeed(next?: number) {
-  if (next != null) sessionSpeed = next;
+  const player = usePlayer.getState();
+  if (next != null) player.setPlaybackRate(next);
   const a = getAudio();
-  if (a) a.playbackRate = sessionSpeed;
+  if (a) a.playbackRate = next ?? usePlayer.getState().playbackRate;
 }
 
 // ---- helpers ------------------------------------------------------------
@@ -80,7 +81,7 @@ export default function Podcasts() {
   const [shows, setShows] = useState<Book[] | null>(null);
   const [configured, setConfigured] = useState(true);
   const [disabled, setDisabled] = useState(false);
-  const [speed, setSpeed] = useState(sessionSpeed);
+  const speed = usePlayer((s) => s.playbackRate);
   const [query, setQuery] = useState('');
 
   const [openId, setOpenId] = useState<string | null>(null);
@@ -130,20 +131,23 @@ export default function Podcasts() {
   const continuing = useMemo<Book[]>(() => (shows || []).filter((s) => (s.progressPct ?? 0) > 1 && (s.progressPct ?? 0) < 99), [shows]);
   const fresh = useMemo<Book[]>(() => (shows || []).filter((s) => (s.progressPct ?? 0) === 0).slice(0, 12), [shows]);
 
-  const setSpeedFn = (s: number) => { setSpeed(s); applySpeed(s); };
+  const setSpeedFn = (s: number) => { applySpeed(s); };
 
   function playShow(b: Book) {
     const P = usePlayer.getState();
     if (P.current?.id === b.id) { P.setPlaying(true); applySpeed(); }
-    else { P.playTrack(trackForShow(b)); setTimeout(() => applySpeed(), 300); }
+    else {
+      const resumeAt = b.currentTimeSec && b.currentTimeSec > 0 ? b.currentTimeSec : 0;
+      P.playTrack({ ...trackForShow(b), startAt: resumeAt || undefined });
+      setTimeout(() => applySpeed(), 300);
+    }
     toast('Now playing', 'success', b.title);
   }
 
   function playEpisode(show: ShowDetail, ch: Chapter, index: number) {
     const P = usePlayer.getState();
     const streamUrl = api.books.streamUrl(show.id);
-    const a = getAudio();
-    const sameStream = !!(P.current && P.current.streamUrl === streamUrl && a);
+    const seconds = ch.start || 0;
     P.playTrack({
       id: `${show.id}:${ch.id ?? index}`,
       title: ch.title || show.title,
@@ -151,21 +155,20 @@ export default function Podcasts() {
       artUrl: show.coverUrl ? api.books.coverUrl(show.coverUrl) : undefined,
       streamUrl,
       kind: 'podcast',
-      durationSec: ch.end != null && ch.start != null ? Math.max(0, ch.end - ch.start) : show.durationSec,
+      // Chapter timestamps address one full show stream. Keep the player's
+      // timeline in that same coordinate system so seeking/progress cannot jump
+      // past 100% after starting a later chapter.
+      durationSec: show.durationSec,
+      startAt: seconds || undefined,
       cast: { source: 'audiobookshelf', itemId: show.id },
     });
-    const seconds = ch.start || 0;
-    if (sameStream && a) {
-      a.currentTime = seconds; P.setPlaying(true); applySpeed();
-    } else {
-      const started = Date.now();
-      const attempt = () => {
-        const el = getAudio();
-        if (el && el.readyState >= 1) { if (seconds > 0) el.currentTime = seconds; applySpeed(); }
-        else if (Date.now() - started < 8000) setTimeout(attempt, 200);
-      };
-      setTimeout(attempt, 250);
-    }
+    const started = Date.now();
+    const attempt = () => {
+      const el = getAudio();
+      if (el && el.readyState >= 1) applySpeed();
+      else if (Date.now() - started < 8000) setTimeout(attempt, 200);
+    };
+    setTimeout(attempt, 250);
     toast('Now playing', 'success', ch.title || show.title);
   }
 

@@ -59,22 +59,22 @@ export default function Login() {
           <h2 className="text-2xl font-bold text-white">Welcome back</h2>
           <p className="muted text-sm mt-1 mb-7">Sign in to your private cloud.</p>
 
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">Username</label>
-          <input className="input mb-4" value={username} onChange={e => setUsername(e.target.value)} placeholder="username" autoFocus autoComplete="username" />
+          <label htmlFor="login-username" className="block text-sm font-medium text-slate-300 mb-1.5">Username</label>
+          <input id="login-username" name="username" className="input mb-4" value={username} onChange={e => setUsername(e.target.value)} placeholder="username" autoFocus autoComplete="username" />
 
-          <label className="block text-sm font-medium text-slate-300 mb-1.5">Password</label>
-          <input className="input" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" disabled={need2fa} />
+          <label htmlFor="login-password" className="block text-sm font-medium text-slate-300 mb-1.5">Password</label>
+          <input id="login-password" name="password" className="input" type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••" autoComplete="current-password" disabled={need2fa} />
 
           {need2fa && (
             <div className="mt-4 animate-fade-in">
-              <label className="block text-sm font-medium text-slate-300 mb-1.5">Authentication code</label>
-              <input className="input tracking-[0.4em] text-center text-lg" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                placeholder="000000" inputMode="numeric" autoComplete="one-time-code" autoFocus maxLength={6} />
-              <p className="text-xs text-slate-500 mt-1.5">Enter the 6-digit code from your authenticator app.</p>
+              <label htmlFor="login-auth-code" className="block text-sm font-medium text-slate-300 mb-1.5">Authentication or recovery code</label>
+              <input id="login-auth-code" name="code" className="input tracking-[0.22em] text-center text-lg uppercase" value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, '').slice(0, 14))}
+                placeholder="000000" inputMode="text" autoComplete="one-time-code" autoFocus maxLength={14} />
+              <p className="text-xs text-slate-500 mt-1.5">Use the 6-digit code from your app or one saved recovery code.</p>
             </div>
           )}
 
-          {err && <p className="text-accent-red text-sm mt-3">{err}</p>}
+          {err && <p role="alert" className="text-accent-red text-sm mt-3">{err}</p>}
 
           <button type="submit" disabled={loading} className="btn-primary w-full mt-6 py-2.5">
             {loading ? <Spinner size={18} /> : need2fa ? <>Verify <Icon.ChevronRight size={18} /></> : <>Sign in <Icon.ChevronRight size={18} /></>}

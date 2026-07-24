@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { type AuthedRequest } from '../lib/auth.js';
 import { db, audit } from '../lib/db.js';
+import crypto from 'node:crypto';
 
 const r = Router();
 
@@ -11,12 +12,17 @@ function map(d: any) {
 
 // Register / heartbeat current device
 r.post('/heartbeat', (req: AuthedRequest, res) => {
-  const { name, type } = req.body || {};
-  const id = 'd_' + Buffer.from(`${req.user!.id}:${name || 'Web'}`).toString('base64url').slice(0, 16);
-  const exists = db.prepare('SELECT 1 FROM devices WHERE id=?').get(id);
-  if (exists) db.prepare("UPDATE devices SET last_seen=datetime('now') WHERE id=?").run(id);
-  else db.prepare('INSERT INTO devices (id,user_id,name,type) VALUES (?,?,?,?)').run(id, req.user!.id, name || 'Web Session', type || 'web');
-  res.json(map(db.prepare('SELECT * FROM devices WHERE id=?').get(id)));
+  const name = String(req.body?.name || 'Web Session').trim().slice(0, 100);
+  const type = String(req.body?.type || 'web').trim().toLowerCase();
+  if (!name || !['web', 'desktop', 'android', 'ios', 'tablet', 'tv', 'native'].includes(type)) {
+    return res.status(400).json({ error: 'invalid_device' });
+  }
+  const id = 'd_' + crypto.createHash('sha256').update(`${req.user!.id}:${name}:${type}`).digest('base64url').slice(0, 32);
+  const exists = db.prepare('SELECT 1 FROM devices WHERE id=? AND user_id=?').get(id, req.user!.id);
+  if (exists) db.prepare("UPDATE devices SET name=?,type=?,last_seen=datetime('now') WHERE id=? AND user_id=?")
+    .run(name, type, id, req.user!.id);
+  else db.prepare('INSERT INTO devices (id,user_id,name,type) VALUES (?,?,?,?)').run(id, req.user!.id, name, type);
+  res.json(map(db.prepare('SELECT * FROM devices WHERE id=? AND user_id=?').get(id, req.user!.id)));
 });
 
 r.get('/', (req: AuthedRequest, res) => {

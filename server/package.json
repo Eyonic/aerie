@@ -1,6 +1,6 @@
 {
   "name": "aerie-server",
-  "version": "1.0.0",
+  "version": "1.8.3",
   "description": "Aerie — self-hosted private cloud server",
   "license": "MIT",
   "repository": {
@@ -14,8 +14,12 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "check": "tsc -p tsconfig.check.json"
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.check.json --noEmit false --outDir dist --rootDir src",
+    "start:compiled": "node dist/index.js",
+    "backup:apply": "node dist/backup-cli.js apply-pending",
+    "check": "tsc -p tsconfig.check.json",
+    "test": "node --experimental-test-module-mocks --import tsx --test test/*.test.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -23,17 +27,26 @@
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "express": "^4.21.2",
+    "express": "^5.2.1",
+    "html-to-docx": "1.8.0",
+    "htmlparser2": "10.0.0",
     "jsonwebtoken": "^9.0.2",
+    "jszip": "3.10.1",
     "mime-types": "^2.1.35",
-    "multer": "^1.4.5-lts.1",
-    "sharp": "^0.33.5",
-    "tsx": "^4.19.2"
+    "multer": "^2.2.0",
+    "officeparser": "7.4.0",
+    "sanitize-html": "2.17.0",
+    "sharp": "^0.35.3",
+    "tar-stream": "^3.2.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/compression": "^1.8.1",
     "@types/express": "^5",
     "@types/node": "^24",
+    "@types/sanitize-html": "2.16.0",
+    "@types/tar-stream": "^3.1.4",
+    "tsx": "^4.19.2",
     "typescript": "^6.0.3"
   }
 }

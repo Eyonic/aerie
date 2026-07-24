@@ -10,6 +10,7 @@ public class SyncBootReceiver extends BroadcastReceiver {
         if (intent != null && (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())
                 || Intent.ACTION_MY_PACKAGE_REPLACED.equals(intent.getAction()))) {
             SyncEngine.schedule(context);
+            UpdateManager.schedule(context);
         }
     }
 }

@@ -2,15 +2,13 @@
 import { Router } from 'express';
 import { type AuthedRequest } from '../lib/auth.js';
 import { db } from '../lib/db.js';
-import fs from 'node:fs';
-import path from 'node:path';
-import * as storage from '../services/storage.js';
-import * as jf from '../services/jellyfin.js';
 import * as abs from '../services/audiobookshelf.js';
 import * as progress from '../services/progress.js';
+import { progressItem } from '../services/jellyfin-progress.js';
 import { serviceStatuses, systemHealth } from '../services/monitoring.js';
 import { backupStatuses } from './backups.js';
 import type { Book, MediaItem } from '../lib/model.js';
+import { ensureFileCatalog, fileCatalogUsage, listFileCatalog, toFileEntry } from '../services/file-catalog.js';
 
 const r = Router();
 
@@ -40,8 +38,8 @@ function overlayMedia(item: MediaItem, row: { positionTicks: number; durationTic
 async function buildContinueWatching(userId: number): Promise<MediaItem[]> {
   const rows = progress.resume(userId, 'video', 12);
   const items = await Promise.all(rows.map(async row => {
-    try { return overlayMedia(await jf.itemDetail(row.itemId), row); }
-    catch { return null; }
+    const item = await progressItem(userId, row.itemId);
+    return item ? overlayMedia(item, row) : null;
   }));
   return items.filter(Boolean) as MediaItem[];
 }
@@ -61,6 +59,19 @@ async function buildContinueListening(userId: number): Promise<Book[]> {
   return (books.filter(Boolean) as Book[]).filter(b => (b.progressPct || 0) > 0 && (b.progressPct || 0) < 100);
 }
 
+async function buildFileSummary(user: { id: number; username: string; storageQuotaBytes: number | null }) {
+  await ensureFileCatalog(user);
+  const entries = listFileCatalog(user.id, { includeFolders: false, sort: 'recent', limit: 8 });
+  const starred = new Set(entries.length
+    ? (db.prepare(`SELECT path FROM stars WHERE user_id=? AND path IN (${entries.map(() => '?').join(',')})`)
+      .all(user.id, ...entries.map(entry => entry.path)) as any[]).map(row => String(row.path))
+    : []);
+  return {
+    recentFiles: entries.map(entry => toFileEntry(entry, { starred: starred.has(entry.path) })),
+    storageUsage: { ...fileCatalogUsage(user.id), quotaBytes: user.storageQuotaBytes },
+  };
+}
+
 r.get('/', async (req: AuthedRequest, res) => {
   const user = req.user!;
   const audiobooksEnabled = user.features?.audiobooks !== false;
@@ -68,30 +79,16 @@ r.get('/', async (req: AuthedRequest, res) => {
   const photosEnabled = user.features?.photos !== false;
   const videoEnabled = user.features?.movies !== false || user.features?.tv !== false || user.features?.videos !== false;
 
-  // recent files (shallow walk)
-  const recentFiles = filesEnabled ? (() => {
-    try {
-      const root = storage.userRoot(user.username);
-      const out: any[] = [];
-      const walk = (dir: string, d: number) => {
-        if (d > 4) return;
-        let names: string[]; try { names = fs.readdirSync(dir); } catch { return; }
-        for (const n of names) {
-          if (n.startsWith('.')) continue;
-          const full = path.join(dir, n);
-          let st: fs.Stats; try { st = fs.statSync(full); } catch { continue; }
-          if (st.isDirectory()) walk(full, d + 1);
-          else out.push(storage.entryFor(user.username, user.id, full));
-        }
-      };
-      walk(root, 0);
-      out.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
-      return out.slice(0, 8);
-    } catch { return []; }
-  })() : [];
-
-  const [storageUsage, recentPhotos, continueWatching, continueListening, services, health, backups] = await Promise.all([
-    filesEnabled ? safe(storage.computeUsage(user.username, user.id), { usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }) : Promise.resolve({ usedBytes: 0, quotaBytes: null, fileCount: 0, byKind: {} }),
+  const [fileSummary, recentPhotos, continueWatching, continueListening, services, health, backups] = await Promise.all([
+    filesEnabled
+      ? safe(buildFileSummary(user), {
+        recentFiles: [] as any[],
+        storageUsage: { usedBytes: 0, quotaBytes: user.storageQuotaBytes, fileCount: 0, byKind: {} },
+      })
+      : Promise.resolve({
+        recentFiles: [] as any[],
+        storageUsage: { usedBytes: 0, quotaBytes: user.storageQuotaBytes, fileCount: 0, byKind: {} },
+      }),
     photosEnabled ? safe(Promise.resolve(recentNativePhotos(user.id, 12)), [] as any[]) : Promise.resolve([]),
     videoEnabled ? safe(buildContinueWatching(user.id), [] as any[]) : Promise.resolve([]),
     audiobooksEnabled ? safe(buildContinueListening(user.id), [] as any[]) : Promise.resolve([]),
@@ -99,6 +96,7 @@ r.get('/', async (req: AuthedRequest, res) => {
     safe(systemHealth(), null as any),
     safe(backupStatuses(), [] as any[]),
   ]);
+  const { recentFiles, storageUsage } = fileSummary;
 
   const aiJobs = db.prepare('SELECT * FROM jobs WHERE user_id=? ORDER BY created_at DESC LIMIT 6').all(user.id) as any[];
   const genImages = db.prepare('SELECT * FROM generated_images WHERE user_id=? ORDER BY created_at DESC LIMIT 6').all(user.id) as any[];

@@ -1,17 +1,19 @@
-import React, { useEffect, useState, Suspense } from 'react';
+import React, { useEffect, useRef, useState, Suspense } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Icon } from '../lib/icons';
 import { useAuth, useUi, usePlayer, toast } from '../lib/store';
 import { cx, initials } from '../lib/utils';
 import { api } from '../lib/api';
+import { normalizeInternalRoute } from '../lib/internal-route';
 import { GlobalAudioPlayer } from './GlobalAudioPlayer';
 import { VideoPlayer } from './media';
 import { takePendingHandoff } from '../lib/handoff';
 import { publicUrlSync, getPublicUrl } from '../lib/serverinfo';
 import { SearchOverlay } from './SearchOverlay';
 import { Toaster, Menu, PageLoader } from './ui';
-import type { Notification, UserFeatures } from '../lib/model';
+import type { AppCapabilities, Notification, UserFeatures } from '../lib/model';
 import { useLanguage } from '../lib/i18n';
+import { ContinuityButton, ContinuityReceiver } from './Continuity';
 
 const NAV: { section?: string; items: { to: string; label: string; icon: React.ReactNode }[] }[] = [
   { items: [{ to: '/', label: 'Dashboard', icon: <Icon.Dashboard size={19} /> }, { to: '/files', label: 'Files', icon: <Icon.Files size={19} /> }] },
@@ -36,10 +38,12 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
     { to: '/assistant', label: 'AI Assistant', icon: <Icon.Robot size={19} /> },
   ] },
   { section: 'System', items: [
-    { to: '/jobs', label: 'Jobs', icon: <Icon.Bolt size={19} /> },
-    { to: '/automations', label: 'Automations', icon: <Icon.Bolt size={19} /> },
+    { to: '/jobs', label: 'Action Centre', icon: <Icon.Bell size={19} /> },
+    { to: '/automations', label: 'System Tasks', icon: <Icon.Bolt size={19} /> },
     { to: '/backups', label: 'Backups', icon: <Icon.Backup size={19} /> },
     { to: '/sync', label: 'Folder Sync', icon: <Icon.Refresh size={19} /> },
+    { to: '/devices', label: 'Devices & Continuity', icon: <Icon.Device size={19} /> },
+    { to: '/time-machine', label: 'Time Machine', icon: <Icon.Clock size={19} /> },
     { to: '/monitoring', label: 'Monitoring', icon: <Icon.Monitor size={19} /> },
     { to: '/library-tools', label: 'Library Tools', icon: <Icon.Settings size={19} /> },
     { to: '/admin', label: 'Admin', icon: <Icon.Admin size={19} /> },
@@ -51,10 +55,11 @@ const NAV: { section?: string; items: { to: string; label: string; icon: React.R
 
 // Admin-only destinations, hidden from regular members (the pages also guard
 // themselves client-side and the API returns 403 for non-admins).
-const ADMIN_ONLY = new Set(['/admin', '/integrations', '/library-tools']);
+const ADMIN_ONLY = new Set(['/admin', '/integrations', '/library-tools', '/automations', '/backups']);
 const PATH_FEATURE: Partial<Record<string, Exclude<keyof UserFeatures, 'autoRequest'>>> = {
   '/files': 'files', '/photos': 'photos', '/videos': 'videos', '/movies': 'movies', '/tv': 'tv', '/music': 'music',
   '/audiobooks': 'audiobooks', '/podcasts': 'audiobooks', '/requests': 'requests', '/sync': 'sync',
+  '/time-machine': 'files',
   '/documents': 'create', '/spreadsheets': 'create', '/image-editor': 'create',
   '/ai-images': 'ai', '/music-studio': 'ai', '/assistant': 'ai',
 };
@@ -63,17 +68,131 @@ const canOpen = (features: UserFeatures | undefined, path: string) => {
   const key = PATH_FEATURE[path];
   return !key || features?.[key] !== false;
 };
+const CAPABILITY_PATHS: Partial<Record<string, (capabilities: AppCapabilities) => boolean>> = {
+  '/videos': value => value.mediaLibrary,
+  '/movies': value => value.mediaLibrary,
+  '/tv': value => value.mediaLibrary,
+  '/music': value => value.mediaLibrary,
+  '/audiobooks': value => value.audiobookLibrary,
+  '/podcasts': value => value.audiobookLibrary,
+  '/requests': value => value.mediaRequests || value.musicRequests,
+  '/collections': value => value.mediaLibrary,
+  '/assistant': value => value.assistant,
+  '/ai-images': value => value.imageGeneration,
+  '/music-studio': value => value.musicGeneration,
+};
+const hasCapability = (capabilities: AppCapabilities | null, path: string) => {
+  const check = CAPABILITY_PATHS[path];
+  return !check || capabilities === null || check(capabilities);
+};
 
-function Sidebar() {
+function useDesktopSidebar() {
+  const [desktop, setDesktop] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1024px)');
+    const update = () => setDesktop(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  return desktop;
+}
+
+function Sidebar({ openerRef, backgroundRef }: {
+  openerRef: React.RefObject<HTMLButtonElement>;
+  backgroundRef: React.RefObject<HTMLDivElement>;
+}) {
   const { user } = useAuth();
+  const [capabilities, setCapabilities] = useState<AppCapabilities | null>(null);
   const { sidebarOpen, setSidebarOpen } = useUi();
   const isAdmin = user?.role === 'admin';
   const { t: tr } = useLanguage();
+  const asideRef = useRef<HTMLElement>(null);
+  const desktop = useDesktopSidebar();
+  const openMobile = sidebarOpen && !desktop;
+
+  useEffect(() => { let active = true; api.capabilities().then(value => { if (active) setCapabilities(value); }).catch(() => {}); return () => { active = false; }; }, []);
+
+  useEffect(() => {
+    const aside = asideRef.current;
+    if (!aside) return;
+    const closedMobile = !desktop && !sidebarOpen;
+    (aside as HTMLElement & { inert: boolean }).inert = closedMobile;
+    if (closedMobile) {
+      aside.setAttribute('inert', '');
+      aside.setAttribute('aria-hidden', 'true');
+    } else {
+      aside.removeAttribute('inert');
+      aside.removeAttribute('aria-hidden');
+    }
+  }, [desktop, sidebarOpen]);
+
+  useEffect(() => {
+    if (!openMobile) return;
+    const aside = asideRef.current;
+    const background = backgroundRef.current;
+    if (!aside || !background) return;
+    const previousBackground = {
+      inert: (background as HTMLDivElement & { inert: boolean }).inert,
+      inertAttribute: background.getAttribute('inert'),
+      ariaHidden: background.getAttribute('aria-hidden'),
+    };
+    (background as HTMLDivElement & { inert: boolean }).inert = true;
+    background.setAttribute('inert', '');
+    background.setAttribute('aria-hidden', 'true');
+    const frame = window.requestAnimationFrame(() => {
+      const firstLink = aside.querySelector<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      (firstLink || aside).focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      (background as HTMLDivElement & { inert: boolean }).inert = previousBackground.inert;
+      if (previousBackground.inertAttribute === null) background.removeAttribute('inert');
+      else background.setAttribute('inert', previousBackground.inertAttribute);
+      if (previousBackground.ariaHidden === null) background.removeAttribute('aria-hidden');
+      else background.setAttribute('aria-hidden', previousBackground.ariaHidden);
+      if (!window.matchMedia('(min-width: 1024px)').matches && openerRef.current?.isConnected) openerRef.current.focus();
+    };
+  }, [backgroundRef, openMobile, openerRef]);
+
+  useEffect(() => {
+    if (!openMobile) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const aside = asideRef.current;
+      if (!aside) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSidebarOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(aside.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+        .filter(element => !element.hidden && element.getClientRects().length > 0);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        aside.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === aside)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown, true);
+    return () => document.removeEventListener('keydown', handleKeyDown, true);
+  }, [openMobile, setSidebarOpen]);
+
   return (
     <>
-      {sidebarOpen && <div className="fixed inset-0 bg-black/50 z-40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
-      <aside className={cx(
-        'fixed lg:static inset-y-0 left-0 z-50 w-[248px] shrink-0 flex flex-col glass border-r border-white/[0.06] transition-transform',
+      {sidebarOpen && <button type="button" aria-label="Close navigation menu" className="fixed inset-0 bg-black/50 z-40 lg:hidden" onClick={() => setSidebarOpen(false)} />}
+      <aside id="aerie-sidebar" ref={asideRef} tabIndex={-1} aria-label="Primary navigation"
+        aria-hidden={!desktop && !sidebarOpen ? true : undefined} className={cx(
+        'aerie-sidebar fixed lg:static inset-y-0 left-0 z-50 w-[248px] shrink-0 flex flex-col glass border-r border-white/[0.06] transition-transform',
         sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0')}>
         <div className="h-16 flex items-center gap-2 px-4 shrink-0">
           <img src="/logo.svg?v=2" alt="Aerie" className="w-12 h-12 object-contain shrink-0" />
@@ -82,7 +201,7 @@ function Sidebar() {
             <p className="text-[10px] text-slate-500 mt-0.5">{tr('private cloud')}</p>
           </div>
         </div>
-        <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-4">
+        <nav aria-label="Main navigation" className="flex-1 overflow-y-auto px-3 py-2 space-y-4">
           {NAV.map((group, gi) => (
             <div key={gi}>
               {group.section && <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-600 px-3 mb-1.5">{tr(group.section)}</p>}
@@ -90,6 +209,7 @@ function Sidebar() {
                 {group.items
                   .filter(it => !ADMIN_ONLY.has(it.to) || isAdmin)
                   .filter(it => canOpen(user?.features, it.to))
+                  .filter(it => hasCapability(capabilities, it.to))
                   .map(it => (
                   <NavLink key={it.to} to={it.to} end={it.to === '/'} onClick={() => setSidebarOpen(false)}
                     className={({ isActive }) => cx('nav-item', isActive && 'nav-item-active')}>
@@ -107,6 +227,7 @@ function Sidebar() {
 
 function NotificationsMenu() {
   const [items, setItems] = useState<Notification[]>([]);
+  const navigate = useNavigate();
   const unread = items.filter(n => !n.read).length;
   const load = () => api.notifications.list().then(setItems).catch(() => {});
   useEffect(() => {
@@ -122,33 +243,41 @@ function NotificationsMenu() {
   return (
     <Menu
       trigger={
-        <button className="icon-btn relative">
+        <button type="button" className="icon-btn relative" aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}>
           <Icon.Bell size={19} />
-          {unread > 0 && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-accent-pink ring-2 ring-ink-850" />}
+          {unread > 0 && <span aria-hidden="true" className="absolute top-1 right-1 w-2 h-2 rounded-full bg-accent-pink ring-2 ring-ink-850" />}
         </button>}
       items={items.length ? items.slice(0, 8).map(n => ({
         label: n.title, icon: <span className={cx('w-1.5 h-1.5 rounded-full',
           n.level === 'success' ? 'bg-accent-green' : n.level === 'error' ? 'bg-accent-red' : n.level === 'warning' ? 'bg-accent-amber' : 'bg-brand-400')} />,
-        onClick: () => { api.notifications.read(n.id).then(load); },
+        onClick: () => {
+          const destination = normalizeInternalRoute(n.link);
+          void api.notifications.read(n.id).then(() => {
+            load();
+            if (destination) navigate(destination);
+          });
+        },
       })) : [{ label: 'No notifications', onClick: () => {} }]}
     />
   );
 }
 
-function Topbar() {
+function Topbar({ mobileMenuButtonRef }: { mobileMenuButtonRef: React.RefObject<HTMLButtonElement> }) {
   const { user, logout } = useAuth();
-  const { setSearchOpen, setSidebarOpen } = useUi();
+  const { setSearchOpen, sidebarOpen, setSidebarOpen } = useUi();
   const nav = useNavigate();
   const { t: tr } = useLanguage();
   return (
     <header className="h-16 shrink-0 flex items-center gap-3 px-4 lg:px-6 border-b border-white/[0.06] glass z-30">
-      <button className="icon-btn lg:hidden" onClick={() => setSidebarOpen(true)}><Icon.Menu size={20} /></button>
+      <button ref={mobileMenuButtonRef} type="button" className="icon-btn lg:hidden" onClick={() => setSidebarOpen(true)}
+        aria-label="Open navigation menu" aria-controls="aerie-sidebar" aria-expanded={sidebarOpen}><Icon.Menu size={20} /></button>
       <button onClick={() => setSearchOpen(true)}
         className="flex-1 max-w-md flex items-center gap-2.5 rounded-xl bg-ink-900/70 border border-white/[0.06] px-3.5 py-2 text-sm text-slate-500 hover:border-white/[0.12] transition">
         <Icon.Search size={17} /><span>{tr('Search everything…')}</span>
         <kbd className="ml-auto text-[10px] border border-white/10 rounded px-1.5 py-0.5 hidden sm:block">⌘K</kbd>
       </button>
       <div className="flex-1" />
+      <ContinuityButton />
       <NotificationsMenu />
       <Menu
         trigger={
@@ -166,7 +295,7 @@ function Topbar() {
           </button>}
         items={[
           { label: tr('Settings'), icon: <Icon.Settings size={16} />, onClick: () => nav('/settings') },
-          { label: tr('Devices'), icon: <Icon.Device size={16} />, onClick: () => nav('/settings?tab=devices') },
+          { label: tr('Devices'), icon: <Icon.Device size={16} />, onClick: () => nav('/devices') },
           { divider: true, label: '', onClick: () => {} },
           { label: tr('Sign out'), icon: <Icon.Logout size={16} />, danger: true, onClick: async () => { await logout(); nav('/login'); } },
         ]}
@@ -183,18 +312,21 @@ const TABS = [
   { to: '/photos', label: 'Photos', icon: <Icon.Photos size={22} /> },
   { to: '/movies', label: 'Media', icon: <Icon.Movie size={22} /> },
   { to: '/assistant', label: 'AI', icon: <Icon.Robot size={22} /> },
+  { to: '/documents', label: 'Docs', icon: <Icon.Doc size={22} /> },
+  { to: '/jobs', label: 'Actions', icon: <Icon.Bell size={22} /> },
 ];
 function BottomTabBar() {
   const { user } = useAuth();
   const { pathname } = useLocation();
   const { t: tr } = useLanguage();
+  const [capabilities, setCapabilities] = useState<AppCapabilities | null>(null);
+  useEffect(() => { let active = true; api.capabilities().then(value => { if (active) setCapabilities(value); }).catch(() => {}); return () => { active = false; }; }, []);
   // The image editor has its own full-width bottom tool bar; the global tabs would
   // overlap it and hijack taps. Hide there.
   if (pathname.startsWith('/image-editor')) return null;
   return (
-    <nav className="lg:hidden shrink-0 glass-strong border-t border-white/[0.07] flex items-stretch z-40"
-      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      {TABS.filter(t => canOpen(user?.features, t.to)).map(t => (
+    <nav className="aerie-bottom-nav lg:hidden shrink-0 glass-strong border-t border-white/[0.07] flex items-stretch z-40">
+      {TABS.filter(t => canOpen(user?.features, t.to) && hasCapability(capabilities, t.to)).slice(0, 5).map(t => (
         <NavLink key={t.to} to={t.to} end={t.to === '/'}
           className={({ isActive }) => cx('flex-1 flex flex-col items-center justify-center gap-0.5 py-2 text-[10px] font-medium transition-colors',
             isActive ? 'text-brand-400' : 'text-slate-500 hover:text-slate-300')}>
@@ -220,7 +352,8 @@ function InsecureBanner() {
       <span className="min-w-0 flex-1">{publicUrl
         ? <>Open <b>{publicUrl}</b> for the full experience.</>
         : <>Access Aerie over HTTPS to unlock mic, casting and offline features.</>}</span>
-      <button className="icon-btn !w-7 !h-7 shrink-0" onClick={() => { sessionStorage.setItem('cb_https_dismiss', '1'); setDismissed(true); }}><Icon.Close size={15} /></button>
+      <button type="button" className="icon-btn !w-7 !h-7 shrink-0" aria-label="Dismiss HTTPS notice"
+        onClick={() => { sessionStorage.setItem('cb_https_dismiss', '1'); setDismissed(true); }}><Icon.Close size={15} /></button>
     </div>
   );
 }
@@ -230,6 +363,8 @@ export function Layout() {
   const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const shellContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const root = '/' + location.pathname.split('/').filter(Boolean)[0];
     if ((ADMIN_ONLY.has(root) && user?.role !== 'admin') || !canOpen(user?.features, root)) navigate('/', { replace: true });
@@ -266,11 +401,11 @@ export function Layout() {
   return (
     <>
     <a href="#main-content" className="skip-link">Skip to main content</a>
-    <div className="flex h-full overflow-hidden bg-ink-950">
-      <Sidebar />
-      <div className="flex-1 flex flex-col min-w-0">
+    <div className="aerie-app-shell flex overflow-hidden bg-ink-950">
+      <Sidebar openerRef={mobileMenuButtonRef} backgroundRef={shellContentRef} />
+      <div ref={shellContentRef} className="aerie-safe-top-frame flex-1 flex flex-col min-w-0 min-h-0">
         <InsecureBanner />
-        <Topbar />
+        <Topbar mobileMenuButtonRef={mobileMenuButtonRef} />
         <main id="main-content" className="flex-1 overflow-y-auto" tabIndex={-1}>
           <div className="max-w-[1400px] mx-auto px-4 lg:px-8 py-6">
             <Suspense fallback={<PageLoader />}>
@@ -283,7 +418,8 @@ export function Layout() {
       </div>
       <SearchOverlay />
       <Toaster />
-      {handoffVideo && <VideoPlayer item={handoffVideo} onClose={() => setHandoffVideo(null)} />}
+      <ContinuityReceiver />
+      {handoffVideo && <VideoPlayer item={handoffVideo} onClose={() => setHandoffVideo(null)} onEpisodeSelect={setHandoffVideo} />}
     </div>
     </>
   );

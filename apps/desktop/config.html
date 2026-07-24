@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'" />
 <title>Aerie</title>
 <style>
   * { box-sizing: border-box; }
@@ -33,14 +34,22 @@
     <p>Enter the address of your Aerie server.</p>
     <input id="url" placeholder="https://aerie.example.com" />
     <button id="go">Connect</button>
-    <div class="hint">On your home network a LAN address like http://SERVER-IP:8200 also works</div>
+    <div class="hint" id="status">On your home network a LAN address like http://SERVER-IP:8200 also works</div>
   </div>
   <script>
     (async () => {
       const input = document.getElementById('url');
+      const status = document.getElementById('status');
       // Pre-fills the saved server, or the build's bundled default, if any.
       try { input.value = (await window.cloudbox.getUrl()) || ''; } catch { input.value = ''; }
-      const go = () => window.cloudbox.setUrl(input.value);
+      const go = async () => {
+        status.textContent = 'Connecting…';
+        try { await window.cloudbox.setUrl(input.value); }
+        catch {
+          status.textContent = 'Enter a valid HTTP or HTTPS address without credentials, a query, or a fragment.';
+          input.focus();
+        }
+      };
       document.getElementById('go').addEventListener('click', go);
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
       input.focus(); input.select();

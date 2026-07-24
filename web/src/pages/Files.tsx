@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Icon } from '../lib/icons';
 import { cx, formatBytes, formatRelative, formatDate, copyText } from '../lib/utils';
-import { usePlayer, toast, useToasts } from '../lib/store';
+import { useAuth, usePlayer, toast, useToasts } from '../lib/store';
 import { Spinner, PageLoader, EmptyState, PageHeader, Modal, Menu, ProgressBar, Badge, ConfirmModal } from '../components/ui';
-import type { FileEntry, FileListing, StorageUsage, FileKind, Share } from '../lib/model';
+import { SharedSpaces } from '../components/SharedSpaces';
+import type { AccountSharePermission, FileEntry, FileListing, StorageUsage, FileKind, Share } from '../lib/model';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -175,7 +176,11 @@ function PreviewModal({ entry, onClose }: { entry: FileEntry; onClose: () => voi
     if (entry.kind === 'audio') {
       return <div className="py-10 px-6 grid place-items-center bg-ink-900/60 rounded-xl">
         <div className="w-20 h-20 rounded-2xl bg-accent-purple/15 grid place-items-center text-accent-purple mb-5"><Icon.Music size={34} /></div>
-        <audio src={raw} controls autoPlay className="w-full max-w-md" />
+        <p className="text-sm text-slate-300 text-center mb-4">Play this file in Aerie’s persistent player so it keeps playing while you browse.</p>
+        <button className="btn-primary" onClick={() => {
+          player.playTrack({ id: entry.id, title: entry.name, subtitle: entry.parent, streamUrl: raw, kind: 'music' });
+          onClose();
+        }}><Icon.Play size={16} /> Play audio</button>
       </div>;
     }
     if (entry.kind === 'pdf') {
@@ -247,8 +252,14 @@ const EXPIRY_OPTS: { label: string; days: number }[] = [
   { label: '30 days', days: 30 },
 ];
 
-function ShareModal({ entry, onClose }: { entry: FileEntry; onClose: () => void }) {
-  const [permission, setPermission] = useState<'view' | 'edit'>('view');
+function ShareModal({ entry, onClose, onChanged }: { entry: FileEntry; onClose: () => void; onChanged: () => void }) {
+  const currentUser = useAuth(state => state.user);
+  const [mode, setMode] = useState<'household' | 'link'>('household');
+  const [people, setPeople] = useState<{ id: number; username: string; displayName: string; avatarColor: string }[]>([]);
+  const [recipientId, setRecipientId] = useState<number | null>(null);
+  const [permission, setPermission] = useState<AccountSharePermission>('viewer');
+  const [accountCreating, setAccountCreating] = useState(false);
+  const [accountSharedWith, setAccountSharedWith] = useState<string | null>(null);
   const [allowDownload, setAllowDownload] = useState(true);
   const [usePassword, setUsePassword] = useState(false);
   const [password, setPassword] = useState('');
@@ -260,16 +271,42 @@ function ShareModal({ entry, onClose }: { entry: FileEntry; onClose: () => void 
   // even if the backend returns a relative path.
   const publicUrl = share ? `${window.location.origin}/s/${share.id}` : '';
 
+  useEffect(() => {
+    let active = true;
+    api.users().then(users => {
+      if (!active) return;
+      const available = users.filter(user => user.id !== currentUser?.id);
+      setPeople(available);
+      setRecipientId(value => value ?? available[0]?.id ?? null);
+    }).catch(() => { if (active) setPeople([]); });
+    return () => { active = false; };
+  }, [currentUser?.id]);
+
+  const createAccountShare = async () => {
+    if (!recipientId) return;
+    setAccountCreating(true);
+    try {
+      const grant = await api.accountShares.create(entry.path, recipientId, permission);
+      setAccountSharedWith(grant.recipient?.displayName || people.find(person => person.id === recipientId)?.displayName || 'Household member');
+      onChanged();
+      toast('Shared with household member', 'success', permission === 'editor' ? 'They can now view and edit this shared space.' : 'They can now view this shared space.');
+    } catch (error: any) {
+      toast('Could not share with this person', 'error', error?.message === 'already_shared_with_recipient'
+        ? 'This item is already shared with that household member.' : error?.message);
+    } finally { setAccountCreating(false); }
+  };
+
   const create = async () => {
     setCreating(true);
     try {
       const expiresAt = expiryDays ? new Date(Date.now() + expiryDays * 86400000).toISOString() : null;
       const s = await api.shares.create({
-        path: entry.path, name: entry.name, type: 'link', permission, allowDownload,
+        path: entry.path, name: entry.name, type: 'link', permission: 'view', allowDownload,
         password: usePassword && password.trim() ? password.trim() : undefined,
         expiresAt,
       });
       setShare(s);
+      onChanged();
       toast('Share link created', 'success');
     } catch {
       toast('Could not create share link', 'error', 'The sharing backend may not be configured.');
@@ -286,13 +323,48 @@ function ShareModal({ entry, onClose }: { entry: FileEntry; onClose: () => void 
 
   return (
     <Modal open onClose={onClose} title={`Share “${entry.name}”`} size="md"
-      footer={share
-        ? <button className="btn-primary" onClick={onClose}>Done</button>
-        : <>
-            <button className="btn-secondary" onClick={onClose}>Cancel</button>
-            <button className="btn-primary" onClick={create} disabled={creating}>{creating ? <Spinner size={16} /> : <Icon.Link size={15} />} Create link</button>
-          </>}>
-      {share ? (
+      footer={mode === 'household'
+        ? accountSharedWith
+          ? <button className="btn-primary" onClick={onClose}>Done</button>
+          : <><button className="btn-secondary" onClick={onClose}>Cancel</button>
+              <button className="btn-primary" onClick={createAccountShare} disabled={accountCreating || !recipientId}>
+                {accountCreating ? <Spinner size={16} /> : <Icon.Share size={15} />} Share privately
+              </button></>
+        : share
+          ? <button className="btn-primary" onClick={onClose}>Done</button>
+          : <><button className="btn-secondary" onClick={onClose}>Cancel</button>
+              <button className="btn-primary" onClick={create} disabled={creating}>{creating ? <Spinner size={16} /> : <Icon.Link size={15} />} Create link</button></>}>
+      <div className="flex rounded-xl bg-ink-950 p-1 mb-4" role="tablist" aria-label="Sharing method">
+        <button role="tab" aria-selected={mode === 'household'} onClick={() => setMode('household')}
+          className={cx('flex-1 rounded-lg px-3 py-2 text-sm transition-colors', mode === 'household' ? 'bg-brand-500/20 text-brand-200' : 'text-slate-400 hover:text-white')}>Household member</button>
+        <button role="tab" aria-selected={mode === 'link'} onClick={() => setMode('link')}
+          className={cx('flex-1 rounded-lg px-3 py-2 text-sm transition-colors', mode === 'link' ? 'bg-brand-500/20 text-brand-200' : 'text-slate-400 hover:text-white')}>Public link</button>
+      </div>
+
+      {mode === 'household' ? accountSharedWith ? (
+        <div className="animate-fade-in rounded-xl border border-accent-green/20 bg-accent-green/10 p-4">
+          <div className="flex items-center gap-2 text-accent-green"><Icon.Check size={18} /><p className="font-medium">Shared with {accountSharedWith}</p></div>
+          <p className="text-sm text-slate-300 mt-2">Access is private to their Aerie account and can be changed or revoked from Shared.</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {people.length ? <>
+            <div><label className="section-title block mb-2" htmlFor="share-recipient">Person</label>
+              <select id="share-recipient" className="form-select" value={recipientId || ''} onChange={event => setRecipientId(Number(event.target.value))}>
+                {people.map(person => <option key={person.id} value={person.id}>{person.displayName} (@{person.username})</option>)}
+              </select></div>
+            <div><span className="section-title block mb-2">Access</span><div className="grid grid-cols-2 gap-2">
+              <button onClick={() => setPermission('viewer')} aria-pressed={permission === 'viewer'} className={cx('rounded-xl border p-3 text-left', permission === 'viewer' ? 'border-brand-500/50 bg-brand-500/10' : 'border-white/[0.07] bg-ink-900/60')}>
+                <span className="text-sm text-white block">Viewer</span><span className="text-xs muted">Open and download</span></button>
+              <button onClick={() => setPermission('editor')} aria-pressed={permission === 'editor'} className={cx('rounded-xl border p-3 text-left', permission === 'editor' ? 'border-brand-500/50 bg-brand-500/10' : 'border-white/[0.07] bg-ink-900/60')}>
+                <span className="text-sm text-white block">Editor</span><span className="text-xs muted">Add and change items</span></button>
+            </div></div>
+            <div className="rounded-xl border border-white/[0.06] bg-ink-900/60 px-3 py-2.5 text-xs text-slate-300">
+              Access inherits through every item inside this {entry.isFolder ? 'folder' : 'file'}. Changes use your storage quota, versions, and recoverable Trash.
+            </div>
+          </> : <div className="rounded-xl border border-white/[0.06] p-4 text-sm muted">There are no other active household accounts to share with.</div>}
+        </div>
+      ) : share ? (
         <div className="animate-fade-in">
           <p className="text-sm muted mb-2">Anyone with this link can access “{share.name}”.</p>
           <div className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-ink-950 p-2">
@@ -310,14 +382,8 @@ function ShareModal({ entry, onClose }: { entry: FileEntry; onClose: () => void 
         </div>
       ) : (
         <div className="space-y-4">
-          <div>
-            <label className="section-title block mb-2">Permission</label>
-            <div className="flex gap-2">
-              {(['view', 'edit'] as const).map(p => (
-                <button key={p} onClick={() => setPermission(p)}
-                  className={cx('chip capitalize', permission === p && '!bg-brand-500/20 !text-brand-200 !border-brand-500/40')}>{p}</button>
-              ))}
-            </div>
+          <div className="rounded-xl border border-white/[0.06] bg-ink-900/60 px-3 py-2.5 text-sm text-slate-300">
+            Public links remain anonymous and read-only. Use Household member for private viewer or editor access.
           </div>
 
           <div>
@@ -362,25 +428,43 @@ function ShareModal({ entry, onClose }: { entry: FileEntry; onClose: () => void 
 
 function VersionsModal({ entry, onClose, onRestored }: { entry: FileEntry; onClose: () => void; onRestored: () => void }) {
   const [versions, setVersions] = useState<any[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
-    api.files.versions(entry.path).then(setVersions).catch(() => setVersions([]));
+    let alive = true;
+    setVersions(null);
+    setLoadError(false);
+    api.files.versions(entry.path)
+      .then(items => { if (alive) setVersions(items); })
+      .catch(() => { if (alive) setLoadError(true); });
+    return () => { alive = false; };
   }, [entry.path]);
 
   const restore = async (id: string) => {
+    setBusy(id);
     try {
-      await api.files.restoreVersion(entry.path, id);
+      // Resolve the revision immediately before the write. This works for
+      // binary and large files without trying to open them in the text API.
+      const current = await api.files.revision(entry.path);
+      await api.files.restoreVersion(entry.path, id, current.revision);
       toast('Version restored', 'success');
       onRestored();
       onClose();
-    } catch {
-      toast('Restore failed', 'error');
-    }
+    } catch (error: any) {
+      toast(error?.message === 'revision_conflict' ? 'File changed before restore' : 'Restore failed', 'error',
+        error?.message === 'revision_conflict'
+          ? 'Nothing was overwritten. Refresh version history and try again.'
+          : error?.message);
+    } finally { setBusy(null); }
   };
 
   return (
     <Modal open onClose={onClose} title={`Version history — ${entry.name}`} size="md">
-      {versions === null ? (
+      {loadError ? (
+        <EmptyState icon={<Icon.Warning size={26} />} title="Couldn't load version history"
+          subtitle="Check your connection and try opening version history again." />
+      ) : versions === null ? (
         <div className="grid place-items-center py-10 text-brand-400"><Spinner /></div>
       ) : versions.length === 0 ? (
         <EmptyState icon={<Icon.Clock size={26} />} title="No previous versions" subtitle="Versions appear here once this file is edited." />
@@ -390,10 +474,12 @@ function VersionsModal({ entry, onClose, onRestored }: { entry: FileEntry; onClo
             <div key={v.id || i} className="flex items-center gap-3 py-3">
               <div className="w-9 h-9 rounded-lg bg-white/[0.05] grid place-items-center text-slate-400 shrink-0"><Icon.Clock size={16} /></div>
               <div className="min-w-0 flex-1">
-                <p className="text-sm text-white truncate">{v.author || 'Edit'} {i === 0 && <span className="text-brand-400 text-xs">· current</span>}</p>
+                <p className="text-sm text-white truncate">{v.author || 'Edit'}</p>
                 <p className="text-xs muted">{formatDate(v.createdAt)} · {formatBytes(v.sizeBytes || 0)}</p>
               </div>
-              {i !== 0 && <button className="btn-secondary !py-1.5" onClick={() => restore(v.id)}><Icon.Refresh size={14} /> Restore</button>}
+              <button className="btn-secondary !py-1.5" disabled={busy !== null} onClick={() => restore(v.id)}>
+                {busy === v.id ? <Spinner size={14} /> : <Icon.Refresh size={14} />} Restore
+              </button>
             </div>
           ))}
         </div>
@@ -406,7 +492,25 @@ function VersionsModal({ entry, onClose, onRestored }: { entry: FileEntry; onClo
 // Main page
 // ---------------------------------------------------------------------------
 
-interface UploadItem { id: string; name: string; size: number; pct: number; status: 'queued' | 'uploading' | 'done' | 'error'; }
+interface UploadItem {
+  id: string;
+  name: string;
+  size: number;
+  pct: number;
+  status: 'queued' | 'uploading' | 'done' | 'error' | 'cancelled';
+  file: File;
+  relativePath: string;
+  targetPath: string;
+  controller: AbortController;
+  error?: string;
+}
+
+function uploadErrorMessage(error: unknown): string {
+  if (error instanceof DOMException && error.name === 'AbortError') return 'Cancelled — you can retry this upload.';
+  const raw = error instanceof Error ? error.message : String(error || 'Upload failed');
+  if (/network|failed to fetch|upload_failed/i.test(raw)) return 'Connection lost. Retry to continue the upload.';
+  return raw.length > 140 ? `${raw.slice(0, 137)}…` : raw;
+}
 
 // Recursively walk dropped DataTransferItem entries (files + folders) into a
 // flat list of files with their relative paths, so folder drops keep structure.
@@ -446,9 +550,12 @@ export default function Files() {
   const [listing, setListing] = useState<FileListing | null>(null);
   const [flatEntries, setFlatEntries] = useState<FileEntry[]>([]); // recent / starred
   const [shares, setShares] = useState<Share[]>([]);
+  const [shareGeneration, setShareGeneration] = useState(0);
   const [trash, setTrash] = useState<any[]>([]);
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
 
   const [view, setView] = useState<'grid' | 'list'>(() => (localStorage.getItem('cb_files_view') as any) || 'grid');
   const [sort, setSort] = useState<'name' | 'size' | 'modified'>('name');
@@ -468,11 +575,14 @@ export default function Files() {
   const [shareEntry, setShareEntry] = useState<FileEntry | null>(null);
   const [versionsEntry, setVersionsEntry] = useState<FileEntry | null>(null);
   const [confirmDel, setConfirmDel] = useState<{ paths: string[]; label: string } | null>(null);
+  const [purgeTrashConfirm, setPurgeTrashConfirm] = useState<{ id: string; name: string } | null>(null);
   const [emptyTrashConfirm, setEmptyTrashConfirm] = useState(false);
   const [picker, setPicker] = useState<{ mode: 'move' | 'copy'; paths: string[] } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const loadSequenceRef = useRef(0);
+  const uploadsRef = useRef<UploadItem[]>([]);
 
   // The backend also pushes a per-file "upload" notification over SSE, which the
   // global bell surfaces as its own toast — duplicating our single client-side
@@ -493,43 +603,70 @@ export default function Files() {
 
   useEffect(() => { localStorage.setItem('cb_files_view', view); }, [view]);
 
-  // Auto-dismiss the persistent upload panel a few seconds after everything
-  // finishes so it stops sitting on top of the bottom-left storage card.
+  useEffect(() => { uploadsRef.current = uploads; }, [uploads]);
+
+  // Successful rows can clear themselves, but failures remain until the user
+  // retries or explicitly clears them. A transient toast is not a recovery UI.
   useEffect(() => {
     if (uploads.length === 0) return;
     if (uploads.some(u => u.status === 'uploading' || u.status === 'queued')) return;
-    const t = setTimeout(() => setUploads(prev => prev.filter(u => u.status === 'uploading' || u.status === 'queued')), 5000);
+    if (!uploads.some(u => u.status === 'done')) return;
+    const t = setTimeout(() => setUploads(prev => prev.filter(u => u.status !== 'done')), 5000);
     return () => clearTimeout(t);
+  }, [uploads]);
+  useEffect(() => {
+    if (!uploads.some(u => u.status === 'uploading' || u.status === 'queued')) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
   }, [uploads]);
   useEffect(() => { setSelected(new Set()); setQuery(''); }, [tab, path]);
 
   // ---- data loading --------------------------------------------------------
-  const load = async () => {
+  const requestKey = `${tab}:${tab === 'files' ? `${path}:${sort}:${dir}` : ''}`;
+  const activeRequestKeyRef = useRef(requestKey);
+  activeRequestKeyRef.current = requestKey;
+  const load = useCallback(async () => {
+    // An action that started on a previous folder/tab can finish after
+    // navigation. Its captured refresh must not supersede the new view.
+    if (requestKey !== activeRequestKeyRef.current) return;
+    const sequence = ++loadSequenceRef.current;
+    const isCurrent = () => sequence === loadSequenceRef.current && requestKey === activeRequestKeyRef.current;
     setLoading(true);
+    setLoadError(null);
     try {
       if (tab === 'files') {
-        setListing(await api.files.list(path, sort, dir));
+        const next = await api.files.list(path, sort, dir);
+        if (!isCurrent()) return;
+        setListing(next);
       } else if (tab === 'recent') {
-        setFlatEntries(await api.files.recent(48));
+        const next = await api.files.recent(48);
+        if (!isCurrent()) return;
+        setFlatEntries(next);
       } else if (tab === 'starred') {
-        setFlatEntries(await api.files.starred());
+        const next = await api.files.starred();
+        if (!isCurrent()) return;
+        setFlatEntries(next);
       } else if (tab === 'shared') {
-        setShares(await api.shares.list());
+        const next = await api.shares.list();
+        if (!isCurrent()) return;
+        setShares(next);
       } else if (tab === 'trash') {
-        setTrash(await api.files.trash());
+        const next = await api.files.trash();
+        if (!isCurrent()) return;
+        setTrash(next);
       }
-    } catch {
-      if (tab === 'files') setListing(null);
-      else if (tab === 'recent' || tab === 'starred') setFlatEntries([]);
-      else if (tab === 'shared') setShares([]);
-      else if (tab === 'trash') setTrash([]);
+      if (isCurrent()) setLoadedKey(requestKey);
+    } catch (error: any) {
+      if (!isCurrent()) return;
+      setLoadError(error?.message || 'The storage backend may be offline.');
       toast('Could not load files', 'error', 'The storage backend may be offline.');
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  };
+  }, [tab, path, sort, dir, requestKey]);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [tab, path, sort, dir]);
+  useEffect(() => { void load(); }, [load]);
   useEffect(() => { api.files.usage().then(setUsage).catch(() => setUsage(null)); }, []);
 
   // ---- navigation ----------------------------------------------------------
@@ -542,6 +679,7 @@ export default function Files() {
 
   // ---- entries for current list-based tabs --------------------------------
   const rawEntries: FileEntry[] = tab === 'files' ? (listing?.entries || []) : (tab === 'recent' || tab === 'starred') ? flatEntries : [];
+  const hasCurrentData = loadedKey === requestKey;
   const entries = useMemo(() => {
     let e = rawEntries;
     if (query.trim()) {
@@ -575,31 +713,51 @@ export default function Files() {
   }, [selected.size]);
 
   // ---- actions -------------------------------------------------------------
+  const runUploadItem = async (item: UploadItem): Promise<boolean> => {
+    if (item.controller.signal.aborted) {
+      setUploads(prev => prev.map(u => u.id === item.id
+        ? { ...u, status: 'cancelled', error: 'Cancelled — you can retry this upload.' }
+        : u));
+      return false;
+    }
+    setUploads(prev => prev.map(u => u.id === item.id ? { ...u, status: 'uploading', error: undefined } : u));
+    try {
+      await api.files.upload(item.targetPath, [item.file], [item.relativePath],
+        pct => setUploads(prev => prev.map(u => u.id === item.id ? { ...u, pct } : u)),
+        item.controller.signal);
+      setUploads(prev => prev.map(u => u.id === item.id ? { ...u, pct: 100, status: 'done', error: undefined } : u));
+      return true;
+    } catch (error) {
+      const cancelled = item.controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError');
+      setUploads(prev => prev.map(u => u.id === item.id ? {
+        ...u,
+        status: cancelled ? 'cancelled' : 'error',
+        error: uploadErrorMessage(error),
+      } : u));
+      return false;
+    }
+  };
+
   const doUpload = async (files: File[], relativePaths?: string[]) => {
     if (!files.length) return;
     const targetPath = path;
     if (tab !== 'files') { go('files', path); }
-    const items: UploadItem[] = files.map((f, i) => ({
-      id: uid(), name: relativePaths?.[i] || (f as any).webkitRelativePath || f.name, size: f.size, pct: 0, status: 'queued',
-    }));
+    const items: UploadItem[] = files.map((file, i) => {
+      const relativePath = relativePaths?.[i] || (file as any).webkitRelativePath || file.name;
+      return {
+        id: uid(), name: relativePath, size: file.size, pct: 0, status: 'queued',
+        file, relativePath, targetPath, controller: new AbortController(),
+      };
+    });
     setUploads(prev => [...prev, ...items]);
     setUploadPanelOpen(true);
     uploadSuppress.current = { active: true, myId: null };
     let ok = 0, failed = 0;
     // Upload one at a time so each file reports its own progress and huge files
     // don't stall the whole batch behind a single request.
-    for (let i = 0; i < files.length; i++) {
-      const item = items[i];
-      setUploads(prev => prev.map(u => u.id === item.id ? { ...u, status: 'uploading' } : u));
-      try {
-        await api.files.upload(targetPath, [files[i]], relativePaths ? [relativePaths[i]] : undefined,
-          pct => setUploads(prev => prev.map(u => u.id === item.id ? { ...u, pct } : u)));
-        ok++;
-        setUploads(prev => prev.map(u => u.id === item.id ? { ...u, pct: 100, status: 'done' } : u));
-      } catch {
-        failed++;
-        setUploads(prev => prev.map(u => u.id === item.id ? { ...u, status: 'error' } : u));
-      }
+    for (const item of items) {
+      if (await runUploadItem(item)) ok++;
+      else failed++;
     }
     // Fire our single summary toast, capturing its id so the suppressor above
     // never dismisses our own — only the redundant server upload notifications.
@@ -615,6 +773,28 @@ export default function Files() {
     setTimeout(() => { uploadSuppress.current.active = false; }, 6000);
     await load();
     api.files.usage().then(setUsage).catch(() => {});
+  };
+
+  const retryUpload = async (id: string) => {
+    const previous = uploadsRef.current.find(u => u.id === id);
+    if (!previous || (previous.status !== 'error' && previous.status !== 'cancelled')) return;
+    const retry: UploadItem = { ...previous, controller: new AbortController(), pct: 0, status: 'queued', error: undefined };
+    setUploads(items => items.map(item => item.id === id ? retry : item));
+    setUploadPanelOpen(true);
+    const ok = await runUploadItem(retry);
+    toast(ok ? 'Upload complete' : 'Upload failed', ok ? 'success' : 'error',
+      ok ? `${retry.name} was uploaded.` : 'The item remains here so you can retry again.');
+    await load();
+    api.files.usage().then(setUsage).catch(() => {});
+  };
+
+  const cancelUpload = (id: string) => {
+    const item = uploadsRef.current.find(upload => upload.id === id);
+    if (!item || (item.status !== 'queued' && item.status !== 'uploading')) return;
+    item.controller.abort();
+    setUploads(items => items.map(upload => upload.id === id
+      ? { ...upload, status: 'cancelled', error: 'Cancelled — you can retry this upload.' }
+      : upload));
   };
 
   const clearFinishedUploads = () => setUploads(prev => prev.filter(u => u.status === 'uploading' || u.status === 'queued'));
@@ -866,6 +1046,17 @@ export default function Files() {
             className={cx('relative rounded-2xl transition-all min-h-[16rem]',
               dragOver && 'ring-2 ring-brand-500/60 ring-offset-2 ring-offset-ink-950 bg-brand-500/[0.04]')}>
 
+            {loadError && (
+              <div role="alert" className="mb-3 rounded-xl border border-accent-red/25 bg-accent-red/10 px-4 py-3 flex flex-wrap items-center gap-3">
+                <Icon.Warning size={17} className="text-accent-red shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-white">Couldn't refresh this view</p>
+                  <p className="text-xs text-slate-400 truncate">{loadError}</p>
+                </div>
+                <button className="btn-secondary !py-1.5" onClick={() => void load()}><Icon.Refresh size={14} /> Retry</button>
+              </div>
+            )}
+
             {dragOver && (
               <div className="absolute inset-0 z-20 grid place-items-center rounded-2xl bg-ink-950/70 backdrop-blur-sm pointer-events-none">
                 <div className="text-center">
@@ -876,12 +1067,15 @@ export default function Files() {
               </div>
             )}
 
-            {loading ? (
+            {loading && !hasCurrentData ? (
               <PageLoader />
-            ) : tab === 'trash' ? (
-              <TrashView items={trash} onRestore={restoreTrash} onPurge={purgeTrash} onEmpty={() => setEmptyTrashConfirm(true)} />
+            ) : loadError && !hasCurrentData ? null : tab === 'trash' ? (
+              <TrashView items={trash} onRestore={restoreTrash}
+                onPurge={item => setPurgeTrashConfirm({ id: String(item.id), name: String(item.name || 'this item') })}
+                onEmpty={() => setEmptyTrashConfirm(true)} />
             ) : tab === 'shared' ? (
-              <SharedView shares={shares} onRevoke={removeShare} onOpen={p => openFolder(p)} />
+              <SharedSpaces publicShares={shares} refreshKey={shareGeneration}
+                onRevokePublic={removeShare} onOpenOwned={p => openFolder(p)} />
             ) : entries.length === 0 ? (
               <EmptyState
                 icon={tab === 'starred' ? <Icon.Star size={28} /> : tab === 'recent' ? <Icon.Clock size={28} /> : <Icon.Folder size={28} />}
@@ -945,7 +1139,7 @@ export default function Files() {
 
       {/* Persistent upload progress panel */}
       <UploadPanel uploads={uploads} open={uploadPanelOpen} setOpen={setUploadPanelOpen}
-        onClear={clearFinishedUploads}
+        onClear={clearFinishedUploads} onRetry={id => void retryUpload(id)} onCancel={cancelUpload}
         // Anchor bottom-LEFT on desktop so it doesn't overlap the bottom-right toasts
         // or the right-hand Storage sidebar; full-width above the tab bar on mobile.
         positionClass={cx('left-4 right-4 sm:right-auto sm:left-5 sm:w-[22rem]',
@@ -972,7 +1166,8 @@ export default function Files() {
       </Modal>
 
       {preview && <PreviewModal entry={preview} onClose={() => setPreview(null)} />}
-      {shareEntry && <ShareModal entry={shareEntry} onClose={() => setShareEntry(null)} />}
+      {shareEntry && <ShareModal entry={shareEntry} onClose={() => setShareEntry(null)}
+        onChanged={() => { setShareGeneration(value => value + 1); if (tab === 'shared') void load(); }} />}
       {versionsEntry && <VersionsModal entry={versionsEntry} onClose={() => setVersionsEntry(null)} onRestored={load} />}
 
       <FolderPicker open={!!picker} title={picker?.mode === 'move' ? 'Move to folder' : 'Copy to folder'}
@@ -988,6 +1183,12 @@ export default function Files() {
         onConfirm={() => purgeTrash()}
         title="Empty Trash?" message="All items in Trash will be permanently deleted. This cannot be undone."
         confirmLabel="Empty Trash" danger />
+
+      <ConfirmModal open={!!purgeTrashConfirm} onClose={() => setPurgeTrashConfirm(null)}
+        onConfirm={() => purgeTrashConfirm && purgeTrash(purgeTrashConfirm.id)}
+        title="Delete this item forever?"
+        message={`“${purgeTrashConfirm?.name}” will be permanently deleted and cannot be restored.`}
+        confirmLabel="Delete forever" danger />
     </div>
   );
 }
@@ -996,12 +1197,12 @@ export default function Files() {
 // Persistent upload panel
 // ---------------------------------------------------------------------------
 
-function UploadPanel({ uploads, open, setOpen, onClear, positionClass }:
-  { uploads: UploadItem[]; open: boolean; setOpen: (f: (o: boolean) => boolean) => void; onClear: () => void; positionClass: string }) {
+function UploadPanel({ uploads, open, setOpen, onClear, onRetry, onCancel, positionClass }:
+  { uploads: UploadItem[]; open: boolean; setOpen: (f: (o: boolean) => boolean) => void; onClear: () => void; onRetry: (id: string) => void; onCancel: (id: string) => void; positionClass: string }) {
   if (uploads.length === 0) return null;
   const active = uploads.filter(u => u.status === 'uploading' || u.status === 'queued').length;
   const done = uploads.filter(u => u.status === 'done').length;
-  const errs = uploads.filter(u => u.status === 'error').length;
+  const errs = uploads.filter(u => u.status === 'error' || u.status === 'cancelled').length;
   const allDone = active === 0;
   const overall = Math.round(uploads.reduce((a, u) => a + (u.status === 'done' ? 100 : u.pct), 0) / uploads.length);
 
@@ -1033,17 +1234,23 @@ function UploadPanel({ uploads, open, setOpen, onClear, positionClass }:
               <div key={u.id} className="flex items-center gap-2.5 px-4 py-2.5">
                 <span className={cx('w-7 h-7 rounded-lg grid place-items-center shrink-0',
                   u.status === 'done' ? 'bg-accent-green/15 text-accent-green'
-                    : u.status === 'error' ? 'bg-accent-red/15 text-accent-red'
+                    : u.status === 'error' || u.status === 'cancelled' ? 'bg-accent-red/15 text-accent-red'
                     : 'bg-white/[0.06] text-slate-400')}>
-                  {u.status === 'done' ? <Icon.Check size={14} /> : u.status === 'error' ? <Icon.Warning size={14} /> : <Icon.Upload size={13} />}
+                  {u.status === 'done' ? <Icon.Check size={14} /> : u.status === 'error' || u.status === 'cancelled' ? <Icon.Warning size={14} /> : <Icon.Upload size={13} />}
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="text-xs text-slate-200 truncate">{u.name}</p>
                   {u.status === 'uploading'
                     ? <ProgressBar value={u.pct} className="mt-1.5" />
-                    : <p className="text-[11px] muted">{u.status === 'error' ? 'Failed' : u.status === 'queued' ? 'Queued' : formatBytes(u.size)}</p>}
+                    : <p className={cx('text-[11px]', u.error ? 'text-accent-red' : 'muted')}>{u.error || (u.status === 'queued' ? 'Queued' : formatBytes(u.size))}</p>}
                 </div>
                 {u.status === 'uploading' && <span className="text-[11px] muted tabular-nums w-9 text-right">{u.pct}%</span>}
+                {(u.status === 'queued' || u.status === 'uploading') && (
+                  <button className="icon-btn !w-7 !h-7" title="Cancel upload" aria-label={`Cancel upload of ${u.name}`} onClick={() => onCancel(u.id)}><Icon.Close size={14} /></button>
+                )}
+                {(u.status === 'error' || u.status === 'cancelled') && (
+                  <button className="btn-secondary !py-1 !px-2 text-xs" onClick={() => onRetry(u.id)}><Icon.Refresh size={13} /> Retry</button>
+                )}
               </div>
             ))}
           </div>
@@ -1062,54 +1269,65 @@ function FileGridCard({ entry, selected, anySelected, onOpen, onToggle, onLongPr
   const [imgOk, setImgOk] = useState(true);
   const showThumb = isThumbable(entry) && imgOk;
   const lp = useLongPress(onLongPress);
+  const activate = () => {
+    if (lp.fired.current) { lp.fired.current = false; return; }
+    onOpen();
+  };
+  const activationLabel = anySelected
+    ? `${selected ? 'Deselect' : 'Select'} ${entry.name}`
+    : `${entry.isFolder ? 'Open folder' : 'Open file'} ${entry.name}`;
   return (
     <div
-      onClick={() => { if (lp.fired.current) return; onOpen(); }}
       onContextMenu={e => { e.preventDefault(); onToggle(); }}
-      {...lp.handlers}
-      className={cx('group relative card card-hover cursor-pointer !p-0 overflow-hidden select-none',
+      className={cx('group relative card card-hover cursor-pointer !p-0 overflow-hidden select-none focus-within:!border-brand-500/50',
         selected && '!border-brand-500/60 ring-1 ring-brand-500/40')}>
       {/* checkbox */}
-      <button onClick={e => { e.stopPropagation(); onToggle(); }}
+      <button type="button" aria-label={`${selected ? 'Deselect' : 'Select'} ${entry.name}`} aria-pressed={selected}
+        onContextMenu={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onToggle(); }}
         className={cx('absolute top-2 left-2 z-10 w-6 h-6 rounded-md grid place-items-center transition-all',
-          selected ? 'bg-brand-500 text-white' : 'bg-black/40 text-white/70 opacity-0 group-hover:opacity-100',
+          selected ? 'bg-brand-500 text-white' : 'bg-black/40 text-white/70 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100',
           anySelected && 'opacity-100')}>
         {selected ? <Icon.Check size={14} /> : <span className="w-3 h-3 rounded-[3px] border border-white/70" />}
       </button>
       {/* kebab */}
-      <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
-        <Menu trigger={<button className="w-7 h-7 rounded-lg bg-black/40 grid place-items-center text-white/80 hover:text-white"><Icon.More size={16} /></button>} items={menu} />
+      <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 transition-opacity"
+        onContextMenu={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+        <Menu trigger={<button type="button" aria-label={`Actions for ${entry.name}`} aria-haspopup="menu"
+          className="w-7 h-7 rounded-lg bg-black/40 grid place-items-center text-white/80 hover:text-white"><Icon.More size={16} /></button>} items={menu} />
       </div>
 
-      {/* thumbnail / icon */}
-      <div className="relative aspect-[4/3] grid place-items-center overflow-hidden bg-ink-900">
-        {showThumb ? (
-          <>
-            <img src={api.files.thumbUrl(entry.path)} loading="lazy" onError={() => setImgOk(false)}
-              className="w-full h-full object-cover" alt={entry.name} />
-            {entry.kind === 'video' && (
-              <span className="absolute inset-0 grid place-items-center pointer-events-none">
-                <span className="w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm grid place-items-center text-white">
-                  <Icon.Play size={16} />
+      <button type="button" aria-label={activationLabel} aria-pressed={anySelected ? selected : undefined} onClick={activate} {...lp.handlers}
+        className="block w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-400/80">
+        {/* thumbnail / icon */}
+        <span className="relative aspect-[4/3] grid place-items-center overflow-hidden bg-ink-900">
+          {showThumb ? (
+            <>
+              <img src={api.files.thumbUrl(entry.path)} loading="lazy" onError={() => setImgOk(false)}
+                className="w-full h-full object-cover" alt="" />
+              {entry.kind === 'video' && (
+                <span className="absolute inset-0 grid place-items-center pointer-events-none">
+                  <span className="w-9 h-9 rounded-full bg-black/50 backdrop-blur-sm grid place-items-center text-white">
+                    <Icon.Play size={16} />
+                  </span>
                 </span>
-              </span>
-            )}
-          </>
-        ) : (
-          <div className="w-14 h-14 rounded-2xl grid place-items-center" style={{ background: `${kindColor(entry.kind)}22`, color: kindColor(entry.kind) }}>
-            {kindIcon(entry.kind, 26)}
-          </div>
-        )}
-      </div>
-      {/* label */}
-      <div className="px-3 py-2.5 border-t border-white/[0.05]">
-        <div className="flex items-center gap-1.5">
-          <span className="shrink-0" style={{ color: kindColor(entry.kind) }}>{kindIcon(entry.kind, 14)}</span>
-          <p className="text-sm text-white truncate flex-1">{entry.name}</p>
-          {entry.starred && <Icon.Star size={13} filled className="text-accent-amber shrink-0" />}
-        </div>
-        <p className="text-xs muted mt-0.5">{entry.isFolder ? `${entry.itemCount ?? 0} items` : formatBytes(entry.size)}</p>
-      </div>
+              )}
+            </>
+          ) : (
+            <span className="w-14 h-14 rounded-2xl grid place-items-center" style={{ background: `${kindColor(entry.kind)}22`, color: kindColor(entry.kind) }}>
+              {kindIcon(entry.kind, 26)}
+            </span>
+          )}
+        </span>
+        {/* label */}
+        <span className="block px-3 py-2.5 border-t border-white/[0.05]">
+          <span className="flex items-center gap-1.5">
+            <span className="shrink-0" style={{ color: kindColor(entry.kind) }}>{kindIcon(entry.kind, 14)}</span>
+            <span className="text-sm text-white truncate flex-1">{entry.name}</span>
+            {entry.starred && <Icon.Star size={13} filled className="text-accent-amber shrink-0" />}
+          </span>
+          <span className="block text-xs muted mt-0.5">{entry.isFolder ? `${entry.itemCount ?? 0} items` : formatBytes(entry.size)}</span>
+        </span>
+      </button>
     </div>
   );
 }
@@ -1123,80 +1341,50 @@ function FileListRow({ entry, selected, anySelected, onOpen, onToggle, onLongPre
   const lp = useLongPress(onLongPress);
   const [imgOk, setImgOk] = useState(true);
   const showThumb = isThumbable(entry) && imgOk;
+  const activate = () => {
+    if (lp.fired.current) { lp.fired.current = false; return; }
+    onOpen();
+  };
+  const activationLabel = anySelected
+    ? `${selected ? 'Deselect' : 'Select'} ${entry.name}`
+    : `${entry.isFolder ? 'Open folder' : 'Open file'} ${entry.name}`;
   return (
-    <div onClick={() => { if (lp.fired.current) return; onOpen(); }}
-      onContextMenu={e => { e.preventDefault(); onToggle(); }}
-      {...lp.handlers}
-      className={cx('group flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-white/[0.03] select-none', selected && 'bg-brand-500/10')}>
-      <button onClick={e => { e.stopPropagation(); onToggle(); }}
+    <div onContextMenu={e => { e.preventDefault(); onToggle(); }}
+      className={cx('group flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-white/[0.03] focus-within:bg-white/[0.03] select-none', selected && 'bg-brand-500/10')}>
+      <button type="button" aria-label={`${selected ? 'Deselect' : 'Select'} ${entry.name}`} aria-pressed={selected}
+        onContextMenu={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); onToggle(); }}
         className={cx('w-5 h-5 rounded-md grid place-items-center shrink-0 transition-all',
-          selected ? 'bg-brand-500 text-white' : cx('border border-white/15 text-transparent group-hover:opacity-100', anySelected ? 'opacity-100 !border-white/40' : 'opacity-0'))}>
+          selected ? 'bg-brand-500 text-white' : cx('border border-white/15 text-transparent group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100', anySelected ? 'opacity-100 !border-white/40' : 'opacity-0'))}>
         <Icon.Check size={13} />
       </button>
-      {showThumb ? (
-        <span className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-ink-900 grid place-items-center">
-          <img src={api.files.thumbUrl(entry.path)} loading="lazy" onError={() => setImgOk(false)}
-            className="w-full h-full object-cover" alt="" />
-          {entry.kind === 'video' && (
-            <span className="absolute inset-0 grid place-items-center pointer-events-none">
-              <span className="w-4 h-4 rounded-full bg-black/55 grid place-items-center text-white"><Icon.Play size={9} /></span>
-            </span>
-          )}
+      <button type="button" aria-label={activationLabel} aria-pressed={anySelected ? selected : undefined} onClick={activate} {...lp.handlers}
+        className="flex items-center gap-3 flex-1 min-w-0 text-left rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400/80">
+        {showThumb ? (
+          <span className="relative w-8 h-8 rounded-lg overflow-hidden shrink-0 bg-ink-900 grid place-items-center">
+            <img src={api.files.thumbUrl(entry.path)} loading="lazy" onError={() => setImgOk(false)}
+              className="w-full h-full object-cover" alt="" />
+            {entry.kind === 'video' && (
+              <span className="absolute inset-0 grid place-items-center pointer-events-none">
+                <span className="w-4 h-4 rounded-full bg-black/55 grid place-items-center text-white"><Icon.Play size={9} /></span>
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="w-8 h-8 rounded-lg grid place-items-center shrink-0" style={{ background: `${kindColor(entry.kind)}1f`, color: kindColor(entry.kind) }}>
+            {kindIcon(entry.kind, 17)}
+          </span>
+        )}
+        <span className="min-w-0 flex-1 flex items-center gap-2">
+          <span className="text-sm text-white truncate">{entry.name}</span>
+          {entry.starred && <Icon.Star size={13} filled className="text-accent-amber shrink-0" />}
         </span>
-      ) : (
-        <span className="w-8 h-8 rounded-lg grid place-items-center shrink-0" style={{ background: `${kindColor(entry.kind)}1f`, color: kindColor(entry.kind) }}>
-          {kindIcon(entry.kind, 17)}
-        </span>
-      )}
-      <div className="min-w-0 flex-1 flex items-center gap-2">
-        <p className="text-sm text-white truncate">{entry.name}</p>
-        {entry.starred && <Icon.Star size={13} filled className="text-accent-amber shrink-0" />}
+        <span className="w-24 text-right text-xs muted hidden sm:block tabular-nums">{entry.isFolder ? `${entry.itemCount ?? 0} items` : formatBytes(entry.size)}</span>
+        <span className="w-28 text-right text-xs text-slate-500 hidden sm:block">{formatRelative(entry.modifiedAt)}</span>
+      </button>
+      <div onContextMenu={e => e.stopPropagation()} onClick={e => e.stopPropagation()} className="w-9 grid place-items-center">
+        <Menu trigger={<button type="button" aria-label={`Actions for ${entry.name}`} aria-haspopup="menu"
+          className="icon-btn !w-8 !h-8 opacity-60 group-hover:opacity-100 group-focus-within:opacity-100"><Icon.More size={16} /></button>} items={menu} />
       </div>
-      <span className="w-24 text-right text-xs muted hidden sm:block tabular-nums">{entry.isFolder ? `${entry.itemCount ?? 0} items` : formatBytes(entry.size)}</span>
-      <span className="w-28 text-right text-xs text-slate-500 hidden sm:block">{formatRelative(entry.modifiedAt)}</span>
-      <div onClick={e => e.stopPropagation()} className="w-9 grid place-items-center">
-        <Menu trigger={<button className="icon-btn !w-8 !h-8 opacity-60 group-hover:opacity-100"><Icon.More size={16} /></button>} items={menu} />
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Shared view
-// ---------------------------------------------------------------------------
-
-function SharedView({ shares, onRevoke, onOpen }: { shares: Share[]; onRevoke: (id: string) => void; onOpen: (path: string) => void }) {
-  if (shares.length === 0) {
-    return <EmptyState icon={<Icon.Share size={28} />} title="Nothing shared yet" subtitle="Create share links from any file to see them listed here." />;
-  }
-  const copy = async (s: Share) => {
-    const url = `${window.location.origin}/s/${s.id}`;
-    const ok = await copyText(url);
-    toast(ok ? 'Link copied' : 'Copy failed', ok ? 'success' : 'error');
-  };
-  return (
-    <div className="card !p-0 overflow-hidden divide-y divide-white/[0.04]">
-      {shares.map(s => (
-        <div key={s.id} className="flex items-center gap-3 px-3 sm:px-4 py-3 hover:bg-white/[0.03] transition-colors">
-          <span className="w-9 h-9 rounded-lg bg-brand-500/15 text-brand-300 grid place-items-center shrink-0"><Icon.Link size={17} /></span>
-          <div className="min-w-0 flex-1 cursor-pointer" onClick={() => onOpen(s.path)}>
-            <p className="text-sm text-white truncate">{s.name}</p>
-            <p className="text-xs muted truncate">{s.path}</p>
-            <div className="flex sm:hidden items-center gap-1.5 flex-wrap mt-1">
-              <Badge color="cyan">{s.permission}</Badge>
-              {s.hasPassword && <Badge color="amber">password</Badge>}
-              {s.expiresAt && <Badge color="slate">expires {formatDate(s.expiresAt)}</Badge>}
-            </div>
-          </div>
-          <div className="hidden sm:flex items-center gap-2">
-            <Badge color="cyan">{s.permission}</Badge>
-            {s.hasPassword && <Badge color="amber">password</Badge>}
-            {s.expiresAt && <Badge color="slate">expires {formatDate(s.expiresAt)}</Badge>}
-          </div>
-          <button className="btn-secondary !py-1.5 !px-2.5 shrink-0" onClick={() => copy(s)} title="Copy link"><Icon.Copy size={14} /> <span className="hidden sm:inline">Copy</span></button>
-          <button className="icon-btn text-accent-red hover:bg-accent-red/10 shrink-0" onClick={() => onRevoke(s.id)} title="Revoke"><Icon.Trash size={16} /></button>
-        </div>
-      ))}
     </div>
   );
 }
@@ -1206,7 +1394,7 @@ function SharedView({ shares, onRevoke, onOpen }: { shares: Share[]; onRevoke: (
 // ---------------------------------------------------------------------------
 
 function TrashView({ items, onRestore, onPurge, onEmpty }:
-  { items: any[]; onRestore: (id: string) => void; onPurge: (id?: string) => void; onEmpty: () => void }) {
+  { items: any[]; onRestore: (id: string) => void; onPurge: (item: any) => void; onEmpty: () => void }) {
   if (items.length === 0) {
     return <EmptyState icon={<Icon.Trash size={28} />} title="Trash is empty" subtitle="Deleted files land here and can be restored." />;
   }
@@ -1228,7 +1416,8 @@ function TrashView({ items, onRestore, onPurge, onEmpty }:
               </div>
               {it.size != null && <span className="text-xs muted hidden sm:block">{formatBytes(it.size)}</span>}
               <button className="btn-secondary !py-1.5" onClick={() => onRestore(it.id)}><Icon.Refresh size={14} /> Restore</button>
-              <button className="icon-btn text-accent-red hover:bg-accent-red/10" onClick={() => onPurge(it.id)}><Icon.Trash size={16} /></button>
+              <button className="icon-btn text-accent-red hover:bg-accent-red/10" aria-label={`Permanently delete ${it.name}`}
+                onClick={() => onPurge(it)}><Icon.Trash size={16} /></button>
             </div>
           );
         })}

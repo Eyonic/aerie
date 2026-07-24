@@ -1,5 +1,6 @@
 package org.aerie.app;
 
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -28,6 +29,11 @@ import java.net.URL;
  * reflects its state and forwards control taps back into the page. A WebView on
  * its own never surfaces web audio to the OS — that's why this exists.
  */
+// Android Auto binds CarMediaService, which implements onPlayFromSearch. This
+// separate, non-exported session only mirrors WebView playback on the phone;
+// lint otherwise mistakes every MediaSession.Callback in a car-enabled APK for
+// the callback exposed to the vehicle.
+@SuppressLint("MissingOnPlayFromSearch")
 public class MediaService extends Service {
 
     // Derived from the applicationId so forks/rebrands never collide.

@@ -4,6 +4,11 @@
 
 :root {
   color-scheme: dark;
+  /* viewport-fit=cover lets the app paint behind mobile system UI. Keep the
+     insets centralized so each edge is consumed exactly once. Browsers without
+     a cutout/home indicator resolve these variables to zero. */
+  --aerie-safe-top: env(safe-area-inset-top, 0px);
+  --aerie-safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 html.cb-compact { font-size: 14px; }
@@ -16,8 +21,36 @@ html.cb-high-contrast { color-scheme: dark; }
 html.cb-high-contrast .glass, html.cb-high-contrast .glass-strong, html.cb-high-contrast .card { border-color: rgba(255,255,255,.28) !important; }
 html.cb-high-contrast .muted { color: #cbd5e1 !important; }
 :focus-visible { outline: 3px solid #818cf8 !important; outline-offset: 3px; }
-.skip-link { position: fixed; left: 1rem; top: .5rem; z-index: 1000; transform: translateY(-150%); background: #fff; color: #000; padding: .65rem 1rem; border-radius: .65rem; font-weight: 700; }
+.skip-link { position: fixed; left: 1rem; top: calc(.5rem + var(--aerie-safe-top)); z-index: 1000; transform: translateY(-150%); background: #fff; color: #000; padding: .65rem 1rem; border-radius: .65rem; font-weight: 700; }
 .skip-link:focus { transform: translateY(0); }
+
+/* Use the dynamic viewport when available so mobile browser chrome resizing
+   cannot push the bottom navigation off-screen. The 100% declaration is the
+   fallback for older embedded browsers. */
+.aerie-app-shell {
+  height: 100%;
+  height: 100dvh;
+}
+
+/* The banner/header column owns the top inset. Keeping it on the shared frame
+   means an optional banner and the always-visible header cannot overlap the
+   status bar, while the header retains its normal 4rem height. */
+.aerie-safe-top-frame {
+  padding-top: var(--aerie-safe-top);
+}
+
+/* The mobile drawer is viewport-fixed, so it needs safe bounds independently
+   of the content column. On desktop it is static and these offsets are inert. */
+.aerie-sidebar {
+  top: var(--aerie-safe-top);
+  bottom: var(--aerie-safe-bottom);
+}
+
+/* This is the sole owner of the bottom inset in the standard mobile layout.
+   env(...) is zero in ordinary browsers, so the existing tab height is unchanged. */
+.aerie-bottom-nav {
+  padding-bottom: var(--aerie-safe-bottom);
+}
 
 @layer base {
   body {
@@ -64,7 +97,7 @@ html.cb-high-contrast .muted { color: #cbd5e1 !important; }
     @apply btn bg-accent-red/90 text-white hover:bg-accent-red;
   }
   .icon-btn {
-    @apply grid place-items-center rounded-lg w-9 h-9 text-slate-400 hover:text-white hover:bg-white/[0.07] transition-colors;
+    @apply grid place-items-center rounded-lg w-9 h-9 text-slate-400 hover:text-white hover:bg-white/[0.07] transition-colors disabled:opacity-30 disabled:pointer-events-none;
   }
 
   .input {
@@ -115,4 +148,68 @@ input[type="range"].cb-range::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
   width: 13px; height: 13px; border-radius: 50%;
   background: #fff; box-shadow: 0 0 0 3px rgba(99,102,241,0.5);
+}
+input[type="range"].cb-range::-moz-range-track {
+  height: 4px; border-radius: 999px; background: transparent;
+}
+input[type="range"].cb-range::-moz-range-progress { background: transparent; }
+input[type="range"].cb-range::-moz-range-thumb {
+  width: 13px; height: 13px; border: 0; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 0 3px rgba(99,102,241,0.5);
+}
+
+/* Video timelines retain a slim 6px visual rail, while the transparent native
+   range control spans the recommended 44px touch target around it. */
+input[type="range"].aerie-video-seek {
+  -webkit-appearance: none; appearance: none;
+  height: 44px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"].aerie-video-seek:focus-visible { outline: none !important; }
+input[type="range"].aerie-video-seek::-webkit-slider-runnable-track {
+  height: 6px;
+  background: transparent;
+}
+input[type="range"].aerie-video-seek::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; margin-top: -5px;
+  border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 5px rgba(0,0,0,.45);
+}
+input[type="range"].aerie-video-seek:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgba(129,140,248,.6), 0 1px 5px rgba(0,0,0,.45);
+}
+input[type="range"].aerie-video-seek::-moz-range-track {
+  height: 6px;
+  background: transparent;
+}
+input[type="range"].aerie-video-seek::-moz-range-progress { background: transparent; }
+input[type="range"].aerie-video-seek::-moz-range-thumb {
+  width: 16px; height: 16px;
+  border: 0; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 5px rgba(0,0,0,.45);
+}
+input[type="range"].aerie-video-seek:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px rgba(129,140,248,.6), 0 1px 5px rgba(0,0,0,.45);
+}
+
+@media (pointer: coarse) {
+  input[type="range"].aerie-video-seek::-webkit-slider-thumb {
+    width: 20px; height: 20px; margin-top: -7px;
+  }
+  input[type="range"].aerie-video-seek::-moz-range-thumb { width: 20px; height: 20px; }
+}
+
+@media (max-width: 639px) {
+  /* Preserve a slim timeline while giving touch users a forgiving vertical hit
+     area and thumb. Desktop keeps the compact player geometry. */
+  input[type="range"].aerie-player-seek {
+    height: 28px;
+    background-size: 100% 4px !important;
+    background-repeat: no-repeat !important;
+    background-position: center !important;
+  }
+  input[type="range"].aerie-player-seek::-webkit-slider-thumb { width: 20px; height: 20px; }
+  input[type="range"].aerie-player-seek::-moz-range-thumb { width: 20px; height: 20px; }
 }

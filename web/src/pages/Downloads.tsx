@@ -21,8 +21,13 @@ export default function Downloads() {
   useEffect(() => {
     load();
     const on = () => setOnline(true), off = () => setOnline(false);
+    const unsubscribe = downloads.onChange(load);
     window.addEventListener('online', on); window.addEventListener('offline', off);
-    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+    return () => {
+      unsubscribe();
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
   }, []);
 
   const play = (d: DownloadMeta, queue: DownloadMeta[]) => {
@@ -58,7 +63,7 @@ export default function Downloads() {
           {items.map(d => (
             <div key={d.id} className="flex items-center gap-3 px-4 py-3 hover:bg-white/[0.03] transition-colors">
               <div className="w-11 h-11 rounded-lg bg-ink-700 overflow-hidden shrink-0 grid place-items-center text-slate-400">
-                {d.artUrl ? <img src={d.artUrl} className="w-full h-full object-cover" /> : KIND_ICON[d.kind]}
+                {d.artUrl ? <img src={api.url(d.artUrl)} alt="" className="w-full h-full object-cover" /> : KIND_ICON[d.kind]}
               </div>
               <button onClick={() => play(d, items)} className="min-w-0 flex-1 text-left group">
                 <p className="text-sm font-medium text-white truncate group-hover:text-brand-300">{d.title}</p>
@@ -74,7 +79,7 @@ export default function Downloads() {
 
       <ConfirmModal open={!!del} onClose={() => setDel(null)} onConfirm={() => del && remove(del)} danger
         title="Remove download?" message={`"${del?.title}" will be removed from this device. You can download it again anytime.`} confirmLabel="Remove" />
-      {video && <div className="fixed inset-0 z-[300] bg-black flex flex-col"><div className="h-16 flex items-center px-3 gap-3"><button className="icon-btn" onClick={() => setVideo(null)}><Icon.Close size={20} /></button><p className="text-white truncate">{video.title}</p></div><video src={video.url} controls autoPlay playsInline className="flex-1 w-full min-h-0 object-contain" /></div>}
+      {video && <div className="fixed inset-0 z-[300] bg-black flex flex-col"><div className="h-16 flex items-center px-3 gap-3"><button className="icon-btn" onClick={() => setVideo(null)}><Icon.Close size={20} /></button><p className="text-white truncate">{video.title}</p></div><video src={api.url(video.url)} controls autoPlay playsInline className="flex-1 w-full min-h-0 object-contain" /></div>}
     </div>
   );
 }

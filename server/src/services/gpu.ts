@@ -3,6 +3,7 @@
 // at the same time — this serializes them with a FIFO mutex. The LLM is DeepSeek
 // (cloud), so it never touches the GPU and needs no coordination here.
 import { config } from '../config.js';
+import { outboundVoid } from './outbound-http.js';
 
 const comfy = config.sd.url.replace(/\/$/, '');
 export type GpuKind = 'image' | 'music';
@@ -25,10 +26,10 @@ function release() { active = null; pump(); }
 // Done before a music job so ACE-Step's model can fit in memory.
 export async function freeImageVram(): Promise<void> {
   try {
-    await fetch(`${comfy}/free`, {
+    await outboundVoid(`${comfy}/free`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ unload_models: true, free_memory: true }),
-      signal: AbortSignal.timeout(10000),
+      timeoutMs: 10_000,
     });
     await new Promise(r => setTimeout(r, 1500)); // let the driver reclaim
   } catch { /* best-effort */ }

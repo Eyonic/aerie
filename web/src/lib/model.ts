@@ -29,6 +29,7 @@ export interface User {
   storageQuotaBytes: number | null; // null = unlimited
   aiMode: AiMode;
   features?: UserFeatures;
+  disabledAt: string | null;
   createdAt: string;
 }
 
@@ -37,6 +38,46 @@ export type AiMode = 'local_only' | 'ask_before_send' | 'external_allowed' | 'di
 export interface AuthResponse {
   token: string;
   user: User;
+}
+
+export interface HouseholdInvite {
+  id: string;
+  displayName: string;
+  email: string | null;
+  role: Role;
+  storageQuotaBytes: number | null;
+  aiMode: AiMode;
+  features: UserFeatures;
+  createdAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  revokedAt: string | null;
+  usedByUsername: string | null;
+  status: 'active' | 'used' | 'revoked' | 'expired';
+}
+
+export interface AppCapabilities {
+  mediaLibrary: boolean;
+  audiobookLibrary: boolean;
+  mediaRequests: boolean;
+  musicRequests: boolean;
+  assistant: boolean;
+  imageGeneration: boolean;
+  musicGeneration: boolean;
+  transcription: boolean;
+}
+
+export type TranslationProvider = 'local' | 'external';
+export interface TranslationPreferences {
+  provider: TranslationProvider;
+  languages: string[];
+}
+export interface TranslationCapabilities {
+  localConfigured: boolean;
+  localName: string;
+  externalConfigured: boolean;
+  externalAllowed: boolean;
+  externalName: string;
 }
 
 // ---------- Files ----------
@@ -77,7 +118,7 @@ export interface StorageUsage {
 // ---------- Media (Jellyfin-backed) ----------
 export interface MediaItem {
   id: string;
-  type: 'Movie' | 'Series' | 'Season' | 'Episode' | 'Audio' | 'MusicAlbum' | 'MusicArtist';
+  type: 'Movie' | 'Series' | 'Season' | 'Episode' | 'Video' | 'Audio' | 'MusicAlbum' | 'MusicArtist';
   name: string;
   overview?: string;
   year?: number;
@@ -96,6 +137,13 @@ export interface MediaItem {
   episodeNumber?: number;
   albumArtist?: string;
   album?: string;
+  albumId?: string;
+  replayGain?: {
+    trackDb?: number;
+    albumDb?: number;
+    trackPeak?: number;
+    albumPeak?: number;
+  };
   genres?: string[];
   communityRating?: number;
 }
@@ -139,6 +187,39 @@ export interface NativePhoto {
   camera: string | null;
   lat: number | null;
   lon: number | null;
+  favorite: boolean;
+}
+
+export interface PhotoAlbum {
+  id: string;
+  name: string;
+  description: string;
+  coverPath: string | null;
+  itemCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PhotoAlbumPerson {
+  id: number;
+  username: string;
+  displayName: string;
+  avatarColor: string;
+}
+
+export interface PhotoAlbumShare {
+  id: string;
+  albumId: string;
+  permission: 'viewer';
+  createdAt: string;
+  recipient: PhotoAlbumPerson & { active: boolean };
+}
+
+export interface SharedPhotoAlbum extends PhotoAlbum {
+  shareId: string;
+  permission: 'viewer';
+  sharedAt: string;
+  owner: PhotoAlbumPerson;
 }
 
 // ---------- Audiobooks / Podcasts (Audiobookshelf-backed) ----------
@@ -159,7 +240,6 @@ export interface MusicRequest {
   posterUrl?: string;
   status: 'requested' | 'downloading' | 'available' | 'removed';
   percent: number;
-  requestedBy?: string;
   createdAt?: string;
 }
 
@@ -247,6 +327,28 @@ export interface Share {
   createdAt: string;
 }
 
+export type AccountSharePermission = 'viewer' | 'editor';
+export interface AccountSharePerson {
+  id: number;
+  username: string;
+  displayName: string;
+  avatarColor: string;
+  active?: boolean;
+}
+export interface AccountShare {
+  id: string;
+  name: string;
+  permission: AccountSharePermission;
+  isFolder: boolean | null;
+  sizeBytes: number | null;
+  available: boolean;
+  createdAt: string;
+  updatedAt: string;
+  owner?: AccountSharePerson;
+  recipient?: AccountSharePerson;
+  rootPath?: string;
+}
+
 // ---------- Admin / Monitoring ----------
 export interface ServiceStatus {
   key: string;
@@ -279,6 +381,16 @@ export interface BackupStatus {
   sizeBytes?: number;
   nextRun?: string | null;
   note?: string;
+}
+
+export interface BackupConfiguration {
+  retention: number;
+  nightly: {
+    enabled: boolean;
+    localTime: string;
+    timeZone: string;
+    nextRunAt: string | null;
+  };
 }
 
 export interface AuditEvent {
@@ -345,8 +457,11 @@ export interface DashboardData {
 export interface SearchResult {
   id: string;
   kind: string;        // 'file' | 'photo' | 'movie' | 'song' | 'book' | ...
+  fileKind?: FileKind;
   title: string;
   subtitle?: string;
+  snippet?: string;
+  match?: 'name' | 'content' | 'name-content';
   thumbUrl?: string;
   link: string;        // in-app route
 }
@@ -354,4 +469,14 @@ export interface SearchResult {
 export interface SearchResponse {
   query: string;
   groups: { kind: string; label: string; results: SearchResult[] }[];
+  contentIndex?: {
+    ready: boolean;
+    refreshing: boolean;
+    stale: boolean;
+    indexedCount: number;
+    skippedCount: number;
+    truncatedCount: number;
+    indexedChars: number;
+    completedAtMs: number;
+  };
 }

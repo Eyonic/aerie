@@ -7,13 +7,22 @@ import { db, notify } from '../lib/db.js';
 import * as jf from './jellyfin.js';
 import * as whisper from './whisper.js';
 import { instruct } from './ai.js';
+import { rowToUser } from '../lib/auth.js';
+import * as writes from './storage-write.js';
+import { assertFileAllowed } from './policy.js';
+import { isUsableTranscript } from '../lib/transcript.js';
+import { mediaBytes } from './media-proxy.js';
+import { assertContentFeature, assertJellyfinItemFeature, type JellyfinContentFeature } from './content-access.js';
+import {
+  assertTranslationProviderAllowed, languageName, type TranslationProvider,
+} from './translation-preferences.js';
 
 export type SubtitleSource = { type: 'jf'; mediaSourceId: string; index: number } | { type: 'custom'; id: string };
 type Cue = { start: number; end: number; text: string };
 type JobTask = { id: string; userId: number; run: (jobId: string) => Promise<string> };
 type JobPayload =
   | { kind: 'generate'; itemId: string }
-  | { kind: 'translate'; itemId: string; source: SubtitleSource; targetLang: string }
+  | { kind: 'translate'; itemId: string; source: SubtitleSource; targetLang: string; provider?: TranslationProvider }
   | { kind: 'sync'; itemId: string; source: SubtitleSource };
 
 const queue: JobTask[] = [];
@@ -29,20 +38,53 @@ const fmt = (s: number) => {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
 };
 
-export function list(itemId: string) {
-  return db.prepare('SELECT id,lang,label,origin,created_at createdAt FROM subtitles WHERE item_id=? ORDER BY created_at DESC').all(itemId);
+export function list(itemId: string, userId: number) {
+  return db.prepare(`SELECT id,lang,label,origin,created_at createdAt FROM subtitles
+    WHERE item_id=? AND created_by=? ORDER BY created_at DESC`).all(itemId, userId);
 }
 
-function insertSubtitle(itemId: string, lang: string, label: string, origin: string, userId: number, vtt: string) {
+export async function authorizeSubtitleItem(userId: number, itemId: string): Promise<JellyfinContentFeature> {
+  const row = db.prepare('SELECT * FROM users WHERE id=? AND disabled_at IS NULL').get(userId) as any;
+  if (!row) throw Object.assign(new Error('account_deactivated'), { status: 403 });
+  const item = await jf.itemDetail(itemId);
+  return assertJellyfinItemFeature(rowToUser(row), item);
+}
+
+function assertSubtitleFeatureStillEnabled(userId: number, feature: JellyfinContentFeature): void {
+  const row = db.prepare('SELECT * FROM users WHERE id=? AND disabled_at IS NULL').get(userId) as any;
+  if (!row) throw new Error('job_cancelled');
+  assertContentFeature(rowToUser(row), feature);
+}
+
+async function insertSubtitle(itemId: string, lang: string, label: string, origin: string, userId: number, vtt: string,
+  feature: JellyfinContentFeature) {
   const id = uid('sub');
   const filename = `${id}.vtt`;
-  fs.writeFileSync(full(filename), vtt);
-  db.prepare('INSERT INTO subtitles (id,item_id,lang,label,origin,filename,created_by) VALUES (?,?,?,?,?,?,?)')
-    .run(id, itemId, lang || 'und', label, origin, filename, userId);
-  return { id, lang: lang || 'und', label, origin, createdAt: now() };
+  const bytes = Buffer.from(vtt);
+  assertFileAllowed(filename, bytes.length);
+  const row = db.prepare('SELECT * FROM users WHERE id=? AND disabled_at IS NULL').get(userId);
+  if (!row) throw new Error('user_not_found');
+  assertContentFeature(rowToUser(row), feature);
+  const reservation = await writes.reserveStorage(rowToUser(row), bytes.length);
+  const destination = full(filename);
+  const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.promises.writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 });
+    await fs.promises.rename(temporary, destination);
+    db.prepare('INSERT INTO subtitles (id,item_id,lang,label,origin,filename,created_by) VALUES (?,?,?,?,?,?,?)')
+      .run(id, itemId, lang || 'und', label, origin, filename, userId);
+    return { id, lang: lang || 'und', label, origin, createdAt: now() };
+  } catch (error) {
+    await fs.promises.rm(temporary, { force: true }).catch(() => {});
+    await fs.promises.rm(destination, { force: true }).catch(() => {});
+    throw error;
+  } finally { writes.releaseStorage(reservation); }
 }
 
 function enqueue(userId: number, prompt: string, payload: JobPayload, run: (jobId: string) => Promise<string>) {
+  const pending = db.prepare("SELECT COUNT(*) count FROM jobs WHERE user_id=? AND type='subtitles' AND status IN ('queued','running')")
+    .get(userId) as any;
+  if (Number(pending?.count || 0) >= 5) throw Object.assign(new Error('too_many_active_subtitle_jobs'), { status: 429 });
   const id = uid('job');
   db.prepare('INSERT INTO jobs (id,user_id,type,status,prompt,payload,progress) VALUES (?,?,?,?,?,?,0)')
     .run(id, userId, 'subtitles', 'queued', prompt, JSON.stringify(payload));
@@ -56,27 +98,42 @@ async function drain() {
   const task = queue.shift();
   if (!task) return;
   active = true;
-  db.prepare("UPDATE jobs SET status='running', progress=0 WHERE id=?").run(task.id);
+  const claimed = db.prepare(`UPDATE jobs SET status='running', progress=0 WHERE id=? AND status='queued' AND EXISTS
+    (SELECT 1 FROM users WHERE id=jobs.user_id AND disabled_at IS NULL)`).run(task.id);
+  if (!claimed.changes) { active = false; drain(); return; }
   try {
     const sid = await task.run(task.id);
-    db.prepare("UPDATE jobs SET status='done', progress=1, result_urls=?, finished_at=datetime('now') WHERE id=?").run(JSON.stringify([sid]), task.id);
-    notify(task.userId, 'Subtitles ready', 'AI subtitle job finished.', 'success');
+    const completed = db.prepare(`UPDATE jobs SET status='done', progress=1, result_urls=?, finished_at=datetime('now')
+      WHERE id=? AND status='running' AND EXISTS
+        (SELECT 1 FROM users WHERE id=jobs.user_id AND disabled_at IS NULL)`).run(JSON.stringify([sid]), task.id);
+    if (completed.changes) notify(task.userId, 'Subtitles ready', 'AI subtitle job finished.', 'success');
   } catch (e: any) {
     const msg = String(e?.message || 'subtitle job failed');
-    db.prepare("UPDATE jobs SET status='error', error=?, finished_at=datetime('now') WHERE id=?").run(msg, task.id);
-    notify(task.userId, 'Subtitle job failed', msg, 'error');
+    const failed = db.prepare("UPDATE jobs SET status='error', error=?, finished_at=datetime('now') WHERE id=? AND status='running'")
+      .run(msg, task.id);
+    if (failed.changes) notify(task.userId, 'Subtitle job failed', msg, 'error');
   } finally {
     active = false;
     drain();
   }
 }
 
-function progress(id: string, p: number) {
-  db.prepare('UPDATE jobs SET progress=? WHERE id=?').run(Math.max(0, Math.min(0.99, p)), id);
+function progress(id: string, p: number, feature: JellyfinContentFeature) {
+  const owner = db.prepare(`SELECT u.* FROM jobs j JOIN users u ON u.id=j.user_id
+    WHERE j.id=? AND j.status='running' AND u.disabled_at IS NULL`).get(id) as any;
+  if (!owner) throw new Error('job_cancelled');
+  assertContentFeature(rowToUser(owner), feature);
+  const updated = db.prepare(`UPDATE jobs SET progress=? WHERE id=? AND status='running' AND EXISTS
+    (SELECT 1 FROM users WHERE id=jobs.user_id AND disabled_at IS NULL)`)
+    .run(Math.max(0, Math.min(0.99, p)), id);
+  if (!updated.changes) throw new Error('job_cancelled');
 }
 
 export async function resolveMediaPath(itemId: string): Promise<string> {
   const p = await jf.itemPath(itemId).catch(() => '');
+  const exists = async (candidate: string) => {
+    try { await fs.promises.access(candidate); return true; } catch { return false; }
+  };
   // Jellyfin reports paths as ITS container sees them; MEDIA_PATH_MAP
   // ("/data/movies=/media/Films,...") translates known prefixes to ours.
   for (const pair of config.mediaPathMap.split(',')) {
@@ -85,13 +142,13 @@ export async function resolveMediaPath(itemId: string): Promise<string> {
     const from = pair.slice(0, eq).trim(), to = pair.slice(eq + 1).trim();
     if (from && to && p.startsWith(from)) {
       const candidate = path.join(to, p.slice(from.length));
-      if (fs.existsSync(candidate)) return candidate;
+      if (await exists(candidate)) return candidate;
     }
   }
   const parts = p.split(/[\\/]+/).filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
     const candidate = path.join(config.mediaRoot, ...parts.slice(i));
-    if (fs.existsSync(candidate)) return candidate;
+    if (await exists(candidate)) return candidate;
   }
   return jf.directVideoStreamUrl(itemId);
 }
@@ -119,9 +176,10 @@ function rms(frame: Buffer) {
   return Math.sqrt(sum / Math.max(1, frame.length / 2));
 }
 
-function garbage(text: string) {
-  const t = text.trim();
-  return !t || !/[A-Za-z0-9\u00C0-\u017E]/.test(t) || /^[\s.,!?;:'"()[\]-]+$/.test(t);
+function canonicalDetectedLanguage(value: unknown): string | undefined {
+  const raw = String(value || '').trim().replace(/_/g, '-');
+  if (!raw || raw.length > 35 || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(raw)) return undefined;
+  try { return Intl.getCanonicalLocales(raw)[0]; } catch { return undefined; }
 }
 
 function splitText(text: string) {
@@ -171,12 +229,14 @@ function toVtt(cues: Cue[]) {
 }
 
 async function generate(jobId: string, itemId: string, userId: number) {
+  const feature = await authorizeSubtitleItem(userId, itemId);
   const src = await resolveMediaPath(itemId);
-  progress(jobId, 0.01);
+  progress(jobId, 0.01, feature);
   const dur = await durationSec(itemId, src);
-  progress(jobId, 0.02);
+  progress(jobId, 0.02, feature);
   const proc = ffmpegPcm(src);
   const cues: Cue[] = [];
+  const detectedLanguages = new Map<string, number>();
   let carry = Buffer.alloc(0), frames: { b: Buffer; r: number; t: number }[] = [], frameNo = 0;
   const cut = async (take: number) => {
     const seg = frames.splice(0, take);
@@ -185,12 +245,24 @@ async function generate(jobId: string, itemId: string, userId: number) {
     if (avg < 0.004) return;
     // One flaky Whisper roundtrip must not kill a 2h job: retry once, then skip the segment.
     let text = '';
+    let detectedLanguage: string | undefined;
     for (let attempt = 0; attempt < 2 && !text; attempt++) {
-      try { text = (await whisper.transcribe(Buffer.concat(seg.map(f => f.b)), 'en')).trim(); }
+      try {
+        const transcript = await whisper.transcribeWithMetadata(Buffer.concat(seg.map(f => f.b)));
+        text = transcript.text.trim();
+        if (transcript.language) {
+          detectedLanguage = canonicalDetectedLanguage(transcript.language);
+        }
+      }
       catch { if (attempt) return; }
     }
-    if (!garbage(text)) cues.push(...cuesForSegment(start, end, text));
-    if (dur) progress(jobId, 0.02 + (end / dur) * 0.96);
+    if (isUsableTranscript(text)) {
+      cues.push(...cuesForSegment(start, end, text));
+      if (detectedLanguage) {
+        detectedLanguages.set(detectedLanguage, (detectedLanguages.get(detectedLanguage) || 0) + Math.max(0.02, end - start));
+      }
+    }
+    if (dur) progress(jobId, 0.02 + (end / dur) * 0.96, feature);
   };
   for await (const chunk of proc.stdout) {
     carry = Buffer.concat([carry, chunk as Buffer]);
@@ -211,8 +283,10 @@ async function generate(jobId: string, itemId: string, userId: number) {
   if (frames.length >= 50) await cut(frames.length);
   if (proc.exitCode && proc.exitCode !== 0) throw new Error('ffmpeg failed');
   if (!cues.length) throw new Error('no speech detected in the audio');
-  progress(jobId, 0.99);
-  const row = insertSubtitle(itemId, 'en', 'English (AI)', 'generated', userId, toVtt(cues));
+  progress(jobId, 0.99, feature);
+  const detectedLanguage = [...detectedLanguages.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'und';
+  const label = detectedLanguage === 'und' ? 'Auto-detected (AI)' : `${languageName(detectedLanguage)} (AI)`;
+  const row = await insertSubtitle(itemId, detectedLanguage, label, 'generated', userId, toVtt(cues), feature);
   return row.id;
 }
 
@@ -243,22 +317,21 @@ export function parseSubs(text: string): Cue[] {
   return cues;
 }
 
-async function sourceBytes(itemId: string, source: SubtitleSource): Promise<{ bytes: Buffer; lang: string; label: string }> {
+async function sourceBytes(itemId: string, source: SubtitleSource, userId: number): Promise<{ bytes: Buffer; lang: string; label: string }> {
   if (source.type === 'custom') {
-    const row = db.prepare('SELECT * FROM subtitles WHERE id=?').get(source.id) as any;
+    const row = db.prepare('SELECT * FROM subtitles WHERE id=? AND item_id=? AND created_by=?').get(source.id, itemId, userId) as any;
     if (!row) throw new Error('subtitle not found');
-    return { bytes: fs.readFileSync(full(row.filename)), lang: row.lang, label: row.label };
+    const filename = full(row.filename);
+    const stat = await fs.promises.stat(filename);
+    if (stat.size > 16 * 1024 * 1024) throw new Error('source subtitle too large');
+    return { bytes: await fs.promises.readFile(filename), lang: row.lang, label: row.label };
   }
   const streams = await jf.mediaStreams(itemId);
   const st = streams.subtitles.find((s: any) => Number(s.index) === Number(source.index));
-  const up = await fetch(jf.directSubtitleUrl(itemId, source.mediaSourceId, Number(source.index)));
-  if (!up.ok) throw new Error('source subtitle unavailable');
-  return { bytes: Buffer.from(await up.arrayBuffer()), lang: st?.lang || 'und', label: st?.name || st?.lang || `Subtitle ${source.index}` };
-}
-
-function languageName(code: string) {
-  const m: Record<string, string> = { en: 'English', nl: 'Dutch', de: 'German', fr: 'French', es: 'Spanish', it: 'Italian', pt: 'Portuguese', cs: 'Czech', da: 'Danish', sv: 'Swedish', no: 'Norwegian', pl: 'Polish' };
-  return m[String(code || '').toLowerCase()] || code;
+  const up = await mediaBytes(jf.directSubtitleUrl(itemId, source.mediaSourceId, Number(source.index)), jf.jellyfinBase(),
+    { timeoutMs: 20_000, maxBytes: 16 * 1024 * 1024, requireOk: false });
+  if (up.status < 200 || up.status >= 300) throw new Error('source subtitle unavailable');
+  return { bytes: up.body, lang: st?.lang || 'und', label: st?.name || st?.lang || `Subtitle ${source.index}` };
 }
 
 function extractJson(text: string) {
@@ -267,36 +340,43 @@ function extractJson(text: string) {
   return JSON.parse(s.slice(a, b + 1));
 }
 
-async function translateBatch(batch: { i: number; text: string }[], lang: string) {
-  const sys = `You are a professional subtitle translator into ${lang}. Keep meaning, natural colloquial phrasing, keep line breaks (\\n) inside text, do NOT translate names, return ONLY the same JSON shape.`;
+async function translateBatch(batch: { i: number; text: string }[], lang: string, provider: TranslationProvider) {
+  const sys = `You are a professional subtitle translator. Translate every subtitle into ${languageName(lang)} (${lang}). Keep meaning, natural colloquial phrasing, line breaks (\\n), and names. Return ONLY the same JSON shape.`;
+  let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const out = await instruct(sys, JSON.stringify(batch), 0.2);
+      const out = await instruct(sys, JSON.stringify(batch), 0.2, { provider });
       const arr = extractJson(out);
       if (Array.isArray(arr) && arr.length === batch.length) return arr.map((x: any, i: number) => String(x?.text ?? batch[i].text));
-    } catch { /* retry once */ }
+      lastError = new Error('translation_response_invalid');
+    } catch (error) { lastError = error; }
   }
-  return batch.map(x => x.text);
+  throw Object.assign(new Error('subtitle_translation_failed'), { cause: lastError });
 }
 
-async function translate(jobId: string, itemId: string, source: SubtitleSource, targetLang: string, userId: number) {
-  const src = await sourceBytes(itemId, source);
-  progress(jobId, 0.02);
+async function translate(jobId: string, itemId: string, source: SubtitleSource, targetLang: string, userId: number,
+  requestedProvider: TranslationProvider) {
+  const feature = await authorizeSubtitleItem(userId, itemId);
+  const provider = assertTranslationProviderAllowed(userId, requestedProvider);
+  const src = await sourceBytes(itemId, source, userId);
+  progress(jobId, 0.02, feature);
   const cues = parseSubs(decodeSubtitle(src.bytes));
   const total = Math.max(1, Math.ceil(cues.length / 40));
   for (let b = 0; b < total; b++) {
     const slice = cues.slice(b * 40, b * 40 + 40).map((c, i) => ({ i, text: c.text }));
-    const translated = await translateBatch(slice, targetLang);
+    assertTranslationProviderAllowed(userId, provider);
+    const translated = await translateBatch(slice, targetLang, provider);
     translated.forEach((t, i) => { cues[b * 40 + i].text = t; });
-    progress(jobId, 0.05 + ((b + 1) / total) * 0.93);
+    progress(jobId, 0.05 + ((b + 1) / total) * 0.93, feature);
   }
-  progress(jobId, 0.99);
-  return insertSubtitle(itemId, targetLang, `${languageName(targetLang)} (AI)`, 'translated', userId, toVtt(cues)).id;
+  progress(jobId, 0.99, feature);
+  return (await insertSubtitle(itemId, targetLang, `${languageName(targetLang)} (AI)`, 'translated', userId, toVtt(cues), feature)).id;
 }
 
-export function translateSubtitles(itemId: string, source: SubtitleSource, targetLang: string | undefined, userId: number) {
-  const lang = targetLang || config.translateLang;
-  return enqueue(userId, `translate:${itemId}:${lang}`, { kind: 'translate', itemId, source, targetLang: lang }, jobId => translate(jobId, itemId, source, lang, userId));
+export function translateSubtitles(itemId: string, source: SubtitleSource, targetLang: string, userId: number,
+  provider: TranslationProvider) {
+  return enqueue(userId, `translate:${itemId}:${targetLang}`, { kind: 'translate', itemId, source, targetLang, provider },
+    jobId => translate(jobId, itemId, source, targetLang, userId, provider));
 }
 
 function audioChannels(src: string): Promise<number> {
@@ -316,7 +396,7 @@ function audioChannels(src: string): Promise<number> {
 //     (rolling 10 s minimum), which drops sustained score/ambience and leaves the
 //     dialogue onsets that track the subtitles. Validated against a known-aligned
 //     reference sub (peaks at offset 0) where a plain-energy envelope found noise.
-async function audioEnvelope(itemId: string, jobId: string) {
+async function audioEnvelope(itemId: string, jobId: string, feature: JellyfinContentFeature) {
   const src = await resolveMediaPath(itemId), dur = await durationSec(itemId, src);
   const ch = await audioChannels(src);
   const af = ch >= 3 ? ['-af', 'pan=mono|c0=FC'] : [];
@@ -327,7 +407,7 @@ async function audioEnvelope(itemId: string, jobId: string) {
     carry = Buffer.concat([carry, chunk as Buffer]);
     while (carry.length >= 640) {
       frame = Buffer.concat([frame, carry.subarray(0, 640)]); carry = carry.subarray(640);
-      if (frame.length >= 3200) { energy.push(rms(frame)); frame = Buffer.alloc(0); idx++; if (dur && idx % 50 === 0) progress(jobId, 0.05 + ((idx / 10) / dur) * 0.65); }
+      if (frame.length >= 3200) { energy.push(rms(frame)); frame = Buffer.alloc(0); idx++; if (dur && idx % 50 === 0) progress(jobId, 0.05 + ((idx / 10) / dur) * 0.65, feature); }
     }
   }
   const n = energy.length, half = 50; // 100-frame (10 s) rolling window
@@ -389,13 +469,14 @@ function correlate(a: number[], s: number[], from = 0, to = a.length) {
 const FPS_RATIOS = [1, 23.976 / 25, 25 / 23.976, 23.976 / 24, 24 / 23.976];
 
 async function sync(jobId: string, itemId: string, source: SubtitleSource, userId: number) {
-  const src = await sourceBytes(itemId, source);
-  progress(jobId, 0.02);
+  const feature = await authorizeSubtitleItem(userId, itemId);
+  const src = await sourceBytes(itemId, source, userId);
+  progress(jobId, 0.02, feature);
   const cues = parseSubs(decodeSubtitle(src.bytes));
   if (!cues.length) throw new Error('subtitle has no readable cues');
-  progress(jobId, 0.05);
-  const a = await audioEnvelope(itemId, jobId);
-  progress(jobId, 0.72);
+  progress(jobId, 0.05, feature);
+  const a = await audioEnvelope(itemId, jobId, feature);
+  progress(jobId, 0.72, feature);
   const maxEnd = Math.max(...cues.map(c => c.end), 0);
   const envFor = (ratio: number) => {
     const len = Math.max(a.length, Math.ceil(maxEnd * ratio * 10) + 1);
@@ -408,7 +489,7 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
     const { aP, s } = envFor(ratio);
     const r = correlate(aP, s);
     if (r.score - r.median > best.score - best.median) best = { ...r, ratio };
-    progress(jobId, 0.75 + ((index + 1) / FPS_RATIOS.length) * 0.17);
+    progress(jobId, 0.75 + ((index + 1) / FPS_RATIOS.length) * 0.17, feature);
   }
   // Energy↔subtitle correlation tops out around 0.1 even on a perfect match, so
   // gate on the peak's prominence over the landscape, not an absolute r.
@@ -418,7 +499,7 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
   const { aP, s } = envFor(best.ratio);
   const mid = Math.floor(a.length / 2);
   const h1 = correlate(aP, s, 0, mid), h2 = correlate(aP, s, mid, a.length);
-  progress(jobId, 0.96);
+  progress(jobId, 0.96, feature);
   const shifted = cues.map(c => ({ ...c }));
   // Residual drift after ratio scaling: if the two halves disagree by >2s and both
   // are confident, fit a line through their centres; otherwise a constant offset.
@@ -434,8 +515,8 @@ async function sync(jobId: string, itemId: string, source: SubtitleSource, userI
     const off = best.off / 10;
     shifted.forEach(c => { c.start = Math.max(0, c.start * best.ratio + off); c.end = Math.max(c.start + 0.1, c.end * best.ratio + off); });
   }
-  progress(jobId, 0.99);
-  return insertSubtitle(itemId, src.lang, `${src.label} (synced)`, 'synced', userId, toVtt(shifted)).id;
+  progress(jobId, 0.99, feature);
+  return (await insertSubtitle(itemId, src.lang, `${src.label} (synced)`, 'synced', userId, toVtt(shifted), feature)).id;
 }
 
 export function syncSubtitles(itemId: string, source: SubtitleSource, userId: number) {
@@ -484,7 +565,8 @@ function cleanText(t: string) {
 }
 
 export async function cleanSubtitles(itemId: string, source: SubtitleSource, userId: number) {
-  const src = await sourceBytes(itemId, source);
+  const feature = await authorizeSubtitleItem(userId, itemId);
+  const src = await sourceBytes(itemId, source, userId);
   const raw = parseSubs(decodeSubtitle(src.bytes)).map(c => ({ ...c, text: cleanText(c.text) })).filter(c => c.text);
   const cues: Cue[] = [];
   for (const c of raw) {
@@ -493,21 +575,25 @@ export async function cleanSubtitles(itemId: string, source: SubtitleSource, use
     else cues.push(c);
   }
   for (let i = 0; i < cues.length - 1; i++) if (cues[i].end > cues[i + 1].start) cues[i].end = cues[i + 1].start;
-  return insertSubtitle(itemId, src.lang, `${src.label} (cleaned)`, 'cleaned', userId, toVtt(cues.filter(c => c.end > c.start)));
+  assertSubtitleFeatureStillEnabled(userId, feature);
+  return insertSubtitle(itemId, src.lang, `${src.label} (cleaned)`, 'cleaned', userId, toVtt(cues.filter(c => c.end > c.start)), feature);
 }
 
 // Re-queue durable work left behind by a deploy. The operation restarts from
 // the beginning (safe and deterministic) instead of leaving a frozen progress
 // bar or requiring the user to notice and submit it again.
-function recoverJobs() {
-  const rows = db.prepare(`SELECT id,user_id userId,payload FROM jobs
-    WHERE type='subtitles' AND status IN ('queued','running') ORDER BY created_at,rowid`).all() as any[];
+export function recoverSubtitleJobs() {
+  const rows = db.prepare(`SELECT j.id,j.user_id userId,j.payload FROM jobs j JOIN users u ON u.id=j.user_id
+    WHERE j.type='subtitles' AND j.status IN ('queued','running') AND u.disabled_at IS NULL
+    ORDER BY j.created_at,j.rowid`).all() as any[];
   for (const row of rows) {
     try {
       const p = JSON.parse(String(row.payload || '')) as JobPayload;
       let run: ((jobId: string) => Promise<string>) | null = null;
       if (p.kind === 'generate' && p.itemId) run = id => generate(id, p.itemId, row.userId);
-      if (p.kind === 'translate' && p.itemId && p.source && p.targetLang) run = id => translate(id, p.itemId, p.source, p.targetLang, row.userId);
+      if (p.kind === 'translate' && p.itemId && p.source && p.targetLang) {
+        run = id => translate(id, p.itemId, p.source, p.targetLang, row.userId, p.provider === 'external' ? 'external' : 'local');
+      }
       if (p.kind === 'sync' && p.itemId && p.source) run = id => sync(id, p.itemId, p.source, row.userId);
       if (!run) throw new Error('invalid payload');
       db.prepare("UPDATE jobs SET status='queued',progress=0,error=NULL,finished_at=NULL WHERE id=?").run(row.id);
@@ -520,4 +606,4 @@ function recoverJobs() {
   drain();
 }
 
-recoverJobs();
+setTimeout(recoverSubtitleJobs, 0).unref();
